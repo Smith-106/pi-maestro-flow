@@ -75,6 +75,10 @@ pub struct Message {
     /// Length of `text` already rendered into the DOM (markdown/tool
     /// rebuilds compare against this to skip no-op work).
     pub rendered_len: usize,
+    /// App tick of the last structural re-render — streamed appends
+    /// throttle to `STREAM_RENDER_INTERVAL` ticks so a long markdown
+    /// message isn't re-parsed per delta (O(len²) per message).
+    pub last_render_tick: u64,
 }
 
 impl Message {
@@ -99,6 +103,7 @@ impl Message {
             sealed: false,
             dirty: false,
             rendered_len: 0,
+            last_render_tick: 0,
         }
     }
 }

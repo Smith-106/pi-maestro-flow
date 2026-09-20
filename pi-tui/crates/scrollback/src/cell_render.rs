@@ -106,10 +106,10 @@ pub struct PaintContext<'a> {
     pub glyph_set: GlyphSet,
     /// CSS px per cell (chisel-ui uses 1px = 1 cell).
     pub scale: f32,
-    /// Absolute-position overrides for hoisted (stacking-context)
-    /// children, keyed by node id — their DOM parent chain does not
-    /// reflect their paint position.
-    abs_override: HashMap<NodeId, (f32, f32)>,
+    /// Per-frame cache of resolved text styles by brush node id.
+    text_style_cache: HashMap<NodeId, CellStyle>,
+    /// Per-frame cache of `<a href>` lookups by brush node id.
+    link_cache: HashMap<NodeId, Option<Arc<str>>>,
     /// Reentrancy guard (RECON `+0x4c0` paint counter).
     active: HashSet<NodeId>,
 }
@@ -124,7 +124,8 @@ impl<'a> PaintContext<'a> {
             trunc_regions: Vec::new(),
             glyph_set: GlyphSet::Unicode,
             scale: 1.0,
-            abs_override: HashMap::new(),
+            text_style_cache: HashMap::new(),
+            link_cache: HashMap::new(),
             active: HashSet::new(),
         }
     }
@@ -138,15 +139,18 @@ impl<'a> PaintContext<'a> {
 /// Paint the whole document: entry point equivalent to the original's
 /// `render_cells`. Returns the painted root rect.
 pub fn paint_document(ctx: &mut PaintContext) -> Option<Rect> {
-    let root = ctx.doc.root_node().id;
+    let root = ctx.doc.root_node();
     let clip = ctx.full_clip();
-    paint_node(ctx, root, clip, &CellStyle::INHERIT)
+    let loc = root.final_layout().location;
+    paint_node(ctx, root.id, clip, &CellStyle::INHERIT, (loc.x, loc.y))
 }
 
 /// Paint one node (and its subtree) into the surface.
 ///
 /// * `clip` — cell rect outside which nothing is drawn.
 /// * `inherited` — the parent's already-merged `CellStyle`.
+/// * `abs_px` — the node's absolute position in CSS px, accumulated
+///   top-down by the caller (`parent_abs + location − parent_scroll`).
 ///
 /// Returns the node's border-box rect (pre-clip), or `None` when the
 /// node paints nothing (text/comment nodes, `display:none`, reentrant
@@ -156,12 +160,13 @@ pub fn paint_node(
     node_id: NodeId,
     clip: Rect,
     inherited: &CellStyle,
+    abs_px: (f32, f32),
 ) -> Option<Rect> {
     // Reentrancy guard: a node already on the paint stack is skipped.
     if !ctx.active.insert(node_id) {
         return None;
     }
-    let result = paint_node_inner(ctx, node_id, clip, inherited);
+    let result = paint_node_inner(ctx, node_id, clip, inherited, abs_px);
     ctx.active.remove(&node_id);
     result
 }
@@ -171,13 +176,14 @@ fn paint_node_inner(
     node_id: NodeId,
     clip: Rect,
     inherited: &CellStyle,
+    abs_px: (f32, f32),
 ) -> Option<Rect> {
     let node = ctx.doc.get_node(node_id)?;
 
     match &node.data {
         // Containers: just recurse into children.
         NodeData::Document(_) => {
-            paint_children(ctx, node, clip, inherited);
+            paint_children(ctx, node, abs_px, clip, inherited);
             return None;
         }
         // Text/comment nodes have no box of their own — their glyphs are
@@ -204,8 +210,9 @@ fn paint_node_inner(
     let own = resolve_cell_style(node);
     let merged = own.merge_inherited(inherited);
 
-    // Absolute cell rect: Σ ancestors (location − scroll_offset).
-    let (ax, ay) = abs_position(ctx, node);
+    // Absolute cell rect from the accumulated px position.
+    let ax = (abs_px.0 / ctx.scale).round() as i32;
+    let ay = (abs_px.1 / ctx.scale).round() as i32;
     let layout = node.final_layout();
     let w = (layout.size.width / ctx.scale).round() as i32;
     let h = (layout.size.height / ctx.scale).round() as i32;
@@ -213,7 +220,9 @@ fn paint_node_inner(
     let visible = rect.intersect(&clip);
 
     // Record data-hit-* / data-truncatable-* regions (visible part).
-    record_regions(ctx, node, visible);
+    if visible.is_non_empty() {
+        record_regions(ctx, node, visible);
+    }
 
     // Background fill: explicit bg, or positioned boxes clear their
     // rect (position:absolute|fixed paint over what is below).
@@ -230,11 +239,10 @@ fn paint_node_inner(
     paint_node_borders(ctx, node, &rect, &merged);
 
     // Content: <hr> rule, list marker, or inline text.
-    let tag = node
+    let is_hr = node
         .element_data()
-        .map(|e| e.name.local.to_string())
-        .unwrap_or_default();
-    if tag == "hr" {
+        .is_some_and(|e| e.name.local == local_name!("hr"));
+    if is_hr {
         paint_hr(ctx, &rect, &merged);
     } else {
         paint_inline_layout(ctx, node, &rect, clip, &merged);
@@ -256,25 +264,56 @@ fn paint_node_inner(
         clip
     };
 
-    paint_children(ctx, node, child_clip, &merged);
+    paint_children(ctx, node, abs_px, child_clip, &merged);
 
     Some(rect)
 }
 
 /// Paint children in CSS paint order: negative-z hoisted, then
 /// `paint_children` (z-sorted), then positive-z hoisted.
-fn paint_children(ctx: &mut PaintContext, node: &Node, clip: Rect, inherited: &CellStyle) {
-    let node_abs = abs_position(ctx, node);
+///
+/// `node_abs_px` is the parent's accumulated absolute position — each
+/// child's own absolute is `node_abs + location − scroll_offset`, so
+/// positions cost O(1) per node instead of an ancestor walk.
+fn paint_children(
+    ctx: &mut PaintContext,
+    node: &Node,
+    node_abs_px: (f32, f32),
+    clip: Rect,
+    inherited: &CellStyle,
+) {
+    let scroll = node.scroll_offset();
+    let child_abs = |id: NodeId| -> (f32, f32) {
+        let loc = ctx
+            .doc
+            .get_node(id)
+            .map(|n| n.final_layout().location)
+            .unwrap_or_default();
+        (
+            node_abs_px.0 + loc.x - scroll.x as f32,
+            node_abs_px.1 + loc.y - scroll.y as f32,
+        )
+    };
+    // Hoisted children position against the parent's rounded cell
+    // origin (matches the old abs_override behavior).
+    let node_abs_cells = (
+        (node_abs_px.0 / ctx.scale).round(),
+        (node_abs_px.1 / ctx.scale).round(),
+    );
+    let hoisted_abs = |pos: taffy::Point<f32>| -> (f32, f32) {
+        (node_abs_cells.0 + pos.x, node_abs_cells.1 + pos.y)
+    };
 
     // Negative z-index hoisted children paint first.
     if let Some(sc) = &node.stacking_context {
         for child in sc.neg_z_hoisted_children() {
-            ctx.abs_override.insert(
+            paint_node(
+                ctx,
                 child.node_id,
-                (node_abs.0 as f32 + child.position.x, node_abs.1 as f32 + child.position.y),
+                clip,
+                inherited,
+                hoisted_abs(child.position),
             );
-            paint_node(ctx, child.node_id, clip, inherited);
-            ctx.abs_override.remove(&child.node_id);
         }
     }
 
@@ -283,11 +322,11 @@ fn paint_children(ctx: &mut PaintContext, node: &Node, clip: Rect, inherited: &C
     let paint_list = node.paint_children.borrow();
     if let Some(children) = paint_list.as_ref() {
         for &child_id in children.iter() {
-            paint_node(ctx, child_id, clip, inherited);
+            paint_node(ctx, child_id, clip, inherited, child_abs(child_id));
         }
     } else {
         for &child_id in node.children.iter() {
-            paint_node(ctx, child_id, clip, inherited);
+            paint_node(ctx, child_id, clip, inherited, child_abs(child_id));
         }
     }
     drop(paint_list);
@@ -295,43 +334,15 @@ fn paint_children(ctx: &mut PaintContext, node: &Node, clip: Rect, inherited: &C
     // Positive z-index hoisted children paint last.
     if let Some(sc) = &node.stacking_context {
         for child in sc.pos_z_hoisted_children() {
-            ctx.abs_override.insert(
+            paint_node(
+                ctx,
                 child.node_id,
-                (node_abs.0 as f32 + child.position.x, node_abs.1 as f32 + child.position.y),
+                clip,
+                inherited,
+                hoisted_abs(child.position),
             );
-            paint_node(ctx, child.node_id, clip, inherited);
-            ctx.abs_override.remove(&child.node_id);
         }
     }
-}
-
-/// Absolute cell position of `node`: sum `location − scroll_offset`
-/// over the ancestor chain (hoisted nodes use their override).
-fn abs_position(ctx: &PaintContext, node: &Node) -> (i32, i32) {
-    if let Some(&(x, y)) = ctx.abs_override.get(&node.id) {
-        return (
-            (x / ctx.scale).round() as i32,
-            (y / ctx.scale).round() as i32,
-        );
-    }
-    let mut x = node.final_layout().location.x;
-    let mut y = node.final_layout().location.y;
-    let mut cur = node.parent;
-    while let Some(pid) = cur {
-        let Some(p) = ctx.doc.get_node(pid) else { break };
-        if let Some(&(ox, oy)) = ctx.abs_override.get(&pid) {
-            x += ox;
-            y += oy;
-            break;
-        }
-        x += p.final_layout().location.x - p.scroll_offset().x as f32;
-        y += p.final_layout().location.y - p.scroll_offset().y as f32;
-        cur = p.parent;
-    }
-    (
-        (x / ctx.scale).round() as i32,
-        (y / ctx.scale).round() as i32,
-    )
 }
 
 /// Resolve a node's stylo `ComputedValues` into a `CellStyle`.
@@ -633,9 +644,18 @@ fn paint_inline_layout(
             }
 
             // Style of the span that owns this run (TextBrush.id → node).
+            // Cached per frame — a span often owns several glyph runs.
             let brush_id: NodeId = gr.style().brush.id;
-            let span_style = resolve_text_style(ctx.doc, brush_id).merge_inherited(merged);
-            let link = find_link(ctx.doc, brush_id);
+            let span_style = ctx
+                .text_style_cache
+                .entry(brush_id)
+                .or_insert_with(|| resolve_text_style(ctx.doc, brush_id))
+                .merge_inherited(merged);
+            let link = ctx
+                .link_cache
+                .entry(brush_id)
+                .or_insert_with(|| find_link(ctx.doc, brush_id))
+                .clone();
 
             // Record <a href> link regions as hit regions.
             if link.is_some() {

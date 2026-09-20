@@ -1101,6 +1101,32 @@ fn dialog_open_close_cycles_no_slotmap_panic() {
     let _ = f.frame();
 }
 
+#[test]
+fn input_returns_to_bottom_after_model_picker() {
+    // Regression: `remove_and_drop_all_children` never inserted layout
+    // damage on the parent, so `#completion-area` kept the picker's
+    // taffy-cached height after close and the input stayed pushed up.
+    let mut f = Fixture::new();
+    let input_y = |f: &mut Fixture| -> f32 {
+        f.frame();
+        let id = f.doc.get_element_by_id("input-area").unwrap();
+        f.doc.get_node(id).unwrap().final_layout().location.y
+    };
+    let y0 = input_y(&mut f);
+    assert!(y0 > (H as f32) / 2.0, "input near bottom, y={y0}");
+
+    let r = resp(
+        "get_available_models",
+        serde_json::json!({"models": [model_json("k3","kimi"), model_json("swe-2","devin")]}),
+    );
+    f.state.apply_response(&r);
+    let _ = input_y(&mut f);
+
+    f.state.cancel_dialog();
+    let y2 = input_y(&mut f);
+    assert!((y2 - y0).abs() < 1.0, "input back at y={y0}, got y={y2}");
+}
+
 // ---------- @ mentions / attachments / queue (RECON §12.3-12.4) ----------
 
 #[test]

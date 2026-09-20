@@ -42,9 +42,22 @@ pub fn clear_child_caches(m: &mut DocumentMutator<'_>, node: NodeId) {
     }
 }
 
-/// `remove_and_drop_all_children` + cache clear (required, see above).
+/// Drop every child of `node` + cache clear.
+///
+/// Uses per-child `remove_and_drop_node` (not `remove_and_drop_all_children`):
+/// the bulk variant never calls `insert_damage` on the parent, so under
+/// incremental layout the parent's taffy cache survives with the old
+/// child-count height — e.g. closing the model picker left
+/// `#completion-area` at picker height and the input box stayed pushed up.
 pub fn drop_children(m: &mut DocumentMutator<'_>, node: NodeId) {
-    m.remove_and_drop_all_children(node);
+    let children: Vec<NodeId> = m
+        .doc
+        .get_node(node)
+        .map(|n| n.children.iter().copied().collect())
+        .unwrap_or_default();
+    for child in children {
+        m.remove_and_drop_node(child);
+    }
     clear_child_caches(m, node);
 }
 

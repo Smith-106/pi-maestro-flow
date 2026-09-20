@@ -169,11 +169,16 @@ impl App {
     }
 
     /// Signature of the spinner inputs (active/frame/dots/hint).
+    /// `tick` itself isn't hashed — only the derived frame/dots, so an
+    /// idle tick doesn't force a resolve.
     fn spinner_signature(state: &AppState) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut s = std::collections::hash_map::DefaultHasher::new();
         state.streaming.hash(&mut s);
-        state.tick.hash(&mut s);
+        if state.streaming {
+            (state.tick / 3).hash(&mut s); // glyph frame
+            ((state.tick >> 2) % 3).hash(&mut s); // dots
+        }
         s.finish()
     }
 
@@ -1631,11 +1636,27 @@ impl App {
             || dialog_sig != self.dialog_sig
             || completion_sig != self.completion_sig;
 
-        // 1. Patch the DOM from state — one mutate scope for everything.
+        // 1. Patch the DOM from state — one mutate scope for
+        //    everything, each sync gated by its input signature so an
+        //    unchanged component costs zero DOM mutations.
         {
             let mut m = self.doc.mutate();
             if self.state.dom_dirty {
                 message_list::sync(&mut m, self.handles.messages_inner, &mut self.state);
+                self.state.dom_dirty = false;
+            }
+            if input_sig != self.input_sig {
+                input_box::sync(
+                    &mut m,
+                    self.handles.input_hint_text,
+                    self.handles.input_text,
+                    &self.state.input,
+                    self.state.dialog.is_none(),
+                    &hint,
+                );
+                self.input_sig = input_sig;
+            }
+            if status_sig != self.status_sig {
                 status_line::sync(
                     &mut m,
                     self.handles.status_left,
@@ -1645,27 +1666,19 @@ impl App {
                     self.state.permission.label(),
                     self.state.queued.len(),
                 );
-                self.state.dom_dirty = false;
+                self.status_sig = status_sig;
             }
-            // Input cursor may have moved without a state-marked dirty.
-            input_box::sync(
-                &mut m,
-                self.handles.input_hint_text,
-                self.handles.input_text,
-                &self.state.input,
-                self.state.dialog.is_none(),
-                &hint,
-            );
-
-            // 1b. Per-frame components — signature-gated rebuilds.
-            spinner::sync(
-                &mut m,
-                &self.handles.spinner,
-                self.state.streaming,
-                self.state.tick,
-                "esc to interrupt",
-                self.state.glyphs,
-            );
+            if spinner_sig != self.spinner_sig {
+                spinner::sync(
+                    &mut m,
+                    &self.handles.spinner,
+                    self.state.streaming,
+                    self.state.tick,
+                    "esc to interrupt",
+                    self.state.glyphs,
+                );
+                self.spinner_sig = spinner_sig;
+            }
             if dialog_sig != self.dialog_sig {
                 dialog::sync(
                     &mut m,
@@ -1685,9 +1698,6 @@ impl App {
                 );
                 self.completion_sig = completion_sig;
             }
-            self.input_sig = input_sig;
-            self.spinner_sig = spinner_sig;
-            self.status_sig = status_sig;
 
             // 2. Pin #app to the terminal size only when it changed
             //    (set_style_property parses + marks restyle damage).

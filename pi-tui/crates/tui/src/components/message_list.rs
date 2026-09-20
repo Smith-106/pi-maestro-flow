@@ -35,15 +35,11 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId) {
 ///
 /// Used for the initial build and after structural resets (Ctrl+L).
 pub fn rebuild(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState) {
-    m.remove_and_drop_all_children(inner);
-    // blitz-dom beta.2 keeps the parent's `layout_children`/`paint_children`
-    // caches after dropping children; `flush_styles_to_layout` then walks
-    // stale NodeIds and panics on an invalid SlotMap key. Clear them so the
-    // next resolve recomputes from the (now empty) child list.
-    if let Some(node) = m.doc.get_node_mut(inner) {
-        node.layout_children.borrow_mut().take();
-        node.paint_children.borrow_mut().take();
-    }
+    // `drop_children` removes each child with parent layout damage (the
+    // bulk `remove_and_drop_all_children` leaves the parent's taffy cache
+    // stale) and clears `layout_children`/`paint_children` so the next
+    // resolve can't walk dropped NodeIds (invalid SlotMap key panic).
+    crate::components::dom::drop_children(m, inner);
     // Banner + action bar nodes were dropped with the children.
     state.banner_node = None;
     state.action_bar_node = None;
@@ -53,19 +49,20 @@ pub fn rebuild(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState)
         state.banner_node = Some(b);
     }
     let glyphs = state.glyphs;
+    let tick = state.tick;
     for msg in state.messages.iter_mut() {
         msg.node_id = None;
         msg.text_node_id = None;
         msg.glyph_node_id = None;
         msg.rendered_len = 0;
         msg.dirty = false;
-        append_bubble(m, inner, msg, glyphs, &state.tray.entries);
+        append_bubble(m, inner, msg, tick, glyphs, &state.tray.entries);
     }
     state.needs_rebuild = false;
 }
 
 /// Append one `.msg` bubble for `msg`, recording node ids back into it.
-fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
+fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, tick: u64, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
     let mut class = match msg.kind {
         MsgKind::User => "msg msg-user".to_string(),
         MsgKind::Assistant => "msg msg-assistant".to_string(),
@@ -108,6 +105,7 @@ fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, 
         }
     }
     msg.rendered_len = msg.text.len();
+    msg.last_render_tick = tick;
 }
 
 /// Thinking bubble: full text while streaming; once sealed it collapses
@@ -140,7 +138,7 @@ fn build_thinking(m: &mut DocumentMutator<'_>, bubble: NodeId, msg: &mut Message
 
 /// Re-render a bubble's children in place (markdown re-render / tool
 /// card state change). Keeps the bubble node itself.
-fn rebuild_bubble(m: &mut DocumentMutator<'_>, msg: &mut Message, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
+fn rebuild_bubble(m: &mut DocumentMutator<'_>, msg: &mut Message, tick: u64, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
     let Some(bubble) = msg.node_id else { return };
     crate::components::dom::drop_children(m, bubble);
     match msg.kind {
@@ -164,8 +162,13 @@ fn rebuild_bubble(m: &mut DocumentMutator<'_>, msg: &mut Message, glyphs: crate:
         }
     }
     msg.rendered_len = msg.text.len();
+    msg.last_render_tick = tick;
     msg.dirty = false;
 }
+
+/// Minimum ticks between streamed (non-dirty, unsealed) structural
+/// re-renders — ~100ms at the 33ms tick.
+const STREAM_RENDER_INTERVAL: u64 = 3;
 
 /// Sync the DOM with `state.messages` incrementally:
 /// * `state.needs_rebuild` → full rebuild (Ctrl+L);
@@ -196,7 +199,7 @@ pub fn sync(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState) ->
     }
     for msg in state.messages.iter_mut() {
         if msg.node_id.is_none() {
-            append_bubble(m, inner, msg, glyphs, &state.tray.entries);
+            append_bubble(m, inner, msg, state.tick, glyphs, &state.tray.entries);
             changed = true;
             continue;
         }
@@ -204,10 +207,21 @@ pub fn sync(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState) ->
             match msg.kind {
                 // Markdown/tool/thinking bubbles re-render their subtree
                 // (thinking collapses on seal → structural change).
-                MsgKind::Assistant | MsgKind::Tool | MsgKind::Thinking => {
-                    rebuild_bubble(m, msg, glyphs, &state.tray.entries);
+                // Streamed appends (dirty=false, unsealed) throttle to
+                // STREAM_RENDER_INTERVAL ticks — a per-delta rebuild is
+                // O(message²) markdown re-parsing.
+                MsgKind::Assistant | MsgKind::Tool | MsgKind::Thinking
+                    if msg.dirty
+                        || msg.sealed
+                        || state.tick - msg.last_render_tick
+                            >= STREAM_RENDER_INTERVAL =>
+                {
+                    rebuild_bubble(m, msg, state.tick, glyphs, &state.tray.entries);
                     changed = true;
                 }
+                // Throttled streamed append: leave the stale render in
+                // place; the next interval (or seal) catches up.
+                MsgKind::Assistant | MsgKind::Tool | MsgKind::Thinking => {}
                 // Plain bubbles patch the single text node.
                 _ => {
                     if let Some(tid) = msg.text_node_id {
