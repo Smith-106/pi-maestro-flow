@@ -264,7 +264,12 @@ fn paint_node_inner(
         clip
     };
 
-    paint_children(ctx, node, abs_px, child_clip, &merged);
+    // Subtree culling: an empty child clip means no descendant can
+    // paint inside it — skip the whole subtree (a long scrollback
+    // keeps most bubbles fully off-screen).
+    if child_clip.is_non_empty() {
+        paint_children(ctx, node, abs_px, child_clip, &merged);
+    }
 
     Some(rect)
 }

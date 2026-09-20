@@ -102,6 +102,9 @@ pub struct App {
     /// Reusable surface buffer (double-buffered with the renderer's
     /// previous frame).
     surface_spare: Option<Surface>,
+    /// Scroll offset written into the DOM by the last painted frame —
+    /// a scroll-only change repaints without a resolve.
+    painted_scroll: u32,
 }
 
 /// Double-Esc interrupt window.
@@ -154,6 +157,7 @@ impl App {
             spinner_sig: u64::MAX,
             status_sig: u64::MAX,
             surface_spare: None,
+            painted_scroll: 0,
         }
     }
 
@@ -350,7 +354,17 @@ impl App {
                 }
             }
         }
-        self.paint_frame_at(w, h).to_text()
+        // Headless dump always wants a surface — force one even when
+        // the frame is unchanged (prev_frame is empty anyway).
+        match self.paint_frame_at(w, h) {
+            Some(s) => s.to_text(),
+            None => self
+                .renderer
+                .prev_frame
+                .as_ref()
+                .map(|f| f.surface.to_text())
+                .unwrap_or_default(),
+        }
     }
 
     /// Pull `get_state` for the status line.
@@ -1585,19 +1599,22 @@ impl App {
     }
 
     /// One frame: sync DOM → viewport → resolve → scroll → paint → ANSI.
+    /// A fully unchanged frame (same sigs/scroll/size, no pending
+    /// scrollback) skips painting entirely — the previous frame is
+    /// still on screen, so the draw is a no-op.
     fn render_frame(&mut self) -> io::Result<()> {
-        let surface = self.paint_frame();
-
-        // 7. Diff → ANSI, wrapped in synchronized output. The
-        //    renderer hands back the replaced frame's surface for
-        //    reuse as the next paint buffer.
-        let frame = Frame::new(surface);
         let mut out = String::new();
-        ansi::begin_sync(&mut out);
-        out.push_str(&self.renderer.draw(frame));
-        ansi::end_sync(&mut out);
-        if self.surface_spare.is_none() {
-            self.surface_spare = self.renderer.spare_surface.take();
+        if let Some(surface) = self.paint_frame() {
+            // 7. Diff → ANSI, wrapped in synchronized output. The
+            //    renderer hands back the replaced frame's surface for
+            //    reuse as the next paint buffer.
+            let frame = Frame::new(surface);
+            ansi::begin_sync(&mut out);
+            out.push_str(&self.renderer.draw(frame));
+            ansi::end_sync(&mut out);
+            if self.surface_spare.is_none() {
+                self.surface_spare = self.renderer.spare_surface.take();
+            }
         }
         // `setTitle` → OSC window-title escape (outside the sync block).
         if let Some(title) = self.state.term_title.take() {
@@ -1610,8 +1627,9 @@ impl App {
     }
 
     /// Steps 1–6 of a frame at the current terminal size.
-    /// Returns the painted surface (headless modes use `to_text` on it).
-    pub fn paint_frame(&mut self) -> Surface {
+    /// Returns the painted surface, or `None` when nothing changed
+    /// since the last painted frame (headless modes use `to_text` on it).
+    pub fn paint_frame(&mut self) -> Option<Surface> {
         let (w, h) = self.term_size;
         self.paint_frame_at(w, h)
     }
@@ -1622,7 +1640,7 @@ impl App {
     /// (component signature caches), `set_viewport`/`resolve` only when
     /// the size or DOM changed, and the paint surface is double-buffered
     /// instead of freshly allocated.
-    pub fn paint_frame_at(&mut self, w: u16, h: u16) -> Surface {
+    pub fn paint_frame_at(&mut self, w: u16, h: u16) -> Option<Surface> {
         let hint = self.input_hint();
         let dialog_sig = dialog::signature(&self.state);
         let completion_sig = completion::signature(&self.state);
@@ -1630,18 +1648,32 @@ impl App {
         let spinner_sig = Self::spinner_signature(&self.state);
         let status_sig = Self::status_signature(&self.state);
         let mut layout_dirty = self.state.dom_dirty
+            || self.state.needs_rebuild
             || input_sig != self.input_sig
             || spinner_sig != self.spinner_sig
             || status_sig != self.status_sig
             || dialog_sig != self.dialog_sig
             || completion_sig != self.completion_sig;
 
+        // Fully unchanged frame: no DOM mutation, same size, same
+        // scroll, and the renderer has nothing pending — the previous
+        // frame is still correct on screen.
+        if !layout_dirty
+            && (w, h) == self.last_viewport
+            && self.state.scroll == self.painted_scroll
+            && self.renderer.prev_frame.is_some()
+            && self.renderer.pending.is_empty()
+            && !self.renderer.needs_full_redraw
+        {
+            return None;
+        }
+
         // 1. Patch the DOM from state — one mutate scope for
         //    everything, each sync gated by its input signature so an
         //    unchanged component costs zero DOM mutations.
         {
             let mut m = self.doc.mutate();
-            if self.state.dom_dirty {
+            if self.state.dom_dirty || self.state.needs_rebuild {
                 message_list::sync(&mut m, self.handles.messages_inner, &mut self.state);
                 self.state.dom_dirty = false;
             }
@@ -1729,6 +1761,7 @@ impl App {
 
         // 4. Scroll clamp + write.
         message_list::apply_scroll(&mut self.doc, self.handles.messages, &mut self.state);
+        self.painted_scroll = self.state.scroll;
         self.messages_view_h = self
             .doc
             .get_node(self.handles.messages)
@@ -1748,7 +1781,10 @@ impl App {
         {
             let mut ctx = PaintContext::new(&self.doc, &mut surface);
             paint_document(&mut ctx);
-            self.hit_regions = std::mem::take(&mut ctx.hit_regions);
+            // Swap instead of take: the ctx Vec keeps its capacity for
+            // the next frame.
+            self.hit_regions.clear();
+            std::mem::swap(&mut self.hit_regions, &mut ctx.hit_regions);
         }
 
         // 6. Cursor post-process: the PUA marker cell → inverse block.
@@ -1766,7 +1802,7 @@ impl App {
             }
         }
 
-        surface
+        Some(surface)
     }
 }
 

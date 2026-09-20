@@ -43,8 +43,9 @@ impl Fx {
         state.status.model = "gpt-5.6-sol".into();
         state.status.thinking = "high".into();
         state.push_user("explain the render pipeline");
-        // ~30 messages so the DOM is realistically sized.
-        for i in 0..15 {
+        // ~150 messages: a long scrollback where most bubbles are
+        // off-screen — exercises the paint subtree culling.
+        for i in 0..75 {
             state.push(pi_fluent_tui::state::Message::new(
                 MsgKind::Assistant,
                 format!(
@@ -176,6 +177,14 @@ fn perf_probe_idle_frame() {
         let _ = f.frame_new();
     }
     let new_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // Isolated paint cost on the big DOM (subtree culling active).
+    let t0 = Instant::now();
+    for _ in 0..FRAMES {
+        let _ = f.paint();
+    }
+    let paint_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    eprintln!("[perf] paint-only ({} msgs): {:.3}ms/frame", f.state.messages.len(), paint_ms / FRAMES as f64);
 
     eprintln!(
         "[perf] idle frame ({}x{}, {} msgs): old {:.2}ms → new {:.2}ms ({:.1}x)",
