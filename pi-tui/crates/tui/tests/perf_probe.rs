@@ -93,11 +93,10 @@ impl Fx {
             );
             status_line::sync(
                 &mut m,
-                self.handles.status_left,
-                self.handles.status_right,
+                &self.handles.status,
                 &self.state.status,
                 self.state.streaming,
-                self.state.permission.label(),
+                self.state.permission,
                 self.state.queued.len(),
             );
             spinner::sync(
@@ -107,6 +106,7 @@ impl Fx {
                 self.state.tick,
                 "esc to interrupt",
                 self.state.glyphs,
+                &theme::Theme::new(ThemeKind::Dark).fusion(),
             );
             dialog::sync(
                 &mut m,
@@ -131,7 +131,7 @@ impl Fx {
             ThemeKind::Dark.color_scheme(),
         ));
         self.doc.resolve(0.0);
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, &mut self.state);
+        message_list::apply_scroll(&mut self.doc, self.handles.messages, self.handles.scrollbar_thumb, &mut self.state);
         self.paint()
     }
 
@@ -149,7 +149,7 @@ impl Fx {
             self.state.dom_dirty = false;
             self.doc.resolve(0.0);
         }
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, &mut self.state);
+        message_list::apply_scroll(&mut self.doc, self.handles.messages, self.handles.scrollbar_thumb, &mut self.state);
         self.paint()
     }
 }
@@ -234,7 +234,7 @@ fn perf_probe_dialog_open_frame() {
             f.doc.resolve(0.0);
             last_sig = sig;
         }
-        message_list::apply_scroll(&mut f.doc, f.handles.messages, &mut f.state);
+        message_list::apply_scroll(&mut f.doc, f.handles.messages, f.handles.scrollbar_thumb, &mut f.state);
         let _ = f.paint();
     }
     let new_ms = t0.elapsed().as_secs_f64() * 1000.0;

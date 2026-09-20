@@ -15,15 +15,15 @@ use blitz_dom::{DocumentMutator, NodeId};
 use crate::components::dom::{div, qual, span_text};
 use crate::components::glyphs::GlyphMode;
 
-/// Spinner interval: the original ticks at 90ms; the app drives frames
-/// from its 33ms tick (`tick / 3`).
-pub const SPINNER_INTERVAL_MS: u64 = 90;
+/// Keep the working indicator calm on a 33ms app tick. The glyph changes
+/// about every 165ms and the dot phase about every 330ms.
+pub const SPINNER_FRAME_TICKS: u64 = 5;
+pub const SPINNER_DOT_TICKS: u64 = 10;
 
-/// Fusion gradient endpoints (RECON §9 theme vars).
-/// lead → highlight → sidekick, ping-ponged across the 16 frames.
-const FUSION_LEAD: (u8, u8, u8) = (0x4e, 0xb6, 0xf7); // #4eb6f7
-const FUSION_HIGHLIGHT: (u8, u8, u8) = (0xcf, 0xef, 0xff); // #cfefff
-const FUSION_SIDEKICK: (u8, u8, u8) = (0x90, 0xa9, 0xbf); // #90a9bf
+/// Fusion gradient endpoints `[lead, highlight, sidekick]` — supplied by
+/// `Theme::fusion()` (the RGB twin of the `--fusion-*` vars; the spinner
+/// paints an inline style per frame, outside the CSS cascade).
+pub type Fusion = [(u8, u8, u8); 3];
 
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t).round() as u8
@@ -35,12 +35,12 @@ fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
 
 /// The fusion-gradient color for spinner frame `frame` (0..16).
 /// Ping-pong: 0..8 lead→highlight, 8..16 highlight→sidekick.
-pub fn fusion_color(frame: usize) -> (u8, u8, u8) {
+pub fn fusion_color(frame: usize, fusion: &Fusion) -> (u8, u8, u8) {
     let f = frame % 16;
     if f < 8 {
-        mix(FUSION_LEAD, FUSION_HIGHLIGHT, f as f32 / 7.0)
+        mix(fusion[0], fusion[1], f as f32 / 7.0)
     } else {
-        mix(FUSION_HIGHLIGHT, FUSION_SIDEKICK, (f - 8) as f32 / 8.0)
+        mix(fusion[1], fusion[2], (f - 8) as f32 / 8.0)
     }
 }
 
@@ -94,6 +94,7 @@ pub fn sync(
     tick: u64,
     hint: &str,
     mode: GlyphMode,
+    fusion: &Fusion,
 ) {
     if !active {
         m.set_style_property(h.line, "display", "none");
@@ -102,13 +103,16 @@ pub fn sync(
     m.set_style_property(h.line, "display", "flex");
 
     // Frame + fusion gradient color (inline style — per-frame value).
-    let frame = (tick / 3) as usize % 16;
-    let (r, g, b) = fusion_color(frame);
+    let frame = (tick / SPINNER_FRAME_TICKS) as usize % 16;
+    let (r, g, b) = fusion_color(frame, fusion);
     m.set_style_property(h.glyph_span, "color", &format!("rgb({r},{g},{b})"));
-    m.set_node_text(h.glyph_text, mode.spinner_frame(tick / 3));
+    m.set_node_text(
+        h.glyph_text,
+        mode.spinner_frame(tick / SPINNER_FRAME_TICKS),
+    );
 
     m.set_node_text(h.label_text, " Thinking");
-    let dots = (tick >> 2) % 3 + 1;
+    let dots = (tick / SPINNER_DOT_TICKS) % 3 + 1;
     m.set_node_text(h.dots_text, &".".repeat(dots as usize));
     if hint.is_empty() {
         m.set_node_text(h.hint_text, "");
@@ -121,10 +125,12 @@ pub fn sync(
 mod tests {
     use super::*;
 
+    const FUSION: Fusion = [(0x4e, 0xb6, 0xf7), (0xcf, 0xef, 0xff), (0x90, 0xa9, 0xbf)];
+
     #[test]
     fn gradient_endpoints() {
-        assert_eq!(fusion_color(0), FUSION_LEAD);
-        assert_eq!(fusion_color(7), FUSION_HIGHLIGHT);
-        assert_eq!(fusion_color(16), FUSION_LEAD); // wraps
+        assert_eq!(fusion_color(0, &FUSION), FUSION[0]);
+        assert_eq!(fusion_color(7, &FUSION), FUSION[1]);
+        assert_eq!(fusion_color(16, &FUSION), FUSION[0]); // wraps
     }
 }

@@ -31,12 +31,6 @@ use blitz_dom::{DocumentMutator, NodeId};
 use crate::components::dom::{div, qual, span_text};
 use crate::state::{Message, MsgKind, TrayEntry, TrayKind, TrayState, TrayStatus, TrayTab};
 
-/// Devin agent palette (RECON §12.5) — subagent name colors.
-pub const AGENT_PALETTE: [&str; 10] = [
-    "#ff8787", "#ffaf87", "#ffd787", "#d7af5f", "#afd787", "#87d7af", "#87d7ff",
-    "#afafff", "#d7afff", "#ffafd7",
-];
-
 /// Milliseconds per app tick (33ms frame tick).
 const TICK_MS: u64 = 33;
 
@@ -127,8 +121,12 @@ pub fn render(
         m.set_attribute(item, qual("data-hit-tray"), &row.to_string());
         let st = div(m, item, "tray-status");
         span_text(m, st, "", status_label(e));
-        let name = div(m, item, "tray-name");
-        m.set_style_property(name, "color", AGENT_PALETTE[ei % AGENT_PALETTE.len()]);
+        let name_class = if e.kind == TrayKind::Subagent {
+            format!("tray-name agent-color-{}", e.color_idx)
+        } else {
+            "tray-name".to_string()
+        };
+        let name = div(m, item, &name_class);
         span_text(m, name, "", &format!(" {}", e.title));
         let meta = div(m, item, "tray-meta");
         span_text(
@@ -143,7 +141,12 @@ pub fn render(
     if let Some(&ei) = visible.get(tray.cursor) {
         let e = &tray.entries[ei];
         let pv = div(m, split, "tray-preview");
-        let t = div(m, pv, "tray-preview-title");
+        let title_class = if e.kind == TrayKind::Subagent {
+            format!("tray-preview-title agent-color-{}", e.color_idx)
+        } else {
+            "tray-preview-title".to_string()
+        };
+        let t = div(m, pv, &title_class);
         span_text(m, t, "", &e.title);
         let meta = div(m, pv, "tray-preview-meta");
         span_text(

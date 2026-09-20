@@ -87,7 +87,9 @@ pub fn hint_for(
             chips.join(" ")
         );
     }
-    if input.text.starts_with('/') {
+    if let Some(ghost) = &input.ghost {
+        format!("↳ {ghost}")
+    } else if input.text.starts_with('/') {
         "slash command — enter to run".to_string()
     } else if input.text.starts_with('@') {
         "file mention — @path/to/file".to_string()
@@ -123,4 +125,20 @@ pub fn sync(
     }
     shown.push_str(&input.text[input.cursor..]);
     m.set_node_text(text_node, &shown);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hint_for;
+    use crate::state::InputState;
+
+    #[test]
+    fn passive_history_suffix_uses_muted_hint_line() {
+        let mut input = InputState::default();
+        input.text = "cargo".into();
+        input.cursor = 5;
+        input.ghost = Some(" test".into());
+        assert_eq!(hint_for(&input, &[], None, "tip"), "↳  test");
+        assert_eq!(input.text, "cargo");
+    }
 }

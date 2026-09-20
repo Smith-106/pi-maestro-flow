@@ -8,5 +8,6 @@
 pub mod app;
 pub mod commands;
 pub mod components;
+mod fuzzy;
 pub mod state;
 pub mod theme;

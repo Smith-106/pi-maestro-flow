@@ -13,12 +13,17 @@
 //!   └─ .tool-trunc "[... N lines truncated (ctrl+o to expand) ...]"
 //! ```
 //!
-//! v0 highlighting: `mime_to_lang` maps mime/extension → lang id
-//! (sh/json/py/rs/js/ts/yaml/toml/md); `highlight_line` emits a single
-//! `hl-line` span per line — tree-sitter token colors are a later
-//! increment (the span seam is already in place).
+//! `mime_to_lang` maps mime/extension → lang id
+//! (sh/json/py/rs/js/ts/yaml/toml/md); syntect token scopes are mapped
+//! onto the theme's `.syntax-*` classes.
+
+use std::str::FromStr;
+use std::sync::OnceLock;
 
 use blitz_dom::{DocumentMutator, NodeId};
+use syntect::easy::ScopeRegionIterator;
+use syntect::highlighting::ScopeSelectors;
+use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
 use crate::components::dom::{div, qual, span_text};
 use crate::components::glyphs::{GlyphMode, status_glyph};
@@ -112,21 +117,147 @@ pub fn detect_lang(tool_name: &str, args: &serde_json::Value, result: &serde_jso
     }
 }
 
-/// One highlighted span (v0: a whole line is one span).
-pub struct HighlightedLine<'a> {
-    pub line: &'a str,
-    pub lang: Option<&'static str>,
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static SCOPE_CLASSES: OnceLock<Vec<(&'static str, ScopeSelectors)>> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_nonewlines)
 }
 
-/// Emit a highlighted line under `parent`. v0: single `hl-line` span;
-/// the `lang` is carried as a class so tree-sitter token classes can be
-/// added incrementally without changing call sites.
-pub fn highlight_line(m: &mut DocumentMutator<'_>, parent: NodeId, hl: &HighlightedLine<'_>) {
-    let class = match hl.lang {
-        Some(l) => format!("hl-line hl-lang-{l}"),
-        None => "hl-line".to_string(),
-    };
-    span_text(m, parent, &class, hl.line);
+fn scope_classes() -> &'static [(&'static str, ScopeSelectors)] {
+    SCOPE_CLASSES.get_or_init(|| {
+        [
+            ("syntax-comment", "comment"),
+            ("syntax-string", "string"),
+            (
+                "syntax-keyword",
+                "keyword.control, keyword.declaration, storage.modifier",
+            ),
+            (
+                "syntax-function",
+                "entity.name.function, support.function, variable.function",
+            ),
+            (
+                "syntax-type",
+                "entity.name.type, entity.name.class, storage.type, support.type",
+            ),
+            ("syntax-number", "constant.numeric"),
+            ("syntax-constant", "constant.language, constant.other"),
+            ("syntax-operator", "keyword.operator, punctuation.separator"),
+            (
+                "syntax-variable-builtin",
+                "variable.language, support.variable",
+            ),
+            ("syntax-attribute", "entity.other.attribute-name"),
+            (
+                "syntax-property",
+                "variable.other.member, meta.property-name",
+            ),
+        ]
+        .into_iter()
+        .map(|(class, selector)| {
+            (
+                class,
+                ScopeSelectors::from_str(selector)
+                    .expect("built-in syntect scope selector must parse"),
+            )
+        })
+        .collect()
+    })
+}
+
+/// Map the current syntect scope stack to one of the theme's token classes.
+pub fn scope_to_class(stack: &ScopeStack) -> Option<&'static str> {
+    scope_classes()
+        .iter()
+        .find(|(_, selector)| selector.does_match(&stack.scopes).is_some())
+        .map(|(class, _)| *class)
+}
+
+fn normalized_lang(lang: Option<&str>) -> Option<&str> {
+    lang.and_then(|value| {
+        let token = value.split_whitespace().next()?;
+        mime_to_lang(token).or(Some(token))
+    })
+}
+
+fn highlighted_lines(code: &str, lang: Option<&str>) -> Option<Vec<Vec<(&'static str, String)>>> {
+    let lang = normalized_lang(lang)?;
+    let syntaxes = syntax_set();
+    let syntax = syntaxes
+        .find_syntax_by_extension(lang)
+        .or_else(|| syntaxes.find_syntax_by_token(lang))?;
+    let mut state = ParseState::new(syntax);
+    let mut stack = ScopeStack::new();
+    let mut lines = Vec::new();
+
+    for line in code.split('\n') {
+        let ops = state.parse_line(line, syntaxes).ok()?;
+        let mut runs = Vec::new();
+        for (text, op) in ScopeRegionIterator::new(&ops, line) {
+            stack.apply(op).ok()?;
+            if !text.is_empty() {
+                runs.push((scope_to_class(&stack).unwrap_or(""), text.to_string()));
+            }
+        }
+        lines.push(runs);
+    }
+    Some(lines)
+}
+
+fn emit_runs(
+    m: &mut DocumentMutator<'_>,
+    parent: NodeId,
+    line: &str,
+    runs: Option<&[(&'static str, String)]>,
+) {
+    if let Some(runs) = runs {
+        for (class, text) in runs {
+            span_text(m, parent, class, text);
+        }
+    } else {
+        span_text(m, parent, "", line);
+    }
+}
+
+/// Tokenize `code` and emit `.syntax-*` runs inside one `.hl-line` per line.
+/// The syntax set and scope selectors are initialized on first use.
+pub fn highlight_code(m: &mut DocumentMutator<'_>, parent: NodeId, code: &str, lang: Option<&str>) {
+    let normalized = normalized_lang(lang);
+    let lines: Vec<&str> = code.split('\n').collect();
+    let highlighted = highlighted_lines(code, normalized);
+    for (idx, line) in lines.iter().enumerate() {
+        let class = normalized
+            .map(|lang| format!("hl-line hl-lang-{lang}"))
+            .unwrap_or_else(|| "hl-line".to_string());
+        let (row, _) = span_text(m, parent, &class, "");
+        emit_runs(
+            m,
+            row,
+            line,
+            highlighted
+                .as_ref()
+                .and_then(|all| all.get(idx))
+                .map(Vec::as_slice),
+        );
+        if idx + 1 < lines.len() {
+            let newline = m.create_text_node("\n");
+            m.append_children(parent, &[newline]);
+        }
+    }
+}
+
+/// Read-like tools keep their result collapsed until explicitly expanded.
+pub fn is_read_tool(name: &str) -> bool {
+    let base = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "read" | "read_file" | "view" | "cat" | "head" | "tail"
+    )
 }
 
 /// True when `text` looks like unified diff output.
@@ -195,6 +326,7 @@ fn emit_diff_line(
     line: &str,
     class: &str,
     paired_with: Option<&str>,
+    runs: Option<&[(&'static str, String)]>,
 ) {
     let row = div(m, parent, class);
     match paired_with {
@@ -226,15 +358,19 @@ fn emit_diff_line(
                 span_text(m, row, "", &tail);
             }
         }
-        None => {
-            span_text(m, row, "", line);
-        }
+        None => emit_runs(m, row, line, runs),
     }
 }
 
 /// `DiffComponent` — render unified-diff text with line classes and
 /// intra-line emphasis on paired delete/insert runs.
-pub fn build_diff(m: &mut DocumentMutator<'_>, parent: NodeId, text: &str, max_lines: Option<usize>) {
+pub fn build_diff(
+    m: &mut DocumentMutator<'_>,
+    parent: NodeId,
+    text: &str,
+    lang: Option<&str>,
+    max_lines: Option<usize>,
+) {
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
     let (shown, truncated) = match max_lines {
@@ -266,12 +402,16 @@ pub fn build_diff(m: &mut DocumentMutator<'_>, parent: NodeId, text: &str, max_l
         }
     }
 
+    let highlighted = lang.and_then(|_| highlighted_lines(&shown.join("\n"), lang));
     for (idx, line) in shown.iter().enumerate() {
-        let is_file_header = (line.starts_with("--- ") || line.starts_with("+++ "))
-            && idx < 4;
+        let is_file_header = (line.starts_with("--- ") || line.starts_with("+++ ")) && idx < 4;
         let class = diff_class(line, is_file_header);
         let pair = paired[idx].map(|j| shown[j]);
-        emit_diff_line(m, parent, line, class, pair);
+        let runs = highlighted
+            .as_ref()
+            .and_then(|all| all.get(idx))
+            .map(Vec::as_slice);
+        emit_diff_line(m, parent, line, class, pair, runs);
     }
     if truncated > 0 {
         trunc_marker(m, parent, truncated);
@@ -305,9 +445,22 @@ pub fn build_output_lines(
         let row = div(m, parent, "tool-trunc");
         span_text(m, row, "", &format!("… {hidden} lines above"));
     }
-    for line in shown {
+    let highlighted = highlighted_lines(&shown.join("\n"), lang);
+    for (idx, line) in shown.iter().enumerate() {
         let row = div(m, parent, "tool-line");
-        highlight_line(m, row, &HighlightedLine { line, lang });
+        let class = lang
+            .map(|lang| format!("hl-line hl-lang-{lang}"))
+            .unwrap_or_else(|| "hl-line".to_string());
+        let (line_span, _) = span_text(m, row, &class, "");
+        emit_runs(
+            m,
+            line_span,
+            line,
+            highlighted
+                .as_ref()
+                .and_then(|all| all.get(idx))
+                .map(Vec::as_slice),
+        );
     }
     if !tail && hidden > 0 {
         trunc_marker(m, parent, hidden);
@@ -463,6 +616,7 @@ pub fn build_card(
     let head = div(m, bubble, "tool-head");
     let (_gs, glyph_text) = span_text(m, head, status.class(), status_glyph(mode, msg.tool_status));
     let name = msg.tool_name.as_deref().unwrap_or("tool");
+    let read_collapsed = is_read_tool(name) && !msg.expanded;
     let title = tool_display(name, msg.tool_args.as_ref(), &msg.text);
     let (_ns, head_text) = span_text(m, head, "tool-name", &format!(" {title}"));
 
@@ -508,14 +662,28 @@ pub fn build_card(
                 COLLAPSED_LINES
             };
             let total = diff_lines.len();
-            for (line, is_del) in diff_lines.iter().take(max) {
+            let shown: Vec<&str> = diff_lines
+                .iter()
+                .take(max)
+                .map(|(line, _)| line.as_str())
+                .collect();
+            let highlighted = highlighted_lines(&shown.join("\n"), msg.tool_lang);
+            for (idx, (line, is_del)) in diff_lines.iter().take(max).enumerate() {
                 let class = if *is_del {
                     "diff-line-delete"
                 } else {
                     "diff-line-insert"
                 };
                 let row = div(m, body, class);
-                span_text(m, row, "", line);
+                emit_runs(
+                    m,
+                    row,
+                    line,
+                    highlighted
+                        .as_ref()
+                        .and_then(|all| all.get(idx))
+                        .map(Vec::as_slice),
+                );
             }
             if total > max {
                 trunc_marker(m, body, total - max);
@@ -531,8 +699,10 @@ pub fn build_card(
                 } else {
                     Some(COLLAPSED_LINES)
                 };
-                if looks_like_diff(output) {
-                    build_diff(m, body, output, max);
+                if read_collapsed {
+                    trunc_marker(m, body, output.lines().count().max(1));
+                } else if looks_like_diff(output) {
+                    build_diff(m, body, output, msg.tool_lang, max);
                 } else {
                     build_output_lines(m, body, output, msg.tool_lang, max, running);
                 }

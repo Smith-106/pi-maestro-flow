@@ -62,6 +62,10 @@ pub struct SelectState {
     pub extra_class: &'static str,
     /// Optional footer line under the options (context usage, notes).
     pub footer: String,
+    /// Metadata detail page (Devin `next_metadata`): when `Some`, the
+    /// dropdown renders these lines instead of the option list.
+    /// Toggled by Tab in the owning dialog.
+    pub detail: Option<Vec<String>>,
 }
 
 impl SelectState {
@@ -74,24 +78,32 @@ impl SelectState {
             scroll: 0,
             extra_class: "",
             footer: String::new(),
+            detail: None,
         }
     }
 
-    /// Options matching the filter (case-insensitive substring).
+    /// Options matching the filter, fuzzy-ranked by score
+    /// (subsequence match; label beats description).
     pub fn filtered(&self) -> Vec<usize> {
         if self.filter.is_empty() {
             return (0..self.options.len()).collect();
         }
-        let f = self.filter.to_lowercase();
-        self.options
+        let mut scored: Vec<(i64, usize)> = self
+            .options
             .iter()
             .enumerate()
-            .filter(|(_, o)| {
-                o.label.to_lowercase().contains(&f)
-                    || o.description.to_lowercase().contains(&f)
+            .filter_map(|(i, o)| {
+                // Label match outranks description-only match.
+                let s = crate::fuzzy::score(&self.filter, &o.label)
+                    .or_else(|| {
+                        crate::fuzzy::score(&self.filter, &o.description)
+                            .map(|s| s / 2)
+                    })?;
+                Some((s, i))
             })
-            .map(|(i, _)| i)
-            .collect()
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, i)| i).collect()
     }
 
     /// Currently selected option index (into `options`).
@@ -173,6 +185,17 @@ pub fn render(
         format!("select-dropdown {}", sel.extra_class)
     };
     let dd = div(m, wrap, &dd_class);
+
+    // Metadata detail page replaces the option list (Tab toggles).
+    if let Some(lines) = &sel.detail {
+        for line in lines {
+            let row = div(m, dd, "select-detail-line");
+            span_text(m, row, "", line);
+        }
+        let hint = div(m, dd, "select-footer");
+        span_text(m, hint, "select-footer-text", "tab back · esc close");
+        return;
+    }
 
     let filtered = sel.filtered();
     let total = filtered.len();
@@ -306,7 +329,48 @@ pub fn model_picker(
         scroll: 0,
         extra_class: "model-picker",
         footer,
+        detail: None,
     }
+}
+
+/// Metadata lines for the model-picker detail page (Devin
+/// `next_metadata`). Only fields pi actually reports are rendered —
+/// absent/zero values are omitted rather than fabricated.
+pub fn model_detail(m: &pi_rpc::Model) -> Vec<String> {
+    let mut v = vec![format!("{} — {}", m.id, m.name)];
+    v.push(format!("provider: {} · api: {}", m.provider, m.api));
+    if !m.base_url.is_empty() {
+        v.push(format!("base url: {}", m.base_url));
+    }
+    if m.context_window > 0.0 {
+        v.push(format!("context window: {} tokens", m.context_window as u64));
+    }
+    if m.max_tokens > 0.0 {
+        v.push(format!("max output: {} tokens", m.max_tokens as u64));
+    }
+    let c = &m.cost;
+    if c.input > 0.0 || c.output > 0.0 {
+        v.push(format!(
+            "cost: ${:.2} in / ${:.2} out per Mtok",
+            c.input, c.output
+        ));
+    }
+    if c.cache_read > 0.0 || c.cache_write > 0.0 {
+        v.push(format!(
+            "cache: ${:.2} read / ${:.2} write per Mtok",
+            c.cache_read, c.cache_write
+        ));
+    }
+    if let Some(tiers) = &c.tiers {
+        if !tiers.is_empty() {
+            v.push(format!("cost tiers: {}", tiers.len()));
+        }
+    }
+    v.push(format!("reasoning: {}", if m.reasoning { "yes" } else { "no" }));
+    if !m.input.is_empty() {
+        v.push(format!("input: {}", m.input.join(", ")));
+    }
+    v
 }
 
 /// Build a thinking-level picker from `get_available_thinking_levels`.
@@ -327,5 +391,50 @@ pub fn thinking_picker(title: &str, levels: &[pi_rpc::ThinkingLevel]) -> SelectS
         scroll: 0,
         extra_class: "model-picker",
         footer: String::new(),
+        detail: None,
+    }
+}
+
+/// Build the `/theme` picker: `auto` row first, then every `ThemeKind`.
+/// The active theme's row is marked `●` and starts under the cursor;
+/// cursor moves live-preview the highlighted theme (Enter commits,
+/// Esc restores `state.theme_restore`).
+pub fn theme_picker(current: crate::theme::ThemeKind) -> SelectState {
+    let detected = crate::theme::detect();
+    let mut options: Vec<SelectOption> = Vec::with_capacity(crate::theme::ThemeKind::ALL.len() + 1);
+    options.push(SelectOption {
+        label: "auto".to_string(),
+        description: format!("detect ({})", detected.name()),
+        badge: None,
+    });
+    options.extend(crate::theme::ThemeKind::ALL.iter().map(|k| SelectOption {
+        label: k.name().to_string(),
+        description: format!("{}{}", k.description(), if *k == current { " ●" } else { "" }),
+        badge: None,
+    }));
+    let cursor = crate::theme::ThemeKind::ALL
+        .iter()
+        .position(|k| *k == current)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    SelectState {
+        title: "theme".to_string(),
+        options,
+        cursor,
+        filter: String::new(),
+        scroll: 0,
+        extra_class: "",
+        footer: String::new(),
+        detail: None,
+    }
+}
+
+/// Resolve a `theme_picker` option index to its theme: `0` = auto
+/// (re-detect), `1..` = `ThemeKind::ALL[i - 1]`.
+pub fn theme_picker_kind(index: usize) -> Option<crate::theme::ThemeKind> {
+    if index == 0 {
+        Some(crate::theme::detect())
+    } else {
+        crate::theme::ThemeKind::ALL.get(index - 1).copied()
     }
 }

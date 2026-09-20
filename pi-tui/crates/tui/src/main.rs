@@ -2,7 +2,13 @@
 //! + scrollback (cell renderer), Devin-style event loop.
 //!
 //! Usage:
-//!   tui [--pi <path>] [--theme dark|light] [--headless-dump]
+//!   tui [--pi <path>] [--theme <name>] [--full] [--pi-args "<args>"]
+//!       [--headless-dump] [--headless-demo] [--headless-prompt <text>]
+//!
+//! By default pi is spawned with `pi_rpc::DEFAULT_ARGS` (all `--no-*`
+//! capability flags — deterministic but no sessions/extensions/skills).
+//! `--full` drops every `--no-*` flag; `--pi-args`/`PI_ARGS` replaces the
+//! argument list entirely (must still include `--mode rpc`).
 //!
 //! `--headless-dump` renders one frame to stdout text (no alt-screen, no
 //! pi spawn) — a CI-friendly end-to-end check of DOM → layout → cells.
@@ -21,6 +27,8 @@ fn main() -> io::Result<()> {
     let mut headless_dump = false;
     let mut headless_demo = false;
     let mut headless_prompt: Option<String> = None;
+    let mut full = false;
+    let mut pi_args: Option<String> = std::env::var("PI_ARGS").ok();
 
     let mut i = 0;
     while i < args.len() {
@@ -31,11 +39,24 @@ fn main() -> io::Result<()> {
             }
             "--theme" => {
                 i += 1;
-                theme_kind = match args.get(i).map(String::as_str) {
-                    Some("light") => Some(ThemeKind::Light),
-                    Some("dark") => Some(ThemeKind::Dark),
-                    _ => None,
-                };
+                match args.get(i).map(String::as_str) {
+                    Some(name) => match ThemeKind::from_name(name) {
+                        Some(kind) => theme_kind = Some(kind),
+                        None => {
+                            let names: Vec<&str> =
+                                ThemeKind::ALL.iter().map(|k| k.name()).collect();
+                            eprintln!(
+                                "tui: unknown theme {name:?} (expected: {})",
+                                names.join("|")
+                            );
+                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad theme"));
+                        }
+                    },
+                    None => {
+                        eprintln!("tui: --theme needs a name (see --help)");
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad arg"));
+                    }
+                }
             }
             "--headless-dump" => headless_dump = true,
             "--headless-demo" => headless_demo = true,
@@ -43,11 +64,18 @@ fn main() -> io::Result<()> {
                 i += 1;
                 headless_prompt = args.get(i).cloned();
             }
+            "--full" => full = true,
+            "--pi-args" => {
+                i += 1;
+                pi_args = args.get(i).cloned();
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "tui — pi-tui\n\
-                     usage: tui [--pi <path>] [--theme dark|light] [--headless-dump] [--headless-demo] [--headless-prompt <text>]\n\
-                     env: PI_BIN (pi binary path), PI_TUI_THEME (dark|light)"
+                     usage: tui [--pi <path>] [--theme <name>] [--full] [--pi-args \"<args>\"]\n\
+                     usage:   [--headless-dump] [--headless-demo] [--headless-prompt <text>]\n\
+                     themes: dark|light|nord|solarized-dark|solarized-light|high-contrast\n\
+                     env: PI_BIN (pi binary path), PI_TUI_THEME (theme name), PI_ARGS (pi argv override)"
                 );
                 return Ok(());
             }
@@ -87,7 +115,21 @@ fn main() -> io::Result<()> {
         .build()?;
 
     rt.block_on(async move {
-        let rpc = match PiRpc::spawn(pi_path.as_deref(), pi_rpc::DEFAULT_ARGS).await {
+        // Arg precedence: --pi-args/PI_ARGS > --full > DEFAULT_ARGS.
+        let owned_args: Vec<String> = pi_args
+            .as_deref()
+            .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        let borrowed: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+        const FULL_ARGS: &[&str] = &["--mode", "rpc"];
+        let spawn_args: &[&str] = if !borrowed.is_empty() {
+            &borrowed
+        } else if full {
+            FULL_ARGS
+        } else {
+            pi_rpc::DEFAULT_ARGS
+        };
+        let rpc = match PiRpc::spawn(pi_path.as_deref(), spawn_args).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("tui: failed to spawn pi: {e}");
@@ -146,17 +188,16 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
         );
         components::status_line::sync(
             &mut m,
-            handles.status_left,
-            handles.status_right,
+            &handles.status,
             &st.status,
             false,
-            st.permission.label(),
+            st.permission,
             st.queued.len(),
         );
     }
     doc.set_viewport(Viewport::new(60, 20, 1.0, kind.color_scheme()));
     doc.resolve(0.0);
-    components::message_list::apply_scroll(&mut doc, handles.messages, &mut st);
+    components::message_list::apply_scroll(&mut doc, handles.messages, handles.scrollbar_thumb, &mut st);
 
     let mut surface = Surface::new(60, 20);
     {
@@ -225,6 +266,34 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             .join("\n"),
     );
     st.push(tool2);
+    for (id, prompt) in [
+        ("demo-agent-0", "review parser ownership"),
+        ("demo-agent-1", "audit parser tests"),
+    ] {
+        st.apply_event(&pi_rpc::RpcEvent::Agent(
+            pi_rpc::types::AgentEvent::ToolExecutionStart {
+                tool_call_id: id.to_string(),
+                tool_name: "task".to_string(),
+                args: serde_json::json!({"prompt": prompt, "background": false}),
+            },
+        ));
+    }
+    st.push(state::Message::new(
+        state::MsgKind::Compaction,
+        "◆ Compacted context: retained the implementation plan",
+    ));
+    st.push(state::Message::new(
+        state::MsgKind::Branch,
+        "⑂ Branched from the parser refactor",
+    ));
+    st.push(state::Message::new(
+        state::MsgKind::Skill,
+        "✦ Loaded skill: rust-review",
+    ));
+    st.push(state::Message::new(
+        state::MsgKind::Custom,
+        "◇ Extension note: demo custom message",
+    ));
 
     st.toasts.push(Toast {
         text: "info: extension loaded".into(),
@@ -255,20 +324,19 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
         input_box::sync(&mut m, handles.input_hint_text, handles.input_text, &st.input, false, "");
         status_line::sync(
             &mut m,
-            handles.status_left,
-            handles.status_right,
+            &handles.status,
             &st.status,
             st.streaming,
-            st.permission.label(),
+            st.permission,
             st.queued.len(),
         );
-        spinner::sync(&mut m, &handles.spinner, true, st.tick, "esc to interrupt", st.glyphs);
+        spinner::sync(&mut m, &handles.spinner, true, st.tick, "esc to interrupt", st.glyphs, &theme::Theme::new(kind).fusion());
         dialog::sync(&mut m, handles.dialog_area, handles.widget_area, &st, st.glyphs);
         completion::sync(&mut m, handles.completion_area, &st, st.glyphs);
     }
     doc.set_viewport(Viewport::new(W as u32, H as u32, 1.0, kind.color_scheme()));
     doc.resolve(0.0);
-    message_list::apply_scroll(&mut doc, handles.messages, &mut st);
+    message_list::apply_scroll(&mut doc, handles.messages, handles.scrollbar_thumb, &mut st);
 
     let mut surface = Surface::new(W, H);
     {

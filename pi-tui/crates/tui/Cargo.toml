@@ -29,6 +29,8 @@ unicode-width = "0.2"
 serde_json = "1"
 # P4: terminal_markdown (RECON §9 — original uses pulldown-cmark 0.13.1)
 pulldown-cmark = { version = "=0.13.1", default-features = false }
+# Syntax tokenization only; colors come from the TUI's CSS classes.
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 # /copy — system clipboard
 arboard = "3"
 # @ file mentions — gitignore-aware walker

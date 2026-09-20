@@ -83,11 +83,10 @@ impl Fixture {
             );
             status_line::sync(
                 &mut m,
-                self.handles.status_left,
-                self.handles.status_right,
+                &self.handles.status,
                 &self.state.status,
                 self.state.streaming,
-                self.state.permission.label(),
+                self.state.permission,
                 self.state.queued.len(),
             );
             pi_fluent_tui::components::spinner::sync(
@@ -97,6 +96,7 @@ impl Fixture {
                 self.state.tick,
                 "esc to interrupt",
                 self.state.glyphs,
+                &theme::Theme::new(ThemeKind::Dark).fusion(),
             );
             pi_fluent_tui::components::dialog::sync(
                 &mut m,
@@ -119,7 +119,7 @@ impl Fixture {
             ThemeKind::Dark.color_scheme(),
         ));
         self.doc.resolve(0.0);
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, &mut self.state);
+        message_list::apply_scroll(&mut self.doc, self.handles.messages, self.handles.scrollbar_thumb, &mut self.state);
         let mut surface = Surface::new(self.w, self.h);
         let hits;
         {
@@ -207,6 +207,67 @@ fn tool_lifecycle_renders() {
 }
 
 #[test]
+fn streaming_tool_body_waits_for_a_cadence_boundary() {
+    let mut f = Fixture::new();
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "stream-1".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({"command": "cargo test"}),
+    });
+    let _ = f.frame();
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "stream-1".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({"output": "first output"}),
+    });
+    let before_boundary = f.frame();
+    assert!(!before_boundary.contains("first output"), "output jumped ahead:\n{before_boundary}");
+
+    for _ in 0..3 {
+        f.state.tick_frame();
+    }
+    let after_boundary = f.frame();
+    assert!(after_boundary.contains("first output"), "batched output:\n{after_boundary}");
+}
+
+#[test]
+fn read_tool_output_is_hidden_until_expanded() {
+    let mut f = Fixture::new();
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "read-1".into(),
+        tool_name: "read".into(),
+        args: serde_json::json!({"path": "src/state.rs"}),
+    });
+    f.event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: "read-1".into(),
+        tool_name: "read".into(),
+        result: serde_json::json!({"output": "line one\nline two"}),
+        is_error: false,
+    });
+    let collapsed = f.frame();
+    assert!(collapsed.contains("Read src/state.rs"), "read call:\n{collapsed}");
+    assert!(!collapsed.contains("line one"), "read result should be hidden:\n{collapsed}");
+    assert!(f.state.toggle_last_tool());
+    let expanded = f.frame();
+    assert!(expanded.contains("line one"), "expanded read result:\n{expanded}");
+}
+
+#[test]
+fn markdown_report_has_spacing_and_border_rules() {
+    let css = theme::stylesheet(ThemeKind::Dark);
+    assert!(css.contains(".md-p { margin-bottom: 1px; }"));
+    assert!(css.contains(".md-h2 {"));
+    assert!(css.contains("margin-top: 2px;"));
+    assert!(css.contains(".md-list {"));
+    assert!(css.contains("margin-bottom: 0px;"));
+    assert!(css.contains(".msg-assistant {"));
+    assert!(css.contains("border-left-width: 1px;"));
+    assert!(css.contains(".bg-code-block {"));
+}
+
+#[test]
 fn thinking_delta_renders_muted() {
     let mut f = Fixture::new();
     f.event(AgentEvent::AgentStart);
@@ -278,7 +339,7 @@ use pi_fluent_tui::state::{DialogState, Message, PermissionMode};
 
 #[test]
 fn markdown_renders_blocks() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::at(80, 40);
     f.state.push(Message::new(
         MsgKind::Assistant,
         "# Title\n\npara with `code` and **bold**\n\n> quoted\n\n- [x] done\n- [ ] todo\n\n```rust\nfn f() {}\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n![alt text](img.png) [link](https://x.y)",
@@ -372,14 +433,57 @@ fn permission_mode_cycles() {
     }
     assert_eq!(f.state.permission, PermissionMode::Normal);
     let text = f.frame();
-    assert!(text.contains("NORMAL"), "status shows mode:\n{text}");
+    assert!(text.contains("perm normal"), "status shows mode:\n{text}");
+}
+
+#[test]
+fn status_line_has_clear_running_and_input_modes() {
+    let mut f = Fixture::at(120, H);
+    f.state.status.model = "gpt-5.6-sol".into();
+    f.state.status.thinking = "high".into();
+    f.state.status.mode = "send:steer".into();
+    f.state.status.input_tokens = 12;
+    f.state.status.output_tokens = 4;
+    f.state.permission = PermissionMode::Bypass;
+    f.state.streaming = true;
+    f.state.queued = vec!["later".into()];
+
+    let text = f.frame();
+    assert!(text.contains("gpt-5.6-sol"), "model:\n{text}");
+    assert!(text.contains("perm bypass"), "permission:\n{text}");
+    assert!(text.contains("think high"), "thinking:\n{text}");
+    assert!(text.contains("input steer"), "input mode:\n{text}");
+    assert!(text.contains("● running"), "running state:\n{text}");
+    assert!(text.contains("1 queued"), "queue state:\n{text}");
+    assert!(text.contains("12 in / 4 out"), "token direction:\n{text}");
+}
+
+#[test]
+fn narrow_status_prioritizes_actionable_state() {
+    let mut f = Fixture::new();
+    f.state.status.model = "gpt-5.6-sol".into();
+    f.state.status.thinking = "high".into();
+    f.state.status.mode = "send:steer".into();
+    f.state.status.input_tokens = 12;
+    f.state.status.output_tokens = 4;
+    f.state.permission = PermissionMode::Bypass;
+    f.state.streaming = true;
+    f.state.queued = vec!["later".into()];
+
+    let text = f.frame();
+    assert!(text.contains("perm bypass"), "permission:\n{text}");
+    assert!(text.contains("● running"), "running state:\n{text}");
+    assert!(text.contains("1 queued"), "queue state:\n{text}");
+    assert!(!text.contains("think high"), "secondary thinking hidden:\n{text}");
+    assert!(!text.contains("input steer"), "secondary input mode hidden:\n{text}");
+    assert!(!text.contains("12 in / 4 out"), "token detail hidden:\n{text}");
 }
 
 #[test]
 fn spinner_line_renders_when_streaming() {
     let mut f = Fixture::new();
     f.state.streaming = true;
-    f.state.tick = 6; // frame 2
+    f.state.tick = 10; // frame 2 at the calmer 165ms cadence
     let text = f.frame();
     assert!(text.contains("Thinking"), "thinking label:\n{text}");
     assert!(text.contains("esc to interrupt"), "interrupt hint:\n{text}");
@@ -1047,6 +1151,15 @@ fn slash_completion_closes_on_space_or_nonmatch() {
 }
 
 #[test]
+fn slash_trigger_character_opens_completion_immediately() {
+    let mut f = Fixture::new();
+    f.state.input.insert_char('/');
+    f.state.update_completion();
+    let comp = f.state.completion.as_ref().expect("completion open after '/'");
+    assert!(comp.items.iter().any(|item| item.name == "model"));
+}
+
+#[test]
 fn pi_commands_merge_into_completion() {
     let mut f = Fixture::new();
     f.state.commands_quiet = true;
@@ -1156,6 +1269,17 @@ fn at_completion_matches_file_index() {
 }
 
 #[test]
+fn at_trigger_character_opens_completion_immediately() {
+    let mut f = Fixture::at(100, 20);
+    f.state.file_index = Some(vec!["src/app.rs".into()]);
+    f.state.input.insert_char('@');
+    f.state.update_completion();
+    let comp = f.state.completion.as_ref().expect("completion open after '@'");
+    assert_eq!(comp.kind, pi_fluent_tui::state::CompletionKind::File);
+    assert_eq!(comp.items[0].name, "src/app.rs");
+}
+
+#[test]
 fn attachment_selection_and_hint() {
     let mut f = Fixture::at(100, 20);
     for i in 1..=2 {
@@ -1196,7 +1320,7 @@ fn queue_update_tracks_queued() {
 
 #[test]
 fn thinking_collapse_tool_tail_table_math() {
-    let mut f = Fixture::at(80, 40);
+    let mut f = Fixture::at(80, 50);
     // Sealed thinking → collapsed.
     f.event(AgentEvent::AgentStart);
     f.event(AgentEvent::MessageUpdate {

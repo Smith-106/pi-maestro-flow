@@ -19,6 +19,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use unicode_width::UnicodeWidthStr;
 
 use crate::components::dom::{attr, div, qual, span_text};
+use crate::components::tool_card::{highlight_code, mime_to_lang};
 
 /// Render markdown `src` as block nodes appended under `parent`.
 pub fn render(m: &mut DocumentMutator<'_>, parent: NodeId, src: &str) {
@@ -58,8 +59,8 @@ struct Builder<'a, 'd> {
     cell_text: String,
     /// `Some(alt)` while inside an image tag — text goes to the alt buffer.
     img_alt: Option<String>,
-    /// Code-block accumulator (`Some` while inside a code block).
-    code: Option<String>,
+    /// Code-block accumulator and normalized fenced language.
+    code: Option<(String, Option<String>)>,
     /// Root node blocks append to when `blocks` is empty.
     root: NodeId,
 }
@@ -102,7 +103,7 @@ impl<'a, 'd> Builder<'a, 'd> {
             alt.push_str(text);
             return;
         }
-        if let Some(code) = &mut self.code {
+        if let Some((code, _)) = &mut self.code {
             code.push_str(text);
             return;
         }
@@ -178,15 +179,21 @@ impl<'a, 'd> Builder<'a, 'd> {
                 self.open_block("md-bq");
             }
             Tag::CodeBlock(kind) => {
-                let class = match &kind {
-                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => {
-                        format!("bg-code-block md-lang-{lang}")
-                    }
-                    _ => "bg-code-block".to_string(),
+                let lang = match &kind {
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .filter(|lang| !lang.is_empty())
+                        .map(|lang| mime_to_lang(lang).unwrap_or(lang).to_string()),
+                    CodeBlockKind::Indented => None,
                 };
+                let class = lang
+                    .as_deref()
+                    .map(|lang| format!("bg-code-block md-lang-{lang}"))
+                    .unwrap_or_else(|| "bg-code-block".to_string());
                 let el = div(self.m, self.parent(), &class);
                 self.blocks.push(el);
-                self.code = Some(String::new());
+                self.code = Some((String::new(), lang));
             }
             Tag::HtmlBlock => {
                 self.open_block("md-muted");
@@ -274,10 +281,9 @@ impl<'a, 'd> Builder<'a, 'd> {
                 }
             }
             TagEnd::CodeBlock => {
-                if let Some(code) = self.code.take() {
+                if let Some((code, lang)) = self.code.take() {
                     let parent = self.parent();
-                    let t = self.m.create_text_node(code.trim_end_matches('\n'));
-                    self.m.append_children(parent, &[t]);
+                    highlight_code(self.m, parent, code.trim_end_matches('\n'), lang.as_deref());
                 }
                 self.blocks.pop();
             }

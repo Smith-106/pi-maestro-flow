@@ -20,15 +20,20 @@ use crate::components::dom::{attr, div, qual, span_text};
 use crate::components::{markdown, tool_card};
 use crate::state::{AppState, Message, MsgKind};
 
-/// Build the `#messages` container under `parent`.
-/// Returns `(container, container)` — bubbles append directly; content
-/// flows top-down and `scroll_offset` on the container scrolls it.
-/// `data-hit-scroll` marks the region for mouse wheel routing.
-pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId) {
-    let container = div(m, parent, "");
+/// Build the `#messages` container under `parent`, wrapped in a
+/// `.messages-wrap` row with a 1-cell `#scrollbar` track.
+/// Returns `(container, container, thumb)` — bubbles append directly;
+/// content flows top-down and `scroll_offset` on the container scrolls
+/// it. `data-hit-scroll` marks the region for mouse wheel routing.
+pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId, NodeId) {
+    let wrap = div(m, parent, "messages-wrap");
+    let container = div(m, wrap, "");
     m.set_attribute(container, qual("id"), "messages");
     m.set_attribute(container, qual("data-hit-scroll"), "");
-    (container, container)
+    let track = div(m, wrap, "");
+    m.set_attribute(track, qual("id"), "scrollbar");
+    let thumb = div(m, track, "scrollbar-thumb");
+    (container, container, thumb)
 }
 
 /// Rebuild every message bubble under `inner` from `state.messages`.
@@ -62,7 +67,11 @@ pub fn rebuild(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState)
 }
 
 /// Append one `.msg` bubble for `msg`, recording node ids back into it.
-fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, tick: u64, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
+/// The full `class` attribute for a bubble — kind + agent palette +
+/// hidden + search marks. Pure function of msg/tray state; `sync`
+/// rewrites the attribute when `search_mark` diverges from
+/// `rendered_search_mark`.
+fn bubble_class(msg: &Message, tray_entries: &[crate::state::TrayEntry]) -> String {
     let mut class = match msg.kind {
         MsgKind::User => "msg msg-user".to_string(),
         MsgKind::Assistant => "msg msg-assistant".to_string(),
@@ -70,7 +79,16 @@ fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, 
         MsgKind::Tool => "msg msg-tool".to_string(),
         MsgKind::Error => "msg msg-error".to_string(),
         MsgKind::System => "msg msg-system".to_string(),
+        MsgKind::Compaction => "msg msg-compaction".to_string(),
+        MsgKind::Branch => "msg msg-branch".to_string(),
+        MsgKind::Skill => "msg msg-skill".to_string(),
+        MsgKind::Custom => "msg msg-custom".to_string(),
     };
+    if let Some(entry) = msg.tray_entry.and_then(|idx| tray_entries.get(idx)) {
+        if entry.kind == crate::state::TrayKind::Subagent {
+            class.push_str(&format!(" agent-color-{}", entry.color_idx));
+        }
+    }
     // Devin subagent/mode: nested cards of a backgrounded entry are
     // hidden until it finishes (or is foregrounded).
     if let Some(owner) = msg.nested_under {
@@ -80,9 +98,20 @@ fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, 
             }
         }
     }
+    match msg.search_mark {
+        crate::state::SearchMark::Hit => class.push_str(" msg-search-hit"),
+        crate::state::SearchMark::Current => class.push_str(" msg-search-current"),
+        crate::state::SearchMark::None => {}
+    }
+    class
+}
+
+fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, tick: u64, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
+    let class = bubble_class(msg, tray_entries);
     let bubble = m.create_element(qual("div"), vec![attr("class", &class)]);
     m.append_children(inner, &[bubble]);
     msg.node_id = Some(bubble);
+    msg.rendered_search_mark = msg.search_mark;
 
     match msg.kind {
         MsgKind::Tool => {
@@ -164,6 +193,7 @@ fn rebuild_bubble(m: &mut DocumentMutator<'_>, msg: &mut Message, tick: u64, gly
     msg.rendered_len = msg.text.len();
     msg.last_render_tick = tick;
     msg.dirty = false;
+    msg.rendered_search_mark = msg.search_mark;
 }
 
 /// Minimum ticks between streamed (non-dirty, unsealed) structural
@@ -203,6 +233,16 @@ pub fn sync(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState) ->
             changed = true;
             continue;
         }
+        // Search-mark drift: rewrite the class attribute only (no
+        // structural rebuild — the mark is render-only).
+        if msg.search_mark != msg.rendered_search_mark {
+            if let Some(bubble) = msg.node_id {
+                let class = bubble_class(msg, &state.tray.entries);
+                m.set_attribute(bubble, qual("class"), &class);
+                msg.rendered_search_mark = msg.search_mark;
+                changed = true;
+            }
+        }
         if msg.dirty || msg.rendered_len != msg.text.len() {
             match msg.kind {
                 // Markdown/tool/thinking bubbles re-render their subtree
@@ -210,10 +250,22 @@ pub fn sync(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState) ->
                 // Streamed appends (dirty=false, unsealed) throttle to
                 // STREAM_RENDER_INTERVAL ticks — a per-delta rebuild is
                 // O(message²) markdown re-parsing.
-                MsgKind::Assistant | MsgKind::Tool | MsgKind::Thinking
+                MsgKind::Assistant | MsgKind::Thinking
                     if msg.dirty
                         || msg.sealed
-                        || state.tick - msg.last_render_tick
+                        || state.tick.saturating_sub(msg.last_render_tick)
+                            >= STREAM_RENDER_INTERVAL =>
+                {
+                    rebuild_bubble(m, msg, state.tick, glyphs, &state.tray.entries);
+                    changed = true;
+                }
+                // Tool output is often delivered in many small deltas. Keep
+                // the call header responsive, but batch its live body until
+                // the normal stream interval; a terminal result is immediate.
+                MsgKind::Tool
+                    if msg.sealed
+                        || msg.tool_status != Some('●')
+                        || state.tick.saturating_sub(msg.last_render_tick)
                             >= STREAM_RENDER_INTERVAL =>
                 {
                     rebuild_bubble(m, msg, state.tick, glyphs, &state.tray.entries);
@@ -277,10 +329,18 @@ fn build_action_bar(m: &mut DocumentMutator<'_>, bubble: NodeId) -> NodeId {
 }
 
 /// Clamp `state.scroll` to the valid range for the current layout and
-/// write it into the `#messages` node's `scroll_offset`.
+/// write it into the `#messages` node's `scroll_offset`. Also syncs the
+/// `#scrollbar` thumb (height ∝ view/content, top ∝ scroll/max_scroll),
+/// gated on `state.scrollbar_sig` so unchanged frames skip the style
+/// writes (every `set_style_property` is layout damage).
 ///
 /// Must run *after* `doc.resolve()` (needs `scrollable_overflow`).
-pub fn apply_scroll(doc: &mut BaseDocument, container: NodeId, state: &mut AppState) {
+pub fn apply_scroll(
+    doc: &mut BaseDocument,
+    container: NodeId,
+    thumb: NodeId,
+    state: &mut AppState,
+) {
     let (content_h, view_h) = {
         let Some(node) = doc.get_node(container) else { return };
         let overflow = node.scrollable_overflow();
@@ -297,4 +357,20 @@ pub fn apply_scroll(doc: &mut BaseDocument, container: NodeId, state: &mut AppSt
     if let Some(node) = doc.get_node_mut(container) {
         node.scroll_offset_mut().y = state.scroll as f64;
     }
+
+    let sig = (content_h as u32, view_h as u32, state.scroll);
+    if sig == state.scrollbar_sig {
+        return;
+    }
+    state.scrollbar_sig = sig;
+    let mut m = doc.mutate();
+    if max_scroll <= 0.0 || view_h <= 0.0 {
+        m.set_style_property(thumb, "display", "none");
+        return;
+    }
+    m.set_style_property(thumb, "display", "block");
+    let thumb_h = ((view_h / content_h) * view_h).max(1.0).min(view_h);
+    let top = ((state.scroll as f64 / max_scroll) * (view_h - thumb_h)).max(0.0);
+    m.set_style_property(thumb, "height", &format!("{thumb_h}px"));
+    m.set_style_property(thumb, "margin-top", &format!("{top}px"));
 }

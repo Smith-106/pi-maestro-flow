@@ -28,7 +28,7 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
-use pi_rpc::{AgentEvent, PiRpc, RpcCommand, RpcEvent, RpcResponse};
+use pi_rpc::{AgentEvent, PiRpc, RpcCommand, RpcEvent, RpcResponse, StreamingBehavior};
 use scrollback::{Frame, PaintContext, Renderer, Surface, ansi, paint_document};
 use tokio::sync::mpsc;
 
@@ -50,6 +50,8 @@ pub struct DomHandles {
     pub app: blitz_dom::NodeId,
     pub messages: blitz_dom::NodeId,
     pub messages_inner: blitz_dom::NodeId,
+    /// `#scrollbar` thumb element (geometry synced in `apply_scroll`).
+    pub scrollbar_thumb: blitz_dom::NodeId,
     pub spinner: spinner::SpinnerHandles,
     pub dialog_area: blitz_dom::NodeId,
     pub widget_area: blitz_dom::NodeId,
@@ -57,8 +59,7 @@ pub struct DomHandles {
     pub input_text: blitz_dom::NodeId,
     /// In-flow completion list below the input (native pi style).
     pub completion_area: blitz_dom::NodeId,
-    pub status_left: blitz_dom::NodeId,
-    pub status_right: blitz_dom::NodeId,
+    pub status: status_line::StatusLineHandles,
 }
 
 /// The TUI application.
@@ -70,6 +71,10 @@ pub struct App {
     renderer: Renderer,
     theme: Theme,
     theme_kind: ThemeKind,
+    /// The active UA stylesheet text — kept so `apply_theme` can
+    /// `remove_user_agent_stylesheet` before adding the next one
+    /// (blitz-dom appends; stale sheets would otherwise accumulate).
+    theme_css: String,
     /// Height of the `#messages` viewport from the last frame (for
     /// PageUp/PageDown scroll math).
     messages_view_h: u32,
@@ -110,6 +115,21 @@ pub struct App {
 /// Double-Esc interrupt window.
 const ESC_INTERRUPT_WINDOW: Duration = Duration::from_millis(800);
 
+/// Select the RPC command used for text submitted during an active turn.
+/// The `set_*_mode` RPCs configure queue drain policy (`all` vs
+/// `one-at-a-time`); choosing steer vs follow-up is done by the command
+/// variant itself.
+fn streaming_input_command(
+    mode: Option<StreamingBehavior>,
+    message: String,
+    images: Option<Vec<pi_rpc::MessageContent>>,
+) -> RpcCommand {
+    match mode.unwrap_or(StreamingBehavior::FollowUp) {
+        StreamingBehavior::Steer => RpcCommand::Steer { message, images },
+        StreamingBehavior::FollowUp => RpcCommand::FollowUp { message, images },
+    }
+}
+
 impl App {
     /// Build the app: document, DOM skeleton, renderer, RPC handle.
     pub fn new(rpc: PiRpc, theme_kind: ThemeKind) -> Self {
@@ -127,7 +147,8 @@ impl App {
             ua_stylesheets: None,
             ..Default::default()
         });
-        doc.add_user_agent_stylesheet(&theme::stylesheet(theme_kind));
+        let theme_css = theme::stylesheet(theme_kind);
+        doc.add_user_agent_stylesheet(&theme_css);
 
         let handles = build_skeleton(&mut doc);
 
@@ -142,6 +163,7 @@ impl App {
             renderer: Renderer::new(),
             theme: Theme::new(theme_kind),
             theme_kind,
+            theme_css,
             messages_view_h: 0,
             notice_rx,
             notice_tx,
@@ -176,6 +198,12 @@ impl App {
         state.attachment_sel.hash(&mut s);
         state.tip_idx.hash(&mut s);
         state.show_tips().hash(&mut s);
+        state
+            .settings
+            .get("show_cwd_in_input_border")
+            .copied()
+            .unwrap_or(true)
+            .hash(&mut s);
         state.dialog.is_some().hash(&mut s);
         s.finish()
     }
@@ -188,8 +216,8 @@ impl App {
         let mut s = std::collections::hash_map::DefaultHasher::new();
         state.streaming.hash(&mut s);
         if state.streaming {
-            (state.tick / 3).hash(&mut s); // glyph frame
-            ((state.tick >> 2) % 3).hash(&mut s); // dots
+            (state.tick / spinner::SPINNER_FRAME_TICKS).hash(&mut s); // glyph frame
+            ((state.tick / spinner::SPINNER_DOT_TICKS) % 3).hash(&mut s); // dots
         }
         s.finish()
     }
@@ -385,7 +413,8 @@ impl App {
                     }
                     self.state.status.thinking =
                         format!("{:?}", s.thinking_level).to_lowercase();
-                    self.state.status.mode = format!("{:?}", s.steering_mode).to_lowercase();
+                    // The server value controls queue draining; the footer
+                    // reports this TUI's steer/follow-up submission choice.
                     self.state.streaming = s.is_streaming;
                 }
             }
@@ -454,7 +483,19 @@ impl App {
     /// Reduce one terminal event; returns whether a repaint is needed.
     fn handle_term_event(&mut self, ev: TermEvent) -> bool {
         let dirty = match ev {
-            TermEvent::Key(key) => self.handle_key(key),
+            TermEvent::Key(key) => {
+                let dirty = self.handle_key(key);
+                // `handle_key` checks the popup before applying the key so
+                // navigation/acceptance can shadow editor bindings. Rebuild
+                // it once more after the edit so the trigger character
+                // itself (`/` or `@`) opens completion immediately.
+                // Escape is an explicit close and must not reopen it from
+                // the unchanged input text.
+                if key.code != KeyCode::Esc {
+                    self.refresh_completion();
+                }
+                dirty
+            }
             TermEvent::Paste(s) => {
                 let s = s.replace("\r\n", "\n").replace('\r', "\n");
                 match &mut self.state.dialog {
@@ -462,6 +503,7 @@ impl App {
                     | Some(DialogState::Editor { input, .. }) => input.insert_str(&s),
                     _ => self.state.input.insert_str(&s),
                 }
+                self.refresh_completion();
                 true
             }
             TermEvent::Mouse(m) => self.handle_mouse(m),
@@ -487,6 +529,20 @@ impl App {
         // A dialog key/click may have queued a response.
         self.flush_dialog_result();
         dirty
+    }
+
+    /// Recompute input completion after a terminal edit or paste.
+    fn refresh_completion(&mut self) {
+        if self.state.dialog.is_some() || self.state.tray.open || self.state.search.is_some() {
+            self.state.completion = None;
+            return;
+        }
+        if self.state.file_index.is_none()
+            && self.state.input.text[..self.state.input.cursor].contains('@')
+        {
+            self.state.file_index = Some(build_file_index(&self.state));
+        }
+        self.state.update_completion();
     }
 
     /// Route a mouse event through the painted `data-hit-*` regions.
@@ -569,6 +625,7 @@ impl App {
                                 self.state.dom_dirty = true;
                             }
                             Some(DialogState::Local { sel, action }) => {
+                                let mut preview = false;
                                 if let Some(i) = i {
                                     let was = sel.cursor;
                                     sel.click(i);
@@ -579,9 +636,14 @@ impl App {
                                             self.state.dialog = None;
                                             self.dispatch_local_select(action, idx);
                                         }
+                                    } else {
+                                        preview = *action == LocalAction::SetTheme;
                                     }
                                 }
                                 self.state.dom_dirty = true;
+                                if preview {
+                                    self.preview_theme_selection();
+                                }
                             }
                             _ => {}
                         }
@@ -667,6 +729,10 @@ impl App {
         // Dialogs capture all keys while active.
         if self.state.dialog.is_some() {
             return self.handle_dialog_key(key);
+        }
+        // Scrollback search (Ctrl+S) is modal like the tray.
+        if self.state.search.is_some() {
+            return self.handle_search_key(key);
         }
         // The tray panel captures keys while open (F2 toggles).
         if self.state.tray.open {
@@ -772,8 +838,19 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         // F2: open the subagent tray (backgrounds the foreground view).
         if key.code == KeyCode::F(2) {
-            self.state.tray.open = true;
-            self.state.dom_dirty = true;
+            if self
+                .state
+                .settings
+                .get("subagents_enabled")
+                .copied()
+                .unwrap_or(true)
+            {
+                self.state.tray.open = true;
+                self.state.dom_dirty = true;
+            } else {
+                self.state
+                    .push_system("subagent tray disabled in /settings");
+            }
             return true;
         }
         // Alt (Meta) bindings — the Emacs word ops.
@@ -809,8 +886,33 @@ impl App {
                     self.state.input.transpose_words();
                     return true;
                 }
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.state.input.yank_pop();
+                    return true;
+                }
                 KeyCode::Backspace => {
                     self.state.input.backward_kill_word();
+                    return true;
+                }
+                // Alt+S: choose whether Enter steers the active turn or
+                // queues a follow-up. This is separate from pi's queue
+                // drain policy (`all` vs `one-at-a-time`).
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    let next = match self
+                        .state
+                        .steering_mode
+                        .unwrap_or(StreamingBehavior::FollowUp)
+                    {
+                        StreamingBehavior::FollowUp => StreamingBehavior::Steer,
+                        StreamingBehavior::Steer => StreamingBehavior::FollowUp,
+                    };
+                    self.state.steering_mode = Some(next);
+                    self.state.status.mode = match next {
+                        StreamingBehavior::Steer => "send:steer",
+                        StreamingBehavior::FollowUp => "send:follow-up",
+                    }
+                    .to_string();
+                    self.state.dom_dirty = true;
                     return true;
                 }
                 // Unknown Alt+Char still inserts (macOS Option typing).
@@ -822,6 +924,15 @@ impl App {
             }
         }
         match (key.code, ctrl, shift) {
+            (KeyCode::Char('z') | KeyCode::Char('Z'), true, true) => {
+                self.state.input.redo();
+                true
+            }
+            (KeyCode::Char('z') | KeyCode::Char('Z'), true, false)
+            | (KeyCode::Char('_'), true, _) => {
+                self.state.input.undo();
+                true
+            }
             (KeyCode::Char('c'), true, _) => {
                 if self.state.streaming {
                     self.send_cmd(RpcCommand::Abort);
@@ -965,6 +1076,12 @@ impl App {
                 self.state.input.history_search();
                 true
             }
+            // Ctrl+S: scrollback search (Ctrl+F is Emacs move-right).
+            (KeyCode::Char('s'), true, _) => {
+                self.state.search = Some(crate::state::SearchState::default());
+                self.state.dom_dirty = true;
+                true
+            }
             (KeyCode::Backspace, true, _) => {
                 self.state.input.backward_kill_word();
                 true
@@ -989,12 +1106,23 @@ impl App {
                 self.state.input.move_word_right();
                 true
             }
+            (KeyCode::Right, false, _)
+                if self.state.input.cursor == self.state.input.text.len()
+                    && self.state.input.ghost.is_some() =>
+            {
+                self.state.input.accept_ghost();
+                true
+            }
             (KeyCode::Right, _, _) => {
                 self.state.input.move_right();
                 true
             }
             (KeyCode::Home, _, _) => {
                 self.state.input.move_home();
+                true
+            }
+            (KeyCode::End, _, _) if self.state.input.ghost.is_some() => {
+                self.state.input.accept_ghost();
                 true
             }
             (KeyCode::End, _, _) => {
@@ -1160,31 +1288,81 @@ impl App {
                     }
                 }
             }
-            Some(DialogState::Local { sel, action }) => match (code, ctrl) {
-                (KeyCode::Esc, _) => self.state.cancel_dialog(),
-                (KeyCode::Up, _) => sel.move_up(),
-                (KeyCode::Down, _) => sel.move_down(),
-                (KeyCode::PageUp, _) => {
-                    for _ in 0..select::MAX_VISIBLE {
+            Some(DialogState::Local { sel, action }) => {
+                // /theme picker: cursor moves preview live; Esc restores
+                // `theme_restore`, Enter commits via dispatch_local_select.
+                let theme_picker = *action == LocalAction::SetTheme;
+                let mut preview = false;
+                let mut restore = None;
+                match (code, ctrl) {
+                    (KeyCode::Esc, _) => {
+                        if sel.detail.is_some() {
+                            // Detail page: Esc backs out to the list.
+                            sel.detail = None;
+                        } else {
+                            if theme_picker {
+                                restore = self.state.theme_restore.take();
+                            }
+                            self.state.cancel_dialog();
+                        }
+                    }
+                    // Tab: model picker metadata detail page (Devin
+                    // `next_metadata`) — only for the /model picker.
+                    (KeyCode::Tab, _) => {
+                        if *action == LocalAction::SetModel {
+                            if sel.detail.is_some() {
+                                sel.detail = None;
+                            } else if let Some(i) = sel.selected() {
+                                if let Some(m) = self.state.models.get(i) {
+                                    sel.detail = Some(select::model_detail(m));
+                                }
+                            }
+                        }
+                    }
+                    (KeyCode::Up, _) => {
                         sel.move_up();
+                        preview = theme_picker;
                     }
-                }
-                (KeyCode::PageDown, _) => {
-                    for _ in 0..select::MAX_VISIBLE {
+                    (KeyCode::Down, _) => {
                         sel.move_down();
+                        preview = theme_picker;
                     }
-                }
-                (KeyCode::Enter, _) => {
-                    let action = *action;
-                    if let Some(i) = sel.selected() {
-                        self.state.dialog = None;
-                        self.dispatch_local_select(action, i);
+                    (KeyCode::PageUp, _) => {
+                        for _ in 0..select::MAX_VISIBLE {
+                            sel.move_up();
+                        }
+                        preview = theme_picker;
                     }
+                    (KeyCode::PageDown, _) => {
+                        for _ in 0..select::MAX_VISIBLE {
+                            sel.move_down();
+                        }
+                        preview = theme_picker;
+                    }
+                    (KeyCode::Enter, _) => {
+                        let action = *action;
+                        if let Some(i) = sel.selected() {
+                            self.state.dialog = None;
+                            self.dispatch_local_select(action, i);
+                        }
+                    }
+                    (KeyCode::Backspace, _) => {
+                        sel.pop_filter();
+                        preview = theme_picker;
+                    }
+                    (KeyCode::Char(c), false) => {
+                        sel.push_filter(c);
+                        preview = theme_picker;
+                    }
+                    _ => {}
                 }
-                (KeyCode::Backspace, _) => sel.pop_filter(),
-                (KeyCode::Char(c), false) => sel.push_filter(c),
-                _ => {}
-            },
+                if let Some(kind) = restore {
+                    self.apply_theme(kind);
+                }
+                if preview {
+                    self.preview_theme_selection();
+                }
+            }
             None => return false,
         }
         self.state.dom_dirty = true;
@@ -1276,6 +1454,62 @@ impl App {
         true
     }
 
+    /// Key handling while scrollback search is open: typing edits the
+    /// query (matches recompute live), Enter/BackTab step through hits,
+    /// Esc closes and clears all marks.
+    fn handle_search_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Esc, _) => {
+                for m in &mut self.state.messages {
+                    m.search_mark = crate::state::SearchMark::None;
+                }
+                self.state.search = None;
+            }
+            (KeyCode::Enter, false) => {
+                if let Some(idx) = self
+                    .state
+                    .search
+                    .as_mut()
+                    .and_then(|s| s.step(&mut self.state.messages, 1))
+                {
+                    self.scroll_to_message(idx);
+                }
+            }
+            (KeyCode::BackTab, _) | (KeyCode::Enter, true) => {
+                if let Some(idx) = self
+                    .state
+                    .search
+                    .as_mut()
+                    .and_then(|s| s.step(&mut self.state.messages, -1))
+                {
+                    self.scroll_to_message(idx);
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some(s) = &mut self.state.search {
+                    s.query.pop();
+                    let idx = s.refresh(&mut self.state.messages);
+                    if let Some(i) = idx {
+                        self.scroll_to_message(i);
+                    }
+                }
+            }
+            (KeyCode::Char(c), false) => {
+                if let Some(s) = &mut self.state.search {
+                    s.query.push(c);
+                    let idx = s.refresh(&mut self.state.messages);
+                    if let Some(i) = idx {
+                        self.scroll_to_message(i);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.state.dom_dirty = true;
+        true
+    }
+
     /// Scroll the message list so `msg_idx`'s bubble is at the top.
     /// `state.scroll` is a bottom-anchored offset (0 = tail), so the
     /// target is `content_height - (bubble height + heights below)`.
@@ -1312,17 +1546,44 @@ impl App {
 
     /// The `#input-hint` line for this frame.
     fn input_hint(state: &AppState) -> String {
+        // Scrollback search bar replaces the hint while open.
+        if let Some(s) = &state.search {
+            return match s.matches.len() {
+                0 if s.query.is_empty() => "search: (type to filter · esc close)".to_string(),
+                0 => format!("search: {} — no matches (esc close)", s.query),
+                n => format!(
+                    "search: {} — {}/{} (enter next · shift+enter prev · esc close)",
+                    s.query,
+                    s.cursor + 1,
+                    n
+                ),
+            };
+        }
         let tip = if state.show_tips() {
             input_box::TIPS[state.tip_idx]
         } else {
             ""
         };
-        input_box::hint_for(
+        let hint = input_box::hint_for(
             &state.input,
             &state.attachments,
             state.attachment_sel,
             tip,
-        )
+        );
+        if state
+            .settings
+            .get("show_cwd_in_input_border")
+            .copied()
+            .unwrap_or(true)
+        {
+            if let Ok(cwd) = std::env::current_dir() {
+                if hint.is_empty() {
+                    return cwd.display().to_string();
+                }
+                return format!("{} · {hint}", cwd.display());
+            }
+        }
+        hint
     }
 
     /// Scroll the message list by `delta` cells (negative = up).
@@ -1379,11 +1640,11 @@ impl App {
                 };
                 self.state.attachment_sel = None;
                 if self.state.streaming {
-                    // pi queues prompts while streaming (follow_up).
-                    self.send_cmd(RpcCommand::FollowUp {
-                        message: p,
+                    self.send_cmd(streaming_input_command(
+                        self.state.steering_mode,
+                        p,
                         images,
-                    });
+                    ));
                 } else {
                     self.send_cmd(RpcCommand::Prompt {
                         message: p,
@@ -1393,6 +1654,38 @@ impl App {
                 }
             }
             Command::Local(cmd) => self.dispatch_local(cmd),
+        }
+    }
+
+    /// Swap the active theme at runtime: remove the old UA sheet before
+    /// adding the new one (blitz-dom appends — re-adding only would
+    /// accumulate a full stylesheet per switch), then force a full
+    /// re-style + repaint on the next frame.
+    fn apply_theme(&mut self, kind: ThemeKind) {
+        if kind == self.theme_kind {
+            return;
+        }
+        self.doc.remove_user_agent_stylesheet(&self.theme_css);
+        self.theme_css = theme::stylesheet(kind);
+        self.doc.add_user_agent_stylesheet(&self.theme_css);
+        self.theme = Theme::new(kind);
+        self.theme_kind = kind;
+        // (0,0) forces the next set_viewport → Device rebuild with the
+        // new color_scheme; the redraw/rebuild flags repaint all cells.
+        self.last_viewport = (0, 0);
+        self.renderer.needs_full_redraw = true;
+        self.state.needs_rebuild = true;
+        self.state.dom_dirty = true;
+    }
+
+    /// `/theme` picker preview: apply the highlighted row's theme
+    /// (index 0 = `auto` → re-detect). Committed/reverted by the
+    /// dialog's Enter/Esc arms via `state.theme_restore`.
+    fn preview_theme_selection(&mut self) {
+        if let Some(DialogState::Local { sel, .. }) = &self.state.dialog {
+            if let Some(kind) = sel.selected().and_then(select::theme_picker_kind) {
+                self.apply_theme(kind);
+            }
         }
     }
 
@@ -1415,6 +1708,18 @@ impl App {
             LocalCmd::NewSession => self.send_report(RpcCommand::NewSession {
                 parent_session: None,
             }),
+            // RPC exposes entries in the current session, not a list of
+            // session files, so /resume honestly acts as a fork-point picker.
+            LocalCmd::Resume => self.send_report(RpcCommand::GetEntries { since: None }),
+            LocalCmd::Tree => self.send_report(RpcCommand::GetTree),
+            LocalCmd::Fork => self.send_report(RpcCommand::GetForkMessages),
+            LocalCmd::Clone => self.send_report(RpcCommand::Clone),
+            LocalCmd::Import(session_path) => {
+                self.send_report(RpcCommand::SwitchSession { session_path })
+            }
+            LocalCmd::Unsupported(name) => self
+                .state
+                .push_system(format!("/{name}: not supported over RPC")),
             LocalCmd::Compact(instructions) => self.send_report(RpcCommand::Compact {
                 custom_instructions: instructions,
             }),
@@ -1426,6 +1731,36 @@ impl App {
             LocalCmd::Copy => self.send_report(RpcCommand::GetLastAssistantText),
             LocalCmd::Clear => self.state.clear_messages(),
             LocalCmd::Settings => self.state.open_local_select(LocalAction::ToggleSetting),
+            LocalCmd::Theme(None) => self.state.open_theme_select(self.theme_kind),
+            LocalCmd::Theme(Some(name)) => {
+                if name == "auto" {
+                    self.state.theme_override = None;
+                    self.state.settings.insert("theme_auto_detect".into(), true);
+                    self.apply_theme(theme::detect());
+                    self.state
+                        .push_system(format!("theme → auto ({})", self.theme_kind.name()));
+                } else {
+                    match ThemeKind::from_name(&name) {
+                        Some(kind) => {
+                            self.state.theme_override = Some(kind);
+                            self.state
+                                .settings
+                                .insert("theme_auto_detect".into(), false);
+                            self.apply_theme(kind);
+                            self.state
+                                .push_system(format!("theme → {}", kind.name()));
+                        }
+                        None => {
+                            let names: Vec<&str> =
+                                ThemeKind::ALL.iter().map(|k| k.name()).collect();
+                            self.state.push_system(format!(
+                                "unknown theme '{name}' ({}|auto)",
+                                names.join("|")
+                            ));
+                        }
+                    }
+                }
+            }
             // /unqueue: recall the last queued message into the input.
             // pi only exposes `clear_queue`, so we clear then re-queue
             // the remaining messages as follow-ups.
@@ -1516,10 +1851,99 @@ impl App {
                 if let Some(key) = crate::state::SETTINGS_KEYS.get(index).copied() {
                     let on = !self.state.settings.get(key).copied().unwrap_or(true);
                     self.state.settings.insert(key.to_string(), on);
+                    match key {
+                        "mouse_capture" => {
+                            let mut out = io::stdout().lock();
+                            let result = if on {
+                                execute!(out, EnableMouseCapture)
+                            } else {
+                                execute!(out, DisableMouseCapture)
+                            };
+                            drop(out);
+                            if let Err(e) = result {
+                                self.state
+                                    .push_system(format!("mouse capture toggle failed: {e}"));
+                            }
+                        }
+                        "symbol_mode" => {
+                            self.state.glyphs = if on {
+                                crate::components::glyphs::GlyphMode::Unicode
+                            } else {
+                                crate::components::glyphs::GlyphMode::Ascii
+                            };
+                            self.state.needs_rebuild = true;
+                        }
+                        "theme_auto_detect" => {
+                            if on {
+                                self.state.theme_override = None;
+                                self.apply_theme(theme::detect());
+                            } else {
+                                self.state.theme_override = Some(self.theme_kind);
+                            }
+                        }
+                        "include_gitignored_in_mentions" => {
+                            self.state.file_index = None;
+                        }
+                        "subagents_enabled" => {
+                            if !on {
+                                self.state.tray.open = false;
+                                // Collection happens in the shared event reducer;
+                                // discard existing cached entries while disabled.
+                                self.state.tray.entries.clear();
+                                self.state.tray.cursor = 0;
+                            }
+                        }
+                        "startup_tips_remaining" => {
+                            // Boolean proxy: off permanently dismisses the
+                            // startup banner; on restores it only before the
+                            // first user message in this run.
+                            self.state.banner_visible = on
+                                && !self
+                                    .state
+                                    .messages
+                                    .iter()
+                                    .any(|m| m.kind == MsgKind::User);
+                            self.state.needs_rebuild = true;
+                        }
+                        "show_tips" | "show_cwd_in_input_border" => {}
+                        _ => {}
+                    }
                     self.state.open_local_select(LocalAction::ToggleSetting);
                     if let Some(DialogState::Local { sel, .. }) = &mut self.state.dialog {
                         sel.cursor = index;
                     }
+                }
+            }
+            LocalAction::ResumeEntry | LocalAction::TreeEntry | LocalAction::ForkEntry => {
+                if let Some((entry_id, _)) = self.state.session_points.get(index) {
+                    self.send_report(RpcCommand::Fork {
+                        entry_id: entry_id.clone(),
+                    });
+                }
+            }
+            LocalAction::SetTheme => {
+                self.state.theme_restore = None;
+                match select::theme_picker_kind(index) {
+                    Some(kind) if index == 0 => {
+                        // `auto` row: follow detection, unpin the override.
+                        self.state.theme_override = None;
+                        self.state
+                            .settings
+                            .insert("theme_auto_detect".into(), true);
+                        self.apply_theme(kind);
+                        self.state
+                            .push_system(format!("theme → auto ({})", kind.name()));
+                    }
+                    Some(kind) => {
+                        self.state.theme_override = Some(kind);
+                        self.state
+                            .settings
+                            .insert("theme_auto_detect".into(), false);
+                        self.apply_theme(kind);
+                        self.state
+                            .push_system(format!("theme → {}", kind.name()));
+                    }
+                    None => {}
                 }
             }
         }
@@ -1574,11 +1998,19 @@ impl App {
                         }
                         self.state.status.thinking =
                             format!("{:?}", s.thinking_level).to_lowercase();
-                        self.state.status.mode =
-                            format!("{:?}", s.steering_mode).to_lowercase();
+                        // `s.steering_mode` is the server's queue drain policy
+                        // (all/one-at-a-time), not this TUI's steer/follow-up
+                        // submission choice; keep the local status label.
                         self.state.streaming = s.is_streaming;
                         return true;
                     }
+                }
+                if resp.command == "get_commands" {
+                    // The user may have typed `/` before the asynchronous
+                    // startup fetch completed. Refresh the visible popup as
+                    // soon as extension/skill commands arrive.
+                    self.refresh_completion();
+                    return true;
                 }
                 self.state.dom_dirty
             }
@@ -1699,11 +2131,10 @@ impl App {
             if status_sig != self.status_sig {
                 status_line::sync(
                     &mut m,
-                    self.handles.status_left,
-                    self.handles.status_right,
+                    &self.handles.status,
                     &self.state.status,
                     self.state.streaming,
-                    self.state.permission.label(),
+                    self.state.permission,
                     self.state.queued.len(),
                 );
                 self.status_sig = status_sig;
@@ -1716,6 +2147,7 @@ impl App {
                     self.state.tick,
                     "esc to interrupt",
                     self.state.glyphs,
+                    &self.theme.fusion(),
                 );
                 self.spinner_sig = spinner_sig;
             }
@@ -1768,7 +2200,12 @@ impl App {
         }
 
         // 4. Scroll clamp + write.
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, &mut self.state);
+        message_list::apply_scroll(
+            &mut self.doc,
+            self.handles.messages,
+            self.handles.scrollbar_thumb,
+            &mut self.state,
+        );
         self.painted_scroll = self.state.scroll;
         self.messages_view_h = self
             .doc
@@ -1860,6 +2297,7 @@ fn key_mods(key: KeyEvent) -> Vec<String> {
 fn edit_keys(input: &mut crate::state::InputState, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     if alt {
         match key.code {
             KeyCode::Char('b') | KeyCode::Char('B') => input.move_word_left(),
@@ -1875,6 +2313,7 @@ fn edit_keys(input: &mut crate::state::InputState, key: KeyEvent) {
                 input.case_word(crate::state::WordCase::Capitalize)
             }
             KeyCode::Char('t') | KeyCode::Char('T') => input.transpose_words(),
+            KeyCode::Char('y') | KeyCode::Char('Y') => input.yank_pop(),
             KeyCode::Backspace => input.backward_kill_word(),
             KeyCode::Char(c) => input.insert_char(c),
             _ => {}
@@ -1882,14 +2321,24 @@ fn edit_keys(input: &mut crate::state::InputState, key: KeyEvent) {
         return;
     }
     match (key.code, ctrl) {
+        (KeyCode::Char('z') | KeyCode::Char('Z'), true) if shift => input.redo(),
+        (KeyCode::Char('z') | KeyCode::Char('Z'), true) | (KeyCode::Char('_'), true) => {
+            input.undo()
+        }
         (KeyCode::Backspace, true) => input.backward_kill_word(),
         (KeyCode::Backspace, _) => input.backspace(),
         (KeyCode::Delete, _) => input.delete(),
         (KeyCode::Left, true) => input.move_word_left(),
         (KeyCode::Left, _) => input.move_left(),
         (KeyCode::Right, true) => input.move_word_right(),
+        (KeyCode::Right, false) if input.cursor == input.text.len() && input.ghost.is_some() => {
+            input.accept_ghost();
+        }
         (KeyCode::Right, _) => input.move_right(),
         (KeyCode::Home, _) => input.move_home(),
+        (KeyCode::End, _) if input.ghost.is_some() => {
+            input.accept_ghost();
+        }
         (KeyCode::End, _) => input.move_end(),
         (KeyCode::Up, _) => {
             input.prev_line();
@@ -1951,12 +2400,12 @@ pub fn build_skeleton(doc: &mut BaseDocument) -> DomHandles {
     let app = div(&mut m, body, "");
     m.set_attribute(app, qual("id"), "app");
 
-    let (messages, messages_inner) = message_list::build(&mut m, app);
+    let (messages, messages_inner, scrollbar_thumb) = message_list::build(&mut m, app);
     let spinner = spinner::build(&mut m, app);
     let (dialog_area, widget_area) = dialog::build(&mut m, app);
     let (_area, hint_text, input_text) = input_box::build(&mut m, app);
     let completion_area = completion::build(&mut m, app);
-    let (_line, status_left, status_right) = status_line::build(&mut m, app);
+    let status = status_line::build(&mut m, app);
 
     drop(m);
 
@@ -1965,14 +2414,14 @@ pub fn build_skeleton(doc: &mut BaseDocument) -> DomHandles {
         app,
         messages,
         messages_inner,
+        scrollbar_thumb,
         spinner,
         dialog_area,
         widget_area,
         input_hint_text: hint_text,
         input_text,
         completion_area,
-        status_left,
-        status_right,
+        status,
     }
 }
 
@@ -2100,6 +2549,27 @@ fn encode_png(img: &arboard::ImageData<'_>) -> Result<Vec<u8>, String> {
         w.write_image_data(&img.bytes).map_err(|e| e.to_string())?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_submit_selects_steer_or_follow_up() {
+        assert!(matches!(
+            streaming_input_command(Some(StreamingBehavior::Steer), "now".into(), None),
+            RpcCommand::Steer { message, .. } if message == "now"
+        ));
+        assert!(matches!(
+            streaming_input_command(Some(StreamingBehavior::FollowUp), "later".into(), None),
+            RpcCommand::FollowUp { message, .. } if message == "later"
+        ));
+        assert!(matches!(
+            streaming_input_command(None, "default".into(), None),
+            RpcCommand::FollowUp { .. }
+        ));
+    }
 }
 
 /// Build the `@` file index: cwd-relative paths, gitignore-aware

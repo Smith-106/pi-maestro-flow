@@ -23,6 +23,18 @@ pub enum LocalCmd {
     Thinking(Option<String>),
     /// `/new` — start a fresh session.
     NewSession,
+    /// `/resume` — pick a current-session entry to fork from.
+    Resume,
+    /// `/tree` — pick a node in the current session tree to fork from.
+    Tree,
+    /// `/fork` — pick a user message to fork from.
+    Fork,
+    /// `/clone` — clone the current session at its leaf.
+    Clone,
+    /// `/import <path>` — switch to the session file at `path`.
+    Import(String),
+    /// Command exists upstream but has no RPC primitive.
+    Unsupported(&'static str),
     /// `/compact [instructions]`.
     Compact(Option<String>),
     /// `/session` — stats as a system line.
@@ -37,6 +49,8 @@ pub enum LocalCmd {
     Clear,
     /// `/settings` — local boolean toggles picker.
     Settings,
+    /// `/theme` → picker; `/theme <name>` → direct set; `/theme auto` → detect.
+    Theme(Option<String>),
     /// `/unqueue` — recall the last queued (follow-up) message.
     Unqueue,
     /// `/help` — list built-in + pi-reported commands.
@@ -67,6 +81,17 @@ pub fn parse(input: &str) -> Command {
         "model" | "m" => LocalCmd::Model(args),
         "thinking" | "think" | "t" => LocalCmd::Thinking(args),
         "new" => LocalCmd::NewSession,
+        "resume" => LocalCmd::Resume,
+        "tree" => LocalCmd::Tree,
+        "fork" => LocalCmd::Fork,
+        "clone" => LocalCmd::Clone,
+        "import" => match args {
+            Some(path) => LocalCmd::Import(path),
+            None => return Command::Prompt(input.to_string()),
+        },
+        "share" => LocalCmd::Unsupported("share"),
+        "login" => LocalCmd::Unsupported("login"),
+        "logout" => LocalCmd::Unsupported("logout"),
         "compact" => LocalCmd::Compact(args),
         "session" | "stats" => LocalCmd::Session,
         "export" => LocalCmd::Export(args),
@@ -77,6 +102,7 @@ pub fn parse(input: &str) -> Command {
         "copy" => LocalCmd::Copy,
         "clear" | "cls" => LocalCmd::Clear,
         "settings" | "setting" => LocalCmd::Settings,
+        "theme" => LocalCmd::Theme(args),
         "unqueue" => LocalCmd::Unqueue,
         "help" | "h" | "?" => LocalCmd::Help,
         "quit" | "exit" | "q" => LocalCmd::Quit,
@@ -90,6 +116,17 @@ pub const BUILTIN_HELP: &[(&str, &str)] = &[
     ("/model [provider/id]", "select or switch model"),
     ("/thinking [level]", "select or set thinking level"),
     ("/new", "start a new session"),
+    (
+        "/resume",
+        "pick a current-session entry to fork (RPC has no session list)",
+    ),
+    ("/tree", "pick a current-session tree node to fork"),
+    ("/fork", "pick a user message to fork from"),
+    ("/clone", "clone the current session at its leaf"),
+    ("/import <path>", "switch to a session file"),
+    ("/share", "not supported over RPC"),
+    ("/login", "not supported over RPC"),
+    ("/logout", "not supported over RPC"),
     ("/compact [instructions]", "compact session context"),
     ("/session", "session stats"),
     ("/export [path]", "export session as HTML"),
@@ -97,6 +134,7 @@ pub const BUILTIN_HELP: &[(&str, &str)] = &[
     ("/copy", "copy last assistant message"),
     ("/clear", "clear the message list"),
     ("/settings", "toggle local settings"),
+    ("/theme [name]", "select or set color theme"),
     ("/unqueue", "recall last queued message"),
     ("/help", "this list"),
     ("/quit", "exit"),
@@ -125,6 +163,26 @@ mod tests {
             Command::Local(LocalCmd::Thinking(Some("high".into())))
         );
         assert_eq!(parse("/new"), Command::Local(LocalCmd::NewSession));
+        assert_eq!(parse("/resume"), Command::Local(LocalCmd::Resume));
+        assert_eq!(parse("/tree"), Command::Local(LocalCmd::Tree));
+        assert_eq!(parse("/fork"), Command::Local(LocalCmd::Fork));
+        assert_eq!(parse("/clone"), Command::Local(LocalCmd::Clone));
+        assert_eq!(
+            parse("/import sessions/work.jsonl"),
+            Command::Local(LocalCmd::Import("sessions/work.jsonl".into()))
+        );
+        assert_eq!(
+            parse("/share"),
+            Command::Local(LocalCmd::Unsupported("share"))
+        );
+        assert_eq!(
+            parse("/login"),
+            Command::Local(LocalCmd::Unsupported("login"))
+        );
+        assert_eq!(
+            parse("/logout"),
+            Command::Local(LocalCmd::Unsupported("logout"))
+        );
         assert_eq!(
             parse("/compact keep the diff"),
             Command::Local(LocalCmd::Compact(Some("keep the diff".into())))
@@ -141,6 +199,11 @@ mod tests {
         assert_eq!(parse("/copy"), Command::Local(LocalCmd::Copy));
         assert_eq!(parse("/clear"), Command::Local(LocalCmd::Clear));
         assert_eq!(parse("/settings"), Command::Local(LocalCmd::Settings));
+        assert_eq!(parse("/theme"), Command::Local(LocalCmd::Theme(None)));
+        assert_eq!(
+            parse("/theme nord"),
+            Command::Local(LocalCmd::Theme(Some("nord".into())))
+        );
         assert_eq!(parse("/unqueue"), Command::Local(LocalCmd::Unqueue));
         assert_eq!(parse("/help"), Command::Local(LocalCmd::Help));
         assert_eq!(parse("/quit"), Command::Local(LocalCmd::Quit));
@@ -152,7 +215,8 @@ mod tests {
         // Unknown slash commands go to pi verbatim (skill/extension cmds).
         assert_eq!(parse("/review src"), Command::Prompt("/review src".into()));
         assert_eq!(parse("/foo"), Command::Prompt("/foo".into()));
-        // /name without an argument is meaningless → forward.
+        // Commands requiring an argument are forwarded unchanged when bare.
         assert_eq!(parse("/name"), Command::Prompt("/name".into()));
+        assert_eq!(parse("/import"), Command::Prompt("/import".into()));
     }
 }

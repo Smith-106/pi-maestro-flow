@@ -6,11 +6,12 @@
 //! changes (new message, tool lifecycle) append/remove nodes.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use pi_rpc::events::{is_run_end, text_delta, thinking_delta};
 use pi_rpc::types::{
     AgentEvent, AgentMessage, AssistantMessageEvent, MessageContent, Model, RpcResponse,
-    ThinkingLevel, UserContent,
+    StreamingBehavior, ThinkingLevel, UserContent,
 };
 use pi_rpc::{
     Frame, OverlayDriver, OverlaySpec, RpcEvent, RpcExtensionUIRequest, RpcExtensionUIResponse,
@@ -18,6 +19,7 @@ use pi_rpc::{
 
 use crate::components::glyphs::GlyphMode;
 use crate::components::select::SelectState;
+use crate::theme::ThemeKind;
 
 /// What kind of bubble a message renders as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +30,10 @@ pub enum MsgKind {
     Tool,
     Error,
     System,
+    Compaction,
+    Branch,
+    Skill,
+    Custom,
 }
 
 /// One entry in the message list.
@@ -79,6 +85,23 @@ pub struct Message {
     /// throttle to `STREAM_RENDER_INTERVAL` ticks so a long markdown
     /// message isn't re-parsed per delta (O(len²) per message).
     pub last_render_tick: u64,
+    /// Search-hit mark applied to the bubble class (render-only; the
+    /// message text is never mutated).
+    pub search_mark: SearchMark,
+    /// The mark currently baked into the DOM class — `message_list::sync`
+    /// rewrites the class attribute when these diverge.
+    pub rendered_search_mark: SearchMark,
+}
+
+/// Scrollback-search highlight state of one bubble.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchMark {
+    #[default]
+    None,
+    /// Message matches the active query.
+    Hit,
+    /// The match the cursor is currently on.
+    Current,
 }
 
 impl Message {
@@ -104,6 +127,8 @@ impl Message {
             dirty: false,
             rendered_len: 0,
             last_render_tick: 0,
+            search_mark: SearchMark::None,
+            rendered_search_mark: SearchMark::None,
         }
     }
 }
@@ -123,6 +148,16 @@ pub struct InputState {
     pub history_stash: String,
     /// Kill ring: text removed by kill_* ops (oldest → newest).
     pub kill_ring: Vec<String>,
+    /// Display-only suffix from the newest history entry matching `text`.
+    pub ghost: Option<String>,
+    /// Text/cursor snapshots captured before edits (oldest → newest).
+    undo_stack: Vec<(String, usize)>,
+    /// Text/cursor snapshots made available by undo.
+    redo_stack: Vec<(String, usize)>,
+    /// Region and kill-ring index installed by the latest yank/yank-pop.
+    last_yank: Option<(usize, usize, usize)>,
+    /// Time and resulting cursor of the latest coalescible char insert.
+    last_insert: Option<(Instant, usize)>,
 }
 
 /// Emacs word-case transform applied to the word after the cursor.
@@ -135,6 +170,10 @@ pub enum WordCase {
 
 /// Max kill-ring depth (Emacs default is 60).
 const KILL_RING_MAX: usize = 60;
+/// Bound retained editor history so long sessions do not grow forever.
+const UNDO_STACK_MAX: usize = 100;
+/// Adjacent character inserts within this window form one undo step.
+const INSERT_COALESCE_WINDOW: Duration = Duration::from_millis(500);
 
 /// Emacs word constituent: alphanumerics plus `_`.
 fn is_word_char(c: char) -> bool {
@@ -142,6 +181,59 @@ fn is_word_char(c: char) -> bool {
 }
 
 impl InputState {
+    fn push_snapshot(stack: &mut Vec<(String, usize)>, snapshot: (String, usize)) {
+        stack.push(snapshot);
+        if stack.len() > UNDO_STACK_MAX {
+            stack.remove(0);
+        }
+    }
+
+    /// Capture the current text/cursor before an edit. Character inserts
+    /// coalesce only while they remain adjacent and arrive close together.
+    fn record_edit(&mut self, coalesce_insert: bool) {
+        let coalesce = coalesce_insert
+            && self.last_insert.is_some_and(|(at, cursor)| {
+                cursor == self.cursor && at.elapsed() < INSERT_COALESCE_WINDOW
+            });
+        if !coalesce {
+            Self::push_snapshot(&mut self.undo_stack, (self.text.clone(), self.cursor));
+        }
+        self.redo_stack.clear();
+        self.last_yank = None;
+        self.ghost = None;
+        if !coalesce_insert {
+            self.last_insert = None;
+        }
+    }
+
+    /// Restore the most recent pre-edit snapshot.
+    pub fn undo(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return;
+        };
+        Self::push_snapshot(&mut self.redo_stack, (self.text.clone(), self.cursor));
+        (self.text, self.cursor) = snapshot;
+        self.history_idx = None;
+        self.history_stash.clear();
+        self.last_yank = None;
+        self.last_insert = None;
+        self.ghost = None;
+    }
+
+    /// Reapply the most recently undone snapshot.
+    pub fn redo(&mut self) {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return;
+        };
+        Self::push_snapshot(&mut self.undo_stack, (self.text.clone(), self.cursor));
+        (self.text, self.cursor) = snapshot;
+        self.history_idx = None;
+        self.history_stash.clear();
+        self.last_yank = None;
+        self.last_insert = None;
+        self.ghost = None;
+    }
+
     /// Byte index of the next char boundary at/after `pos + 1`.
     fn next_boundary_at(&self, pos: usize) -> usize {
         let mut i = pos + 1;
@@ -225,6 +317,7 @@ impl InputState {
         if start >= end {
             return;
         }
+        self.record_edit(false);
         let killed = self.text[start..end].to_string();
         self.text.replace_range(start..end, "");
         self.cursor = start;
@@ -307,19 +400,35 @@ impl InputState {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.record_edit(false);
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
         self.touch();
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.record_edit(true);
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
         self.touch();
+        self.last_insert = Some((Instant::now(), self.cursor));
+    }
+
+    /// Accept the currently displayed passive history suffix.
+    pub fn accept_ghost(&mut self) -> bool {
+        let Some(suffix) = self.ghost.take() else {
+            return false;
+        };
+        self.insert_str(&suffix);
+        true
     }
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
+            self.record_edit(false);
             let prev = self.prev_boundary();
             self.text.replace_range(prev..self.cursor, "");
             self.cursor = prev;
@@ -329,6 +438,7 @@ impl InputState {
 
     pub fn delete(&mut self) {
         if self.cursor < self.text.len() {
+            self.record_edit(false);
             let next = self.next_boundary();
             self.text.replace_range(self.cursor..next, "");
             self.touch();
@@ -431,9 +541,41 @@ impl InputState {
 
     /// Emacs yank (Ctrl+Y): insert the most recent kill.
     pub fn yank(&mut self) {
-        if let Some(s) = self.kill_ring.last().cloned() {
-            self.insert_str(&s);
+        if let Some((ring_idx, s)) = self
+            .kill_ring
+            .len()
+            .checked_sub(1)
+            .and_then(|idx| self.kill_ring.get(idx).cloned().map(|s| (idx, s)))
+        {
+            self.record_edit(false);
+            let start = self.cursor;
+            self.text.insert_str(start, &s);
+            self.cursor += s.len();
+            self.touch();
+            self.last_yank = Some((start, self.cursor, ring_idx));
         }
+    }
+
+    /// Emacs yank-pop (Alt+Y): replace the last yank with the previous
+    /// kill-ring entry, cycling through the ring.
+    pub fn yank_pop(&mut self) {
+        let Some((start, end, ring_idx)) = self.last_yank else {
+            return;
+        };
+        if self.kill_ring.len() < 2 || end > self.text.len() {
+            return;
+        }
+        let next_idx = if ring_idx == 0 {
+            self.kill_ring.len() - 1
+        } else {
+            ring_idx - 1
+        };
+        let replacement = self.kill_ring[next_idx].clone();
+        self.record_edit(false);
+        self.text.replace_range(start..end, &replacement);
+        self.cursor = start + replacement.len();
+        self.touch();
+        self.last_yank = Some((start, self.cursor, next_idx));
     }
 
     /// Emacs transpose-chars (Ctrl+T).
@@ -456,6 +598,7 @@ impl InputState {
         let k = self.next_boundary_at(j);
         let a = self.text[i..j].to_string();
         let b = self.text[j..k].to_string();
+        self.record_edit(false);
         self.text
             .replace_range(i..k, &format!("{b}{a}"));
         self.cursor = k;
@@ -511,8 +654,9 @@ impl InputState {
             return;
         }
         let a = self.text[w1s..w1e].to_string();
-        let mid = &self.text[w1e..w2s];
+        let mid = self.text[w1e..w2s].to_string();
         let b = self.text[w2s..w2e].to_string();
+        self.record_edit(false);
         self.text
             .replace_range(w1s..w2e, &format!("{b}{mid}{a}"));
         self.cursor = w2e;
@@ -551,6 +695,7 @@ impl InputState {
                 }
             }
         };
+        self.record_edit(false);
         self.text.replace_range(s..start, &new);
         self.cursor = s + new.len();
         self.touch();
@@ -738,10 +883,19 @@ pub enum LocalAction {
     SetThinking,
     /// Toggle the boolean setting at the selected row (stays open).
     ToggleSetting,
+    /// Fork from an entry returned by `get_entries` (`/resume`).
+    ResumeEntry,
+    /// Fork from a node returned by `get_tree`.
+    TreeEntry,
+    /// Fork from a user message returned by `get_fork_messages`.
+    ForkEntry,
+    /// Apply the selected color theme (`/theme` picker, live preview).
+    SetTheme,
 }
 
-/// `/settings` — local boolean toggles (RECON §12.5 config keys).
-/// Values are display-only unless the app wires them (show_tips is).
+/// `/settings` — live local toggles (RECON §12.5 config keys).
+/// `startup_tips_remaining` is intentionally a boolean proxy for the
+/// startup banner rather than a persisted numeric counter.
 pub const SETTINGS_KEYS: [&str; 8] = [
     "subagents_enabled",
     "show_tips",
@@ -814,6 +968,8 @@ pub struct TrayEntry {
     pub tool: String,
     /// Model id at spawn time (status.model snapshot).
     pub model: String,
+    /// Stable index into the 10-color subagent palette.
+    pub color_idx: usize,
     /// Lifecycle status.
     pub status: TrayStatus,
     /// Nested tool executions observed while this entry ran.
@@ -1060,6 +1216,10 @@ pub struct AppState {
     pub status: StatusState,
     /// True while the agent is streaming a response.
     pub streaming: bool,
+    /// How Enter dispatches input while streaming: steer immediately or
+    /// enqueue it as a follow-up. `None` is only possible on `Default`;
+    /// `AppState::new` installs pi's follow-up default.
+    pub steering_mode: Option<StreamingBehavior>,
     /// Message-list scroll offset in cells (0 = top).
     pub scroll: u32,
     /// Follow the tail when new content arrives.
@@ -1080,6 +1240,11 @@ pub struct AppState {
     pub permission: PermissionMode,
     /// Glyph table (unicode/ASCII).
     pub glyphs: GlyphMode,
+    /// `None` follows terminal theme detection; `Some` pins the current kind.
+    pub theme_override: Option<ThemeKind>,
+    /// Theme to restore if the `/theme` picker is Esc'd out of (live
+    /// preview baseline); `None` while no preview is active.
+    pub theme_restore: Option<ThemeKind>,
     /// App tick counter (33ms) — drives spinner/toasts.
     pub tick: u64,
     /// Full message-list rebuild requested (Ctrl+L clear, etc).
@@ -1093,6 +1258,9 @@ pub struct AppState {
     pub models: Vec<Model>,
     /// Cached `get_available_thinking_levels` result.
     pub thinking_levels: Vec<ThinkingLevel>,
+    /// Current-session entry ids and display labels for resume/tree/fork
+    /// pickers. RPC exposes fork points, not a session-file list.
+    pub session_points: Vec<(String, String)>,
     /// `/settings` boolean toggles (key → on).
     pub settings: std::collections::HashMap<String, bool>,
     /// pi-reported slash commands (name, "desc (source)") merged into
@@ -1125,6 +1293,85 @@ pub struct AppState {
     pub action_bar_idx: Option<usize>,
     /// DOM node id of the action bar element.
     pub action_bar_node: Option<blitz_dom::NodeId>,
+    /// Scrollback search (Ctrl+S) — modal query + match list.
+    pub search: Option<SearchState>,
+    /// Scrollbar metrics signature of the last rendered frame
+    /// (content_h, view_h, scroll) — gates thumb style writes.
+    pub scrollbar_sig: (u32, u32, u32),
+}
+
+/// Scrollback search state (Ctrl+S): query, matching message indexes,
+/// and the cursor into `matches`.
+#[derive(Clone, Debug, Default)]
+pub struct SearchState {
+    pub query: String,
+    /// Indexes into `state.messages` that contain the query
+    /// (case-insensitive substring), oldest first.
+    pub matches: Vec<usize>,
+    /// Cursor into `matches`.
+    pub cursor: usize,
+}
+
+impl SearchState {
+    /// Recompute `matches` for `query` against `messages` and mark the
+    /// hit/current bubbles. Returns the current match index (into
+    /// `messages`) if any.
+    pub fn refresh(&mut self, messages: &mut [Message]) -> Option<usize> {
+        let q = self.query.to_lowercase();
+        self.matches = if q.is_empty() {
+            Vec::new()
+        } else {
+            messages
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| {
+                    m.text.to_lowercase().contains(&q)
+                        || m.tool_output
+                            .as_deref()
+                            .is_some_and(|o| o.to_lowercase().contains(&q))
+                })
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // Cursor lands on the last match (nearest the tail the user is
+        // usually reading); step() walks backwards/forwards from there.
+        self.cursor = self.matches.len().saturating_sub(1);
+        let current = self.matches.get(self.cursor).copied();
+        for (i, m) in messages.iter_mut().enumerate() {
+            m.search_mark = if Some(i) == current {
+                SearchMark::Current
+            } else if self.matches.contains(&i) {
+                SearchMark::Hit
+            } else {
+                SearchMark::None
+            };
+        }
+        current
+    }
+
+    /// Move the match cursor by `delta` (wrapping) and re-mark.
+    pub fn step(&mut self, messages: &mut [Message], delta: i64) -> Option<usize> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        let n = self.matches.len() as i64;
+        self.cursor = ((self.cursor as i64 + delta).rem_euclid(n)) as usize;
+        self.refresh_cursor_marks(messages);
+        self.matches.get(self.cursor).copied()
+    }
+
+    fn refresh_cursor_marks(&mut self, messages: &mut [Message]) {
+        let current = self.matches.get(self.cursor).copied();
+        for (i, m) in messages.iter_mut().enumerate() {
+            m.search_mark = if Some(i) == current {
+                SearchMark::Current
+            } else if self.matches.contains(&i) {
+                SearchMark::Hit
+            } else {
+                SearchMark::None
+            };
+        }
+    }
 }
 
 impl AppState {
@@ -1133,10 +1380,18 @@ impl AppState {
             follow_tail: true,
             dom_dirty: true,
             glyphs: GlyphMode::detect(),
+            steering_mode: Some(StreamingBehavior::FollowUp),
+            status: StatusState {
+                mode: "send:follow-up".to_string(),
+                ..StatusState::default()
+            },
             banner_visible: true,
             settings: SETTINGS_KEYS
                 .iter()
-                .map(|k| (k.to_string(), true))
+                .map(|k| {
+                    // File mentions remain gitignore-aware by default.
+                    (k.to_string(), *k != "include_gitignored_in_mentions")
+                })
                 .collect(),
             ..Default::default()
         }
@@ -1279,6 +1534,7 @@ impl AppState {
                             title: tray_title(tool_name, args),
                             tool: tool_name.clone(),
                             model: self.status.model.clone(),
+                            color_idx: tray_idx.unwrap_or(0) % 10,
                             status: TrayStatus::Running,
                             tools: 0,
                             recent_tools: Vec::new(),
@@ -1457,8 +1713,16 @@ impl AppState {
                 self.status.transient = format!("compacting ({reason})");
                 true
             }
-            AgentEvent::CompactionEnd { .. } => {
+            AgentEvent::CompactionEnd { reason, extra } => {
                 self.status.transient.clear();
+                let summary = ["summary", "compactionSummary", "message"]
+                    .iter()
+                    .find_map(|key| extra.get(*key).and_then(serde_json::Value::as_str))
+                    .unwrap_or(reason);
+                self.push(Message::new(
+                    MsgKind::Compaction,
+                    format!("◆ Compacted context: {summary}"),
+                ));
                 true
             }
             AgentEvent::AutoRetryStart {
@@ -1799,7 +2063,105 @@ impl AppState {
                 }
                 ResponseEffect::None
             }
-            "new_session" | "switch_session" | "clone" => {
+            "get_entries" => {
+                self.session_points = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("entries"))
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| {
+                        let id = entry.get("id")?.as_str()?.to_string();
+                        let kind = entry
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("entry");
+                        let preview = entry
+                            .get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_str())
+                            .or_else(|| entry.get("summary").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        let preview: String = preview.chars().take(72).collect();
+                        let label = if preview.is_empty() {
+                            format!("{kind} · {id}")
+                        } else {
+                            format!("{kind} · {preview} · {id}")
+                        };
+                        Some((id, label))
+                    })
+                    .collect();
+                self.open_local_select(LocalAction::ResumeEntry);
+                ResponseEffect::None
+            }
+            "get_fork_messages" => {
+                self.session_points = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("messages"))
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|message| {
+                        let id = message.get("entryId")?.as_str()?.to_string();
+                        let text = message
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let preview: String = text.chars().take(96).collect();
+                        Some((id.clone(), format!("{preview} · {id}")))
+                    })
+                    .collect();
+                self.open_local_select(LocalAction::ForkEntry);
+                ResponseEffect::None
+            }
+            "get_tree" => {
+                self.session_points.clear();
+                if let Some(tree) = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("tree"))
+                    .and_then(|v| v.as_array())
+                {
+                    let mut stack: Vec<(&serde_json::Value, usize)> =
+                        tree.iter().rev().map(|node| (node, 0)).collect();
+                    while let Some((node, depth)) = stack.pop() {
+                        let Some(entry) = node.get("entry") else {
+                            continue;
+                        };
+                        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let kind = entry
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("entry");
+                        let text = node
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                entry
+                                    .get("message")
+                                    .and_then(|m| m.get("content"))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .or_else(|| entry.get("summary").and_then(|v| v.as_str()))
+                            .unwrap_or(kind);
+                        let preview: String = text.chars().take(72).collect();
+                        self.session_points.push((
+                            id.to_string(),
+                            format!("{}{preview} · {id}", "  ".repeat(depth)),
+                        ));
+                        if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+                            stack.extend(children.iter().rev().map(|child| (child, depth + 1)));
+                        }
+                    }
+                }
+                self.open_local_select(LocalAction::TreeEntry);
+                ResponseEffect::None
+            }
+            "new_session" | "switch_session" | "fork" | "clone" => {
                 if resp.cancelled() {
                     self.push_system(format!("{} cancelled", resp.command));
                     ResponseEffect::None
@@ -1898,13 +2260,57 @@ impl AppState {
                     .iter()
                     .map(|k| {
                         let on = self.settings.get(*k).copied().unwrap_or(true);
-                        format!("{k}: {}", if on { "on" } else { "off" })
+                        let label = if *k == "startup_tips_remaining" {
+                            "startup_tips_remaining (bool proxy)"
+                        } else {
+                            k
+                        };
+                        format!("{label}: {}", if on { "on" } else { "off" })
                     })
                     .collect();
                 crate::components::select::SelectState::new("settings", options)
             }
+            LocalAction::SetTheme => {
+                // `/theme` normally opens via `open_theme_select` (which
+                // knows the live kind); this arm is the fallback when a
+                // caller reaches the generic path.
+                let current = self.theme_override.unwrap_or_else(crate::theme::detect);
+                self.theme_restore = Some(current);
+                crate::components::select::theme_picker(current)
+            }
+            LocalAction::ResumeEntry | LocalAction::TreeEntry | LocalAction::ForkEntry => {
+                if self.session_points.is_empty() {
+                    self.push_system("no fork points reported by pi");
+                    return;
+                }
+                let title = match action {
+                    LocalAction::ResumeEntry => "resume: pick a fork point",
+                    LocalAction::TreeEntry => "session tree: pick a fork point",
+                    LocalAction::ForkEntry => "fork: pick a user message",
+                    _ => unreachable!(),
+                };
+                crate::components::select::SelectState::new(
+                    title,
+                    self.session_points
+                        .iter()
+                        .map(|(_, label)| label.clone())
+                        .collect(),
+                )
+            }
         };
         self.dialog = Some(DialogState::Local { sel, action });
+        self.dom_dirty = true;
+    }
+
+    /// Open the `/theme` picker: rows are `auto` + every `ThemeKind`,
+    /// cursor on the active theme, `theme_restore` armed for preview.
+    pub fn open_theme_select(&mut self, current: ThemeKind) {
+        let sel = crate::components::select::theme_picker(current);
+        self.theme_restore = Some(current);
+        self.dialog = Some(DialogState::Local {
+            sel,
+            action: LocalAction::SetTheme,
+        });
         self.dom_dirty = true;
     }
 
@@ -1942,16 +2348,35 @@ impl AppState {
     /// Recompute the completion popup from the current input.
     /// `/word` (single token) → commands; `@tok` → file mentions.
     pub fn update_completion(&mut self) {
+        self.input.ghost = if self.input.cursor == self.input.text.len()
+            && !self.input.text.is_empty()
+        {
+            self.input.history.iter().rev().find_map(|entry| {
+                entry
+                    .strip_prefix(&self.input.text)
+                    .filter(|suffix| !suffix.is_empty())
+                    .map(str::to_string)
+            })
+        } else {
+            None
+        };
+
         let upto = &self.input.text[..self.input.cursor];
         // `/cmd` — only when the slash is the first char and no
         // whitespace precedes the cursor.
         if upto.starts_with('/') && !upto[1..].contains(char::is_whitespace) {
-            let prefix = upto[1..].to_lowercase();
-            let items: Vec<CompletionItem> = self
+            let prefix = &upto[1..];
+            let mut scored: Vec<(i64, CompletionItem)> = self
                 .command_list()
                 .into_iter()
-                .filter(|i| i.name.to_lowercase().starts_with(&prefix))
+                .filter_map(|item| {
+                    crate::fuzzy::score(prefix, &item.name).map(|score| (score, item))
+                })
                 .collect();
+            scored.sort_by(|(a_score, a), (b_score, b)| {
+                b_score.cmp(a_score).then_with(|| a.name.cmp(&b.name))
+            });
+            let items = scored.into_iter().map(|(_, item)| item).collect();
             self.set_completion(items, CompletionKind::Command, 0);
             return;
         }
@@ -1997,32 +2422,24 @@ impl AppState {
         });
     }
 
-    /// File-index matches for an `@` token: prefix first, then
-    /// substring, capped at 50.
+    /// Fuzzy-ranked file-index matches for an `@` token, capped at 50.
     fn file_matches(&self, token: &str) -> Vec<CompletionItem> {
         let Some(index) = &self.file_index else {
             return Vec::new();
         };
-        let t = token.to_lowercase();
-        let mut prefix: Vec<&String> = Vec::new();
-        let mut sub: Vec<&String> = Vec::new();
-        for p in index {
-            let lp = p.to_lowercase();
-            if lp.starts_with(&t) {
-                prefix.push(p);
-            } else if lp.contains(&t) {
-                sub.push(p);
-            }
-        }
-        prefix.sort();
-        sub.sort();
-        prefix
+        let mut scored: Vec<(i64, &String)> = index
+            .iter()
+            .filter_map(|path| crate::fuzzy::score(token, path).map(|score| (score, path)))
+            .collect();
+        scored.sort_by(|(a_score, a), (b_score, b)| {
+            b_score.cmp(a_score).then_with(|| a.cmp(b))
+        });
+        scored
             .into_iter()
-            .chain(sub)
             .take(50)
-            .map(|p| CompletionItem {
-                name: p.clone(),
-                display: format!("@{p}"),
+            .map(|(_, path)| CompletionItem {
+                name: path.clone(),
+                display: format!("@{path}"),
                 desc: String::new(),
             })
             .collect()
@@ -2269,6 +2686,37 @@ mod tests {
     }
 
     #[test]
+    fn undo_redo_restore_text_and_cursor() {
+        let mut i = input("ab", 1);
+        i.insert_char('x');
+        assert_eq!((i.text.as_str(), i.cursor), ("axb", 2));
+        i.undo();
+        assert_eq!((i.text.as_str(), i.cursor), ("ab", 1));
+        i.redo();
+        assert_eq!((i.text.as_str(), i.cursor), ("axb", 2));
+
+        let mut i = InputState::default();
+        i.insert_char('a');
+        i.insert_char('b');
+        i.undo();
+        assert_eq!((i.text.as_str(), i.cursor), ("", 0));
+    }
+
+    #[test]
+    fn yank_pop_cycles_kill_ring() {
+        let mut i = input("one two", 0);
+        i.kill_word();
+        i.kill_word();
+        assert_eq!(i.kill_ring, ["one", " two"]);
+        i.yank();
+        assert_eq!(i.text, " two");
+        i.yank_pop();
+        assert_eq!(i.text, "one");
+        i.yank_pop();
+        assert_eq!(i.text, " two");
+    }
+
+    #[test]
     fn transpose_chars() {
         let mut i = input("ab", 1);
         i.transpose_chars();
@@ -2339,11 +2787,57 @@ mod tests {
     }
 
     #[test]
+    fn passive_history_completion_is_display_only_until_accepted() {
+        let mut state = AppState::new();
+        state.input.history = vec!["cargo check".into(), "cargo test".into()];
+        state.input.text = "cargo".into();
+        state.input.cursor = state.input.text.len();
+        state.update_completion();
+        assert_eq!(state.input.ghost.as_deref(), Some(" test"));
+        assert_eq!(state.input.text, "cargo");
+        assert!(state.input.accept_ghost());
+        assert_eq!(state.input.text, "cargo test");
+        assert!(state.input.ghost.is_none());
+    }
+
+    #[test]
     fn home_end_are_line_based() {
         let mut i = input("ab\ncd", 4);
         i.move_home();
         assert_eq!(i.cursor, 3);
         i.move_end();
         assert_eq!(i.cursor, 5);
+    }
+
+    #[test]
+    fn scrollback_search_marks_and_steps() {
+        let mut state = AppState::new();
+        state.push_user("refactor the parser");
+        state.push(Message::new(MsgKind::Assistant, "sure, parser it is"));
+        state.push_system("unrelated note");
+        let mut s = SearchState {
+            query: "parser".into(),
+            ..Default::default()
+        };
+        let cur = s.refresh(&mut state.messages);
+        assert_eq!(s.matches, vec![0, 1]);
+        assert_eq!(cur, Some(1)); // cursor clamps to last match
+        assert_eq!(state.messages[1].search_mark, SearchMark::Current);
+        assert_eq!(state.messages[0].search_mark, SearchMark::Hit);
+        assert_eq!(state.messages[2].search_mark, SearchMark::None);
+        // step wraps forward to the first match
+        let cur = s.step(&mut state.messages, 1);
+        assert_eq!(cur, Some(0));
+        assert_eq!(state.messages[0].search_mark, SearchMark::Current);
+        assert_eq!(state.messages[1].search_mark, SearchMark::Hit);
+        // narrowing the query re-marks
+        s.query = "refactor".into();
+        let cur = s.refresh(&mut state.messages);
+        assert_eq!(cur, Some(0));
+        assert_eq!(s.matches, vec![0]);
+        // clearing the query drops all marks
+        s.query.clear();
+        assert_eq!(s.refresh(&mut state.messages), None);
+        assert!(state.messages.iter().all(|m| m.search_mark == SearchMark::None));
     }
 }
