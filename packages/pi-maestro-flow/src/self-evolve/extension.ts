@@ -44,7 +44,6 @@ import {
   buildSuggestion,
   buildKnowledgeTitle,
   buildToolCallEvidence,
-  classifyCandidateType,
   compactDigest,
   dailySuggestionFileName,
   DEDUP_CAPACITY,
@@ -104,6 +103,8 @@ import {
   type SelfEvolveSource,
   type StageExecutionResult,
 } from "./runtime.ts";
+import { classifySync } from "pi-maestro-teammate/v1/classify";
+import { signalTypeDomain } from "../classifier/domains.ts";
 import {
   buildEnrichmentInput,
   buildEnrichmentPrompt,
@@ -1469,7 +1470,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         .map((ep) => `${ep.tool} ${ep.kind} ${ep.operation}`)
         .join(" ");
       const toolHint = [toolCallHint, episodeHint].filter(Boolean).join(" ");
-      const candidateType = classifyCandidateType(`${summary}\n${title}${toolHint ? `\n${toolHint}` : ""}`);
+      const candidateType = classifySync(signalTypeDomain, {
+        text: `${summary}\n${title}${toolHint ? `\n${toolHint}` : ""}`,
+      }).label;
       // Knowledge-moment gate: drop turns with no knowledge signal (no failure,
       // no reflective lexicon, no classifier hit) at the source. Replaces the
       // prior unknown+failure gate with the lexicon-aware isKnowledgeMoment.
@@ -1544,7 +1547,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         updateStatusBar(ctx);
         return;
       }
-      const candidateType = classifyCandidateType(summary);
+      const candidateType = classifySync(signalTypeDomain, { text: summary }).label;
       void writeSignal({
         source: "session_compact",
         ctx,
