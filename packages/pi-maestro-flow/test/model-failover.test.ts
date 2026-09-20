@@ -33,6 +33,7 @@ function harness(
   breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
   options: {
     multimodal?: string[];
+    models?: Array<{ provider: string; id: string; input?: string[] }>;
     visionAnalyzer?: any;
     hasPendingMessages?: boolean;
     signal?: AbortSignal;
@@ -56,7 +57,7 @@ function harness(
   const eventSubscribers = new Map<string, Array<(data: unknown) => void>>();
   const emittedEvents: Array<{ channel: string; data: unknown }> = [];
   const multimodal = new Set(options.multimodal ?? []);
-  const models = [
+  const models = options.models ?? [
     { provider: "provider", id: "primary", input: multimodal.has("provider/primary") ? ["text", "image"] : ["text"] },
     { provider: "provider", id: "backup", input: multimodal.has("provider/backup") ? ["text", "image"] : ["text"] },
     { provider: "provider", id: "last", input: multimodal.has("provider/last") ? ["text", "image"] : ["text"] },
@@ -591,6 +592,31 @@ test("no fallback chain configured: implicit candidates advance one settled run 
     assert.equal(runtime.handoffs.length, 1);
     await runtime.flushScheduledHandoff();
     assert.equal(runtime.handoffs.length, 2);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("implicit fallback excludes Codex Spark when account compatibility is unknown", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-spark-exclusion-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: {} });
+    const runtime = harness(cwd, new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }), {
+      models: [
+        { provider: "provider", id: "primary", input: ["text"] },
+        { provider: "openai-codex", id: "gpt-5.3-codex-spark", input: ["text"] },
+        { provider: "provider", id: "backup", input: ["text"] },
+      ],
+    });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 500" }],
+    });
+
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

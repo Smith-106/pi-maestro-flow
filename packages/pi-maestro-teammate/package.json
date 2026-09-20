@@ -57,6 +57,10 @@
       "types": "./types/public/v1/child-extensions.d.ts",
       "default": "./src/public/v1/child-extensions.ts"
     },
+    "./v1/classify": {
+      "types": "./types/public/v1/classify.d.ts",
+      "default": "./src/public/v1/classify.ts"
+    },
     "./v1/events": {
       "types": "./types/public/v1/events.d.ts",
       "default": "./src/public/v1/events.ts"

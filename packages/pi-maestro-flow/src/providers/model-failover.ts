@@ -20,7 +20,6 @@ import {
 } from "./vision-assist.ts";
 import {
   buildReplayFence,
-  classifyRetryError,
   isRetryableProviderError,
   markPiRetryErrorCancelled,
   normalizePiRetryErrorMessage,
@@ -33,6 +32,7 @@ import {
   type ReplayFence,
   type RetryErrorKind,
 } from "pi-maestro-teammate/v1/retry";
+import { classifySync, retryErrorDomain } from "pi-maestro-teammate/v1/classify";
 
 export interface ModelFailoverConfig {
   enabled: boolean;
@@ -127,6 +127,9 @@ function failoverUiText(key: keyof (typeof FAILOVER_UI)["en"], explicitLocale?: 
 }
 
 const CONFIG_FILE = "model-failover.json";
+const IMPLICIT_FALLBACK_EXCLUSIONS = new Set([
+  "openai-codex/gpt-5.3-codex-spark",
+]);
 /** Upper bound on attached images auto-analyzed in one turn; prevents linear cost blowup. */
 const MAX_ATTACHED_IMAGES_PER_TURN = 5;
 const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";
@@ -349,7 +352,7 @@ function observeAgentEnd(
       return {
         outcome: "failed",
         failure,
-        failureKind: classifyRetryError(failure),
+        failureKind: classifySync(retryErrorDomain, { message: failure }).label,
         completedTools: [...completedTools],
         unknownEffect,
       };
@@ -363,7 +366,7 @@ function observeAgentEnd(
     return {
       outcome: "failed",
       failure: fallbackFailure,
-      failureKind: classifyRetryError(fallbackFailure),
+      failureKind: classifySync(retryErrorDomain, { message: fallbackFailure }).label,
       completedTools: [...completedTools],
       unknownEffect,
     };
@@ -675,7 +678,11 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     // implicit sweep, followed by every other authenticated model so a default
     // install can still auto-recover from network/quota failures.
     const fallbackChain = configuredFallbacks.length === 0
-      ? [...new Set([...baseChain, ...config.defaultFallbackModels, ...availableModels(ctx).keys()])]
+      ? [...new Set([
+          ...baseChain,
+          ...config.defaultFallbackModels,
+          ...availableModels(ctx).keys().filter((model) => !IMPLICIT_FALLBACK_EXCLUSIONS.has(model)),
+        ])]
       : baseChain;
     const chain = images.length > 0 ? prioritizeMultimodalChain(fallbackChain, availableModels(ctx)) : fallbackChain;
     const acquisition = breaker.acquireCandidate(current);
