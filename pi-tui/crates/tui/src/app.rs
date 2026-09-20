@@ -161,13 +161,21 @@ impl App {
         }
     }
 
-    /// Signature of the input-line inputs (text/cursor/hint/dialog).
-    fn input_signature(state: &AppState, hint: &str) -> u64 {
+    /// Signature of the input-line inputs — hashes what `hint_for`
+    /// and `input_box::sync` render, so the hint String itself is only
+    /// built when the signature actually changed.
+    fn input_signature(state: &AppState) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut s = std::collections::hash_map::DefaultHasher::new();
         state.input.text.hash(&mut s);
         state.input.cursor.hash(&mut s);
-        hint.hash(&mut s);
+        state.attachments.len().hash(&mut s);
+        for a in &state.attachments {
+            a.label.hash(&mut s);
+        }
+        state.attachment_sel.hash(&mut s);
+        state.tip_idx.hash(&mut s);
+        state.show_tips().hash(&mut s);
         state.dialog.is_some().hash(&mut s);
         s.finish()
     }
@@ -1303,16 +1311,16 @@ impl App {
     }
 
     /// The `#input-hint` line for this frame.
-    fn input_hint(&self) -> String {
-        let tip = if self.state.show_tips() {
-            input_box::TIPS[self.state.tip_idx]
+    fn input_hint(state: &AppState) -> String {
+        let tip = if state.show_tips() {
+            input_box::TIPS[state.tip_idx]
         } else {
             ""
         };
         input_box::hint_for(
-            &self.state.input,
-            &self.state.attachments,
-            self.state.attachment_sel,
+            &state.input,
+            &state.attachments,
+            state.attachment_sel,
             tip,
         )
     }
@@ -1641,10 +1649,9 @@ impl App {
     /// the size or DOM changed, and the paint surface is double-buffered
     /// instead of freshly allocated.
     pub fn paint_frame_at(&mut self, w: u16, h: u16) -> Option<Surface> {
-        let hint = self.input_hint();
         let dialog_sig = dialog::signature(&self.state);
         let completion_sig = completion::signature(&self.state);
-        let input_sig = Self::input_signature(&self.state, &hint);
+        let input_sig = Self::input_signature(&self.state);
         let spinner_sig = Self::spinner_signature(&self.state);
         let status_sig = Self::status_signature(&self.state);
         let mut layout_dirty = self.state.dom_dirty
@@ -1678,6 +1685,7 @@ impl App {
                 self.state.dom_dirty = false;
             }
             if input_sig != self.input_sig {
+                let hint = Self::input_hint(&self.state);
                 input_box::sync(
                     &mut m,
                     self.handles.input_hint_text,

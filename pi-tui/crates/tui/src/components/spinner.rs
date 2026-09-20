@@ -50,7 +50,7 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> SpinnerHandles {
     let line = div(m, parent, "");
     m.set_attribute(line, qual("id"), "spinner-line");
 
-    let (glyph_span, _gt) = span_text(m, line, "", "");
+    let (glyph_span, glyph_text) = span_text(m, line, "", "");
     m.set_attribute(glyph_span, qual("id"), "spinner-glyph");
     let (label_span, label_text) = span_text(m, line, "", "");
     m.set_attribute(label_span, qual("id"), "spinner-label");
@@ -62,6 +62,7 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> SpinnerHandles {
     SpinnerHandles {
         line,
         glyph_span,
+        glyph_text,
         label_text,
         dots_text,
         hint_text,
@@ -73,6 +74,9 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> SpinnerHandles {
 pub struct SpinnerHandles {
     pub line: NodeId,
     pub glyph_span: NodeId,
+    /// The glyph span's text child — avoids a `child_ids` ThinVec
+    /// clone per sync.
+    pub glyph_text: NodeId,
     pub label_text: NodeId,
     pub dots_text: NodeId,
     pub hint_text: NodeId,
@@ -101,10 +105,7 @@ pub fn sync(
     let frame = (tick / 3) as usize % 16;
     let (r, g, b) = fusion_color(frame);
     m.set_style_property(h.glyph_span, "color", &format!("rgb({r},{g},{b})"));
-    // Glyph text lives in the span's first (text) child.
-    if let Some(tid) = m.child_ids(h.glyph_span).first().copied() {
-        m.set_node_text(tid, mode.spinner_frame(tick / 3));
-    }
+    m.set_node_text(h.glyph_text, mode.spinner_frame(tick / 3));
 
     m.set_node_text(h.label_text, " Thinking");
     let dots = (tick >> 2) % 3 + 1;
