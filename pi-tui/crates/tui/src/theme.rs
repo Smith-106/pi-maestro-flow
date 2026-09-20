@@ -627,6 +627,7 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 .badge-beta {{ color: var(--status-warning); }}
 .select-more {{ color: var(--text-muted); padding-left: 2px; }}
 .select-footer {{ color: var(--text-muted); padding-left: 1px; border-top: 1px solid var(--border-default); }}
+.select-detail-line {{ color: var(--text-secondary); padding-left: 2px; }}
 .select-footer-text {{ color: var(--text-muted); }}
 .select-empty {{ color: var(--text-muted); }}
 .select-inline-hint {{ color: var(--text-muted); }}
