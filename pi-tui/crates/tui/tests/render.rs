@@ -4,12 +4,12 @@
 
 use blitz_dom::{BaseDocument, DocumentConfig};
 use blitz_traits::shell::Viewport;
-use pi_rpc::{AgentEvent, AssistantMessageEvent, RpcEvent};
-use scrollback::{PaintContext, Surface, paint_document};
 use pi_fluent_tui::app;
 use pi_fluent_tui::components::{input_box, message_list, status_line};
 use pi_fluent_tui::state::{AppState, MsgKind};
 use pi_fluent_tui::theme::{self, ThemeKind};
+use pi_rpc::{AgentEvent, AssistantMessageEvent, RpcEvent};
+use scrollback::{paint_document, PaintContext, Surface};
 
 const W: u16 = 60;
 const H: u16 = 20;
@@ -119,7 +119,12 @@ impl Fixture {
             ThemeKind::Dark.color_scheme(),
         ));
         self.doc.resolve(0.0);
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, self.handles.scrollbar_thumb, &mut self.state);
+        message_list::apply_scroll(
+            &mut self.doc,
+            self.handles.messages,
+            self.handles.scrollbar_thumb,
+            &mut self.state,
+        );
         let mut surface = Surface::new(self.w, self.h);
         let hits;
         {
@@ -223,13 +228,19 @@ fn streaming_tool_body_waits_for_a_cadence_boundary() {
         partial_result: serde_json::json!({"output": "first output"}),
     });
     let before_boundary = f.frame();
-    assert!(!before_boundary.contains("first output"), "output jumped ahead:\n{before_boundary}");
+    assert!(
+        !before_boundary.contains("first output"),
+        "output jumped ahead:\n{before_boundary}"
+    );
 
     for _ in 0..3 {
         f.state.tick_frame();
     }
     let after_boundary = f.frame();
-    assert!(after_boundary.contains("first output"), "batched output:\n{after_boundary}");
+    assert!(
+        after_boundary.contains("first output"),
+        "batched output:\n{after_boundary}"
+    );
 }
 
 #[test]
@@ -247,11 +258,20 @@ fn read_tool_output_is_hidden_until_expanded() {
         is_error: false,
     });
     let collapsed = f.frame();
-    assert!(collapsed.contains("Read src/state.rs"), "read call:\n{collapsed}");
-    assert!(!collapsed.contains("line one"), "read result should be hidden:\n{collapsed}");
+    assert!(
+        collapsed.contains("Read src/state.rs"),
+        "read call:\n{collapsed}"
+    );
+    assert!(
+        !collapsed.contains("line one"),
+        "read result should be hidden:\n{collapsed}"
+    );
     assert!(f.state.toggle_last_tool());
     let expanded = f.frame();
-    assert!(expanded.contains("line one"), "expanded read result:\n{expanded}");
+    assert!(
+        expanded.contains("line one"),
+        "expanded read result:\n{expanded}"
+    );
 }
 
 #[test]
@@ -327,7 +347,6 @@ fn scroll_follows_tail() {
     assert!(!text.contains("message 0│"), "head scrolled off:\n{text}");
     assert!(f.state.scroll > 0, "scroll offset advanced");
 }
-
 
 // ---------------------------------------------------------------------------
 // P4: components (markdown / tool_card / hint_bar / spinner / select /
@@ -474,9 +493,18 @@ fn narrow_status_prioritizes_actionable_state() {
     assert!(text.contains("perm bypass"), "permission:\n{text}");
     assert!(text.contains("● running"), "running state:\n{text}");
     assert!(text.contains("1 queued"), "queue state:\n{text}");
-    assert!(!text.contains("think high"), "secondary thinking hidden:\n{text}");
-    assert!(!text.contains("input steer"), "secondary input mode hidden:\n{text}");
-    assert!(!text.contains("12 in / 4 out"), "token detail hidden:\n{text}");
+    assert!(
+        !text.contains("think high"),
+        "secondary thinking hidden:\n{text}"
+    );
+    assert!(
+        !text.contains("input steer"),
+        "secondary input mode hidden:\n{text}"
+    );
+    assert!(
+        !text.contains("12 in / 4 out"),
+        "token detail hidden:\n{text}"
+    );
 }
 
 #[test]
@@ -578,7 +606,7 @@ fn extension_ui_request_opens_dialog() {
 
 #[test]
 fn plugin_overlay_lifecycle() {
-    use pi_rpc::{OverlayDriver, OverlaySpec, RpcExtensionUIRequest, Role, Span};
+    use pi_rpc::{OverlayDriver, OverlaySpec, Role, RpcExtensionUIRequest, Span};
     let mut f = Fixture::new();
 
     let spec = OverlaySpec {
@@ -592,7 +620,10 @@ fn plugin_overlay_lifecycle() {
         offset_x: None,
         offset_y: None,
         dismissable: Some(true),
-        hints: vec![pi_rpc::OverlayHint { key: "esc".into(), verb: "cancel".into() }],
+        hints: vec![pi_rpc::OverlayHint {
+            key: "esc".into(),
+            verb: "cancel".into(),
+        }],
     };
     f.state.apply_event(&RpcEvent::ExtensionUiRequest(
         RpcExtensionUIRequest::Custom {
@@ -619,7 +650,11 @@ fn plugin_overlay_lifecycle() {
         RpcExtensionUIRequest::OverlayFrame {
             id: "ov1".into(),
             frame: vec![
-                vec![Span { text: "row one".into(), role: None, bold: false }],
+                vec![Span {
+                    text: "row one".into(),
+                    role: None,
+                    bold: false,
+                }],
                 vec![Span {
                     text: "picked".into(),
                     role: Some(Role::Selected),
@@ -670,7 +705,10 @@ fn plugin_overlay_cancel_owes_no_response() {
     ));
     f.state.cancel_dialog();
     assert!(f.state.dialog.is_none());
-    assert!(f.state.dialog_result.is_none(), "plugin overlay owes no response");
+    assert!(
+        f.state.dialog_result.is_none(),
+        "plugin overlay owes no response"
+    );
 
     // Client-driven custom still resolves with a Cancelled response.
     let spec = OverlaySpec {
@@ -751,9 +789,10 @@ fn diff_detection() {
     assert!(tool_card::looks_like_diff(
         "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y"
     ));
-    assert!(!tool_card::looks_like_diff("just some\nplain output\nlines"));
+    assert!(!tool_card::looks_like_diff(
+        "just some\nplain output\nlines"
+    ));
 }
-
 
 // ============================================================================
 // Slash commands: apply_response reducer + local pickers
@@ -849,11 +888,7 @@ fn new_session_clears_only_when_not_cancelled() {
         pi_fluent_tui::state::ResponseEffect::RefreshState
     );
     // Cleared + the "fresh session" system line.
-    assert!(f
-        .state
-        .messages
-        .iter()
-        .all(|m| m.kind == MsgKind::System));
+    assert!(f.state.messages.iter().all(|m| m.kind == MsgKind::System));
 }
 
 #[test]
@@ -946,7 +981,10 @@ fn tray_tracks_subagent_lifecycle() {
     assert_eq!(f.state.tray.entries[0].tools, 1);
 
     f.event(tool_end("t1", "task", false));
-    assert_eq!(f.state.tray.entries[0].status, pi_fluent_tui::state::TrayStatus::Done);
+    assert_eq!(
+        f.state.tray.entries[0].status,
+        pi_fluent_tui::state::TrayStatus::Done
+    );
     assert!(f.state.tray.entries[0].end_tick.is_some());
 }
 
@@ -955,7 +993,11 @@ fn tray_shell_and_failed_entries() {
     let mut f = Fixture::new();
     f.event(AgentEvent::AgentStart);
     // Foreground bash is NOT a tray entry.
-    f.event(tool_start("t0", "bash", serde_json::json!({"command": "ls"})));
+    f.event(tool_start(
+        "t0",
+        "bash",
+        serde_json::json!({"command": "ls"}),
+    ));
     f.event(tool_end("t0", "bash", false));
     assert!(f.state.tray.entries.is_empty());
     // Background bash → Shells tab.
@@ -966,12 +1008,20 @@ fn tray_shell_and_failed_entries() {
     ));
     f.event(tool_end("t1", "bash", true));
     assert_eq!(f.state.tray.entries.len(), 1);
-    assert_eq!(f.state.tray.entries[0].kind, pi_fluent_tui::state::TrayKind::Shell);
-    assert_eq!(f.state.tray.entries[0].status, pi_fluent_tui::state::TrayStatus::Failed);
+    assert_eq!(
+        f.state.tray.entries[0].kind,
+        pi_fluent_tui::state::TrayKind::Shell
+    );
+    assert_eq!(
+        f.state.tray.entries[0].status,
+        pi_fluent_tui::state::TrayStatus::Failed
+    );
     // Shells tab shows it; Subagents tab is empty.
     f.state.tray.set_tab(pi_fluent_tui::state::TrayTab::Shells);
     assert_eq!(f.state.tray.visible().len(), 1);
-    f.state.tray.set_tab(pi_fluent_tui::state::TrayTab::Subagents);
+    f.state
+        .tray
+        .set_tab(pi_fluent_tui::state::TrayTab::Subagents);
     assert!(f.state.tray.visible().is_empty());
 }
 
@@ -1091,14 +1141,21 @@ fn model_picker_badges_and_footer() {
     assert!(text.contains("Recommended"), "first badge:\n{text}");
     assert!(text.contains("Low cost"), "m2 badge:\n{text}");
     assert!(text.contains("High cost"), "m3 badge:\n{text}");
-    assert!(text.contains("64000 tokens (50% consumed)"), "footer:\n{text}");
-    assert!(text.contains("estimates scaled by character ratio"), "note:\n{text}");
+    assert!(
+        text.contains("64000 tokens (50% consumed)"),
+        "footer:\n{text}"
+    );
+    assert!(
+        text.contains("estimates scaled by character ratio"),
+        "note:\n{text}"
+    );
 }
 
 #[test]
 fn settings_picker_toggles() {
     let mut f = Fixture::new();
-    f.state.open_local_select(pi_fluent_tui::state::LocalAction::ToggleSetting);
+    f.state
+        .open_local_select(pi_fluent_tui::state::LocalAction::ToggleSetting);
     let Some(pi_fluent_tui::state::DialogState::Local { sel, .. }) = &f.state.dialog else {
         panic!("expected settings dialog");
     };
@@ -1106,6 +1163,33 @@ fn settings_picker_toggles() {
     assert!(sel.options.iter().any(|o| o.label == "show_tips: on"));
     let text = f.frame();
     assert!(text.contains("show_tips: on"), "settings:\n{text}");
+}
+
+#[test]
+fn theme_picker_lists_all_themes_and_marks_current() {
+    use pi_fluent_tui::theme::ThemeKind;
+    let mut f = Fixture::new();
+    f.state.open_theme_select(ThemeKind::Dark);
+    let Some(pi_fluent_tui::state::DialogState::Local { sel, action }) = &f.state.dialog else {
+        panic!("expected theme dialog");
+    };
+    assert_eq!(*action, pi_fluent_tui::state::LocalAction::SetTheme);
+    assert_eq!(sel.options.len(), ThemeKind::ALL.len() + 1); // + auto row
+    assert_eq!(sel.options[0].label, "auto");
+    // Cursor starts on the active theme's row (auto=0, dark=1); Esc
+    // restores `theme_restore`.
+    assert_eq!(sel.cursor, 1);
+    assert_eq!(f.state.theme_restore, Some(ThemeKind::Dark));
+    let text = f.frame();
+    for k in ThemeKind::ALL {
+        assert!(text.contains(k.name()), "{} missing:\n{text}", k.name());
+    }
+    // Row 0 → detect(); rows 1.. → ThemeKind::ALL[i-1].
+    assert_eq!(
+        pi_fluent_tui::components::select::theme_picker_kind(2),
+        Some(ThemeKind::Light)
+    );
+    assert!(pi_fluent_tui::components::select::theme_picker_kind(0).is_some());
 }
 
 #[test]
@@ -1155,7 +1239,11 @@ fn slash_trigger_character_opens_completion_immediately() {
     let mut f = Fixture::new();
     f.state.input.insert_char('/');
     f.state.update_completion();
-    let comp = f.state.completion.as_ref().expect("completion open after '/'");
+    let comp = f
+        .state
+        .completion
+        .as_ref()
+        .expect("completion open after '/'");
     assert!(comp.items.iter().any(|item| item.name == "model"));
 }
 
@@ -1183,7 +1271,8 @@ fn dialog_open_close_cycles_no_slotmap_panic() {
     // layout_children/paint_children caches → `invalid SlotMap key`.
     let mut f = Fixture::new();
     for _ in 0..3 {
-        f.state.open_local_select(pi_fluent_tui::state::LocalAction::ToggleSetting);
+        f.state
+            .open_local_select(pi_fluent_tui::state::LocalAction::ToggleSetting);
         let _ = f.frame();
         f.state.cancel_dialog();
         let _ = f.frame();
@@ -1274,7 +1363,11 @@ fn at_trigger_character_opens_completion_immediately() {
     f.state.file_index = Some(vec!["src/app.rs".into()]);
     f.state.input.insert_char('@');
     f.state.update_completion();
-    let comp = f.state.completion.as_ref().expect("completion open after '@'");
+    let comp = f
+        .state
+        .completion
+        .as_ref()
+        .expect("completion open after '@'");
     assert_eq!(comp.kind, pi_fluent_tui::state::CompletionKind::File);
     assert_eq!(comp.items[0].name, "src/app.rs");
 }
@@ -1371,7 +1464,10 @@ fn thinking_collapse_tool_tail_table_math() {
     assert!(text.contains("int_0^1"), "display math:\n{text}");
     // Running tool: sliding tail window + closed frame.
     assert!(text.contains("… 4 lines above"), "tail window:\n{text}");
-    assert!(text.contains("line 12 of output"), "tail last line:\n{text}");
+    assert!(
+        text.contains("line 12 of output"),
+        "tail last line:\n{text}"
+    );
     assert!(!text.contains("line 1 of output"), "head hidden:\n{text}");
     assert!(text.contains("└ Running…"), "running footer:\n{text}");
     // Edit tool: synthesized diff + closed frame.
@@ -1431,7 +1527,14 @@ fn subagent_card_activity_feed() {
         tool_name: "task".into(),
         args: serde_json::json!({"description": "explore auth flow"}),
     });
-    for (i, (name, path)) in [("read", "src/auth.rs"), ("grep", "\"login\""), ("read", "src/session.rs")].iter().enumerate() {
+    for (i, (name, path)) in [
+        ("read", "src/auth.rs"),
+        ("grep", "\"login\""),
+        ("read", "src/session.rs"),
+    ]
+    .iter()
+    .enumerate()
+    {
         f.event(AgentEvent::ToolExecutionStart {
             tool_call_id: format!("n{i}"),
             tool_name: name.to_string(),
@@ -1440,7 +1543,10 @@ fn subagent_card_activity_feed() {
     }
     let text = f.frame();
     // The spawn card carries the nested-tool activity feed.
-    assert!(text.contains("● Spawned agent explore auth flow"), "head:\n{text}");
+    assert!(
+        text.contains("● Spawned agent explore auth flow"),
+        "head:\n{text}"
+    );
     assert!(text.contains("· read src/auth.rs"), "activity:\n{text}");
     assert!(text.contains("· grep login"), "activity:\n{text}");
     assert!(text.contains("└ Running…"), "footer:\n{text}");

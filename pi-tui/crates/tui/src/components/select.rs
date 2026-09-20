@@ -95,10 +95,7 @@ impl SelectState {
             .filter_map(|(i, o)| {
                 // Label match outranks description-only match.
                 let s = crate::fuzzy::score(&self.filter, &o.label)
-                    .or_else(|| {
-                        crate::fuzzy::score(&self.filter, &o.description)
-                            .map(|s| s / 2)
-                    })?;
+                    .or_else(|| crate::fuzzy::score(&self.filter, &o.description).map(|s| s / 2))?;
                 Some((s, i))
             })
             .collect();
@@ -160,12 +157,7 @@ impl SelectState {
 }
 
 /// Render the select dialog under `parent` (rebuilt each sync).
-pub fn render(
-    m: &mut DocumentMutator<'_>,
-    parent: NodeId,
-    sel: &SelectState,
-    mode: GlyphMode,
-) {
+pub fn render(m: &mut DocumentMutator<'_>, parent: NodeId, sel: &SelectState, mode: GlyphMode) {
     let wrap = div(m, parent, "select-wrap");
     if !sel.title.is_empty() {
         let t = div(m, wrap, "select-title");
@@ -204,12 +196,7 @@ pub fn render(
 
     if start > 0 {
         let up = div(m, dd, "select-more");
-        span_text(
-            m,
-            up,
-            "",
-            &format!("{} more above", mode.arrow_up()),
-        );
+        span_text(m, up, "", &format!("{} more above", mode.arrow_up()));
     }
     for (fi, &oi) in filtered.iter().enumerate().take(end).skip(start) {
         let opt = &sel.options[oi];
@@ -246,12 +233,7 @@ pub fn render(
     }
     if end < total {
         let down = div(m, dd, "select-more");
-        span_text(
-            m,
-            down,
-            "",
-            &format!("{} more below", mode.arrow_down()),
-        );
+        span_text(m, down, "", &format!("{} more below", mode.arrow_down()));
     }
     if !sel.footer.is_empty() {
         let f = div(m, dd, "select-footer");
@@ -308,9 +290,13 @@ pub fn model_picker(
     let window = models
         .iter()
         .find(|m| m.id == current_id)
-        .or_else(|| models.iter().max_by(|a, b| {
-            a.context_window.partial_cmp(&b.context_window).unwrap_or(std::cmp::Ordering::Equal)
-        }))
+        .or_else(|| {
+            models.iter().max_by(|a, b| {
+                a.context_window
+                    .partial_cmp(&b.context_window)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        })
         .map(|m| m.context_window)
         .unwrap_or(0.0);
     let footer = if window > 0.0 {
@@ -343,7 +329,10 @@ pub fn model_detail(m: &pi_rpc::Model) -> Vec<String> {
         v.push(format!("base url: {}", m.base_url));
     }
     if m.context_window > 0.0 {
-        v.push(format!("context window: {} tokens", m.context_window as u64));
+        v.push(format!(
+            "context window: {} tokens",
+            m.context_window as u64
+        ));
     }
     if m.max_tokens > 0.0 {
         v.push(format!("max output: {} tokens", m.max_tokens as u64));
@@ -366,7 +355,10 @@ pub fn model_detail(m: &pi_rpc::Model) -> Vec<String> {
             v.push(format!("cost tiers: {}", tiers.len()));
         }
     }
-    v.push(format!("reasoning: {}", if m.reasoning { "yes" } else { "no" }));
+    v.push(format!(
+        "reasoning: {}",
+        if m.reasoning { "yes" } else { "no" }
+    ));
     if !m.input.is_empty() {
         v.push(format!("input: {}", m.input.join(", ")));
     }
@@ -409,7 +401,11 @@ pub fn theme_picker(current: crate::theme::ThemeKind) -> SelectState {
     });
     options.extend(crate::theme::ThemeKind::ALL.iter().map(|k| SelectOption {
         label: k.name().to_string(),
-        description: format!("{}{}", k.description(), if *k == current { " ●" } else { "" }),
+        description: format!(
+            "{}{}",
+            k.description(),
+            if *k == current { " ●" } else { "" }
+        ),
         badge: None,
     }));
     let cursor = crate::theme::ThemeKind::ALL

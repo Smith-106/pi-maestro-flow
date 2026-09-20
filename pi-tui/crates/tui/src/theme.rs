@@ -54,9 +54,7 @@ impl ThemeKind {
             "solarized-dark" | "solarized" | "solarized_dark" | "sdark" => {
                 Some(ThemeKind::SolarizedDark)
             }
-            "solarized-light" | "solarized_light" | "slight" => {
-                Some(ThemeKind::SolarizedLight)
-            }
+            "solarized-light" | "solarized_light" | "slight" => Some(ThemeKind::SolarizedLight),
             "high-contrast" | "highcontrast" | "hc" => Some(ThemeKind::HighContrast),
             _ => None,
         }
@@ -126,9 +124,7 @@ pub fn stylesheet(kind: ThemeKind) -> String {
         .agent_colors
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            format!(".agent-color-{i} {{ color: {c}; border-left: 1px solid {c}; }}\n")
-        })
+        .map(|(i, c)| format!(".agent-color-{i} {{ color: {c}; border-left: 1px solid {c}; }}\n"))
         .collect();
     format!(
         r#"
@@ -1239,9 +1235,17 @@ mod tests {
     #[test]
     fn name_roundtrip() {
         for kind in ThemeKind::ALL {
-            assert_eq!(ThemeKind::from_name(kind.name()), Some(*kind), "{}", kind.name());
+            assert_eq!(
+                ThemeKind::from_name(kind.name()),
+                Some(*kind),
+                "{}",
+                kind.name()
+            );
         }
-        assert_eq!(ThemeKind::from_name("solarized"), Some(ThemeKind::SolarizedDark));
+        assert_eq!(
+            ThemeKind::from_name("solarized"),
+            Some(ThemeKind::SolarizedDark)
+        );
         assert_eq!(ThemeKind::from_name("hc"), Some(ThemeKind::HighContrast));
         assert_eq!(ThemeKind::from_name("bogus"), None);
     }
@@ -1251,15 +1255,29 @@ mod tests {
         for kind in ThemeKind::ALL {
             let css = stylesheet(*kind);
             for var in [
-                "--text-primary", "--accent-primary", "--surface-elevated", "--border-default",
-                "--status-error", "--diff-insert-bg", "--fusion-lead", "--link-color",
+                "--text-primary",
+                "--accent-primary",
+                "--surface-elevated",
+                "--border-default",
+                "--status-error",
+                "--diff-insert-bg",
+                "--fusion-lead",
+                "--link-color",
             ] {
                 assert!(css.contains(var), "{var} missing for {}", kind.name());
             }
             for i in 0..10 {
-                assert!(css.contains(&format!(".agent-color-{i}")), "agent-color-{i} missing for {}", kind.name());
+                assert!(
+                    css.contains(&format!(".agent-color-{i}")),
+                    "agent-color-{i} missing for {}",
+                    kind.name()
+                );
             }
-            assert!(css.contains(".text-heading-h1"), "heading-h1 missing for {}", kind.name());
+            assert!(
+                css.contains(".text-heading-h1"),
+                "heading-h1 missing for {}",
+                kind.name()
+            );
         }
     }
 
@@ -1270,7 +1288,13 @@ mod tests {
     fn every_var_value_is_a_color() {
         for kind in ThemeKind::ALL {
             let css = stylesheet(*kind);
-            let root = css.split(":root").nth(1).unwrap().split('}').next().unwrap();
+            let root = css
+                .split(":root")
+                .nth(1)
+                .unwrap()
+                .split('}')
+                .next()
+                .unwrap();
             for decl in root.split(';').filter(|d| d.contains("--")) {
                 let v = decl.split(':').nth(1).unwrap().trim();
                 let ok = v == "white"
@@ -1278,7 +1302,13 @@ mod tests {
                     || (v.starts_with('#')
                         && v.len() == 7
                         && v[1..].chars().all(|c| c.is_ascii_hexdigit()));
-                assert!(ok, "{kind:?} bad value {v:?} in {decl:?}", kind = kind, v = v, decl = decl);
+                assert!(
+                    ok,
+                    "{kind:?} bad value {v:?} in {decl:?}",
+                    kind = kind,
+                    v = v,
+                    decl = decl
+                );
             }
         }
     }

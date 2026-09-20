@@ -16,9 +16,9 @@
 use std::io;
 use std::path::PathBuf;
 
-use pi_rpc::PiRpc;
-use pi_fluent_tui::{app, components, state, theme};
 use pi_fluent_tui::theme::ThemeKind;
+use pi_fluent_tui::{app, components, state, theme};
+use pi_rpc::PiRpc;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -153,7 +153,7 @@ fn main() -> io::Result<()> {
 fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
     use blitz_dom::{BaseDocument, DocumentConfig};
     use blitz_traits::shell::Viewport;
-    use scrollback::{PaintContext, Surface, paint_document};
+    use scrollback::{paint_document, PaintContext, Surface};
 
     let font_ctx = blitz_dom::build_single_font_ctx(app::TERMINAL_MONO_BYTES);
     let mut doc = BaseDocument::new(DocumentConfig {
@@ -168,7 +168,10 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
     st.status.model = "test-model".into();
     st.status.thinking = "high".into();
     st.push_user("hello pi");
-    st.push(state::Message::new(state::MsgKind::Assistant, "hi there — streaming reply"));
+    st.push(state::Message::new(
+        state::MsgKind::Assistant,
+        "hi there — streaming reply",
+    ));
     st.input.text = "next prompt".into();
     st.input.cursor = 5;
 
@@ -197,7 +200,12 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
     }
     doc.set_viewport(Viewport::new(60, 20, 1.0, kind.color_scheme()));
     doc.resolve(0.0);
-    components::message_list::apply_scroll(&mut doc, handles.messages, handles.scrollbar_thumb, &mut st);
+    components::message_list::apply_scroll(
+        &mut doc,
+        handles.messages,
+        handles.scrollbar_thumb,
+        &mut st,
+    );
 
     let mut surface = Surface::new(60, 20);
     {
@@ -205,7 +213,10 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
         paint_document(&mut ctx);
     }
     print!("{}", surface.to_text());
-    println!("--- headless dump ok ({} markers) ---", surface.markers.len());
+    println!(
+        "--- headless dump ok ({} markers) ---",
+        surface.markers.len()
+    );
 
     if std::env::var("TUI_DEBUG_LAYOUT").is_ok() {
         dump_layout(&doc, doc.root_node().id, 0);
@@ -220,9 +231,11 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
 fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
     use blitz_dom::{BaseDocument, DocumentConfig};
     use blitz_traits::shell::Viewport;
-    use scrollback::{PaintContext, Surface, paint_document};
-    use pi_fluent_tui::components::{completion, dialog, input_box, message_list, spinner, status_line};
+    use pi_fluent_tui::components::{
+        completion, dialog, input_box, message_list, spinner, status_line,
+    };
     use pi_fluent_tui::state::{DialogState, PermissionMode, Toast};
+    use scrollback::{paint_document, PaintContext, Surface};
 
     const W: u16 = 72;
     const H: u16 = 30;
@@ -321,7 +334,14 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
         m.set_style_property(handles.app, "width", &format!("{W}px"));
         m.set_style_property(handles.app, "height", &format!("{H}px"));
         message_list::sync(&mut m, handles.messages_inner, &mut st);
-        input_box::sync(&mut m, handles.input_hint_text, handles.input_text, &st.input, false, "");
+        input_box::sync(
+            &mut m,
+            handles.input_hint_text,
+            handles.input_text,
+            &st.input,
+            false,
+            "",
+        );
         status_line::sync(
             &mut m,
             &handles.status,
@@ -330,8 +350,22 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             st.permission,
             st.queued.len(),
         );
-        spinner::sync(&mut m, &handles.spinner, true, st.tick, "esc to interrupt", st.glyphs, &theme::Theme::new(kind).fusion());
-        dialog::sync(&mut m, handles.dialog_area, handles.widget_area, &st, st.glyphs);
+        spinner::sync(
+            &mut m,
+            &handles.spinner,
+            true,
+            st.tick,
+            "esc to interrupt",
+            st.glyphs,
+            &theme::Theme::new(kind).fusion(),
+        );
+        dialog::sync(
+            &mut m,
+            handles.dialog_area,
+            handles.widget_area,
+            &st,
+            st.glyphs,
+        );
         completion::sync(&mut m, handles.completion_area, &st, st.glyphs);
     }
     doc.set_viewport(Viewport::new(W as u32, H as u32, 1.0, kind.color_scheme()));

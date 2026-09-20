@@ -29,12 +29,16 @@ use crossterm::event::{
 use crossterm::{execute, terminal};
 use futures_util::StreamExt;
 use pi_rpc::{AgentEvent, PiRpc, RpcCommand, RpcEvent, RpcResponse, StreamingBehavior};
-use scrollback::{Frame, PaintContext, Renderer, Surface, ansi, paint_document};
+use scrollback::{ansi, paint_document, Frame, PaintContext, Renderer, Surface};
 use tokio::sync::mpsc;
 
 use crate::commands::{self, Command, LocalCmd};
-use crate::components::{completion, dialog, input_box, message_list, select, spinner, status_line};
-use crate::state::{AppState, DialogState, LocalAction, MsgKind, ResponseEffect, agent_message_text};
+use crate::components::{
+    completion, dialog, input_box, message_list, select, spinner, status_line,
+};
+use crate::state::{
+    agent_message_text, AppState, DialogState, LocalAction, MsgKind, ResponseEffect,
+};
 use crate::theme::{self, Theme, ThemeKind};
 
 /// Embedded TerminalMono metrics font (advance == upm → 1px = 1 cell).
@@ -411,8 +415,7 @@ impl App {
                     if let Some(m) = s.model {
                         self.state.status.model = m.id;
                     }
-                    self.state.status.thinking =
-                        format!("{:?}", s.thinking_level).to_lowercase();
+                    self.state.status.thinking = format!("{:?}", s.thinking_level).to_lowercase();
                     // The server value controls queue draining; the footer
                     // reports this TUI's steer/follow-up submission choice.
                     self.state.streaming = s.is_streaming;
@@ -517,10 +520,13 @@ impl App {
                 }) = &self.state.dialog
                 {
                     let id = id.clone();
-                    self.send_ui_event(&id, pi_rpc::UiEvent::Resize {
-                        w: u32::from(w),
-                        h: u32::from(h),
-                    });
+                    self.send_ui_event(
+                        &id,
+                        pi_rpc::UiEvent::Resize {
+                            w: u32::from(w),
+                            h: u32::from(h),
+                        },
+                    );
                 }
                 true
             }
@@ -593,12 +599,7 @@ impl App {
                     // already-selected row submits it. With no dialog,
                     // `idx` rows belong to the `/` completion popup.
                     "idx" => {
-                        let i = hit
-                            .payload
-                            .as_deref()
-                            .unwrap_or("")
-                            .parse::<usize>()
-                            .ok();
+                        let i = hit.payload.as_deref().unwrap_or("").parse::<usize>().ok();
                         if self.state.dialog.is_none() && self.state.completion.is_some() {
                             if let Some(i) = i {
                                 if let Some(c) = &mut self.state.completion {
@@ -697,9 +698,7 @@ impl App {
                     }
                     // Tray row click: move the cursor to that row.
                     "tray" => {
-                        if let Some(row) =
-                            hit.payload.as_deref().and_then(|p| p.parse().ok())
-                        {
+                        if let Some(row) = hit.payload.as_deref().and_then(|p| p.parse().ok()) {
                             if row < self.state.tray.visible().len() {
                                 self.state.tray.cursor = row;
                                 self.state.dom_dirty = true;
@@ -954,8 +953,7 @@ impl App {
                     self.state
                         .push_system("Ctrl+B: type a command first (runs it in background)");
                 } else {
-                    self.state
-                        .push_system(format!("background: {cmd}"));
+                    self.state.push_system(format!("background: {cmd}"));
                     self.send_cmd(RpcCommand::Bash {
                         command: cmd,
                         exclude_from_context: None,
@@ -1164,17 +1162,22 @@ impl App {
     /// Key handling while an extension-UI dialog is active.
     fn handle_dialog_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         let code = key.code;
+        // Alt+Left/Right defers to the prev/next queued question (set
+        // inside the dialog borrow, applied after it).
+        let mut defer: i64 = 0;
         match &mut self.state.dialog {
             Some(DialogState::Select { id, sel }) => match (code, ctrl) {
+                (KeyCode::Right, _) if alt => defer = 1,
+                (KeyCode::Left, _) if alt => defer = -1,
                 (KeyCode::Esc, _) => {
                     let id = id.clone();
-                    self.state.resolve_dialog(
-                        pi_rpc::RpcExtensionUIResponse::Cancelled {
+                    self.state
+                        .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Cancelled {
                             id,
                             cancelled: true,
-                        },
-                    );
+                        });
                 }
                 (KeyCode::Up, _) => sel.move_up(),
                 (KeyCode::Down, _) => sel.move_down(),
@@ -1191,9 +1194,8 @@ impl App {
                 (KeyCode::Enter, _) => {
                     if let Some(value) = sel.selected_label() {
                         let id = id.clone();
-                        self.state.resolve_dialog(
-                            pi_rpc::RpcExtensionUIResponse::Value { id, value },
-                        );
+                        self.state
+                            .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Value { id, value });
                     }
                 }
                 (KeyCode::Backspace, _) => sel.pop_filter(),
@@ -1202,68 +1204,70 @@ impl App {
             },
             Some(DialogState::Confirm { id, .. }) => {
                 let id = id.clone();
-                match code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        self.state.resolve_dialog(
-                            pi_rpc::RpcExtensionUIResponse::Confirmed {
+                match (code, alt) {
+                    (KeyCode::Right, true) => defer = 1,
+                    (KeyCode::Left, true) => defer = -1,
+                    (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) | (KeyCode::Enter, _) => {
+                        self.state
+                            .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Confirmed {
                                 id,
                                 confirmed: true,
-                            },
-                        );
+                            });
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        self.state.resolve_dialog(
-                            pi_rpc::RpcExtensionUIResponse::Confirmed {
+                    (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => {
+                        self.state
+                            .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Confirmed {
                                 id,
                                 confirmed: false,
-                            },
-                        );
+                            });
                     }
-                    KeyCode::Esc => self.state.cancel_dialog(),
+                    (KeyCode::Esc, _) => self.state.cancel_dialog(),
                     _ => {}
                 }
             }
             Some(DialogState::Input { id, input, .. }) => match (code, ctrl) {
+                (KeyCode::Right, _) if alt => defer = 1,
+                (KeyCode::Left, _) if alt => defer = -1,
                 (KeyCode::Esc, _) => {
                     let id = id.clone();
-                    self.state.resolve_dialog(
-                        pi_rpc::RpcExtensionUIResponse::Cancelled {
+                    self.state
+                        .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Cancelled {
                             id,
                             cancelled: true,
-                        },
-                    );
+                        });
                 }
                 (KeyCode::Enter, _) => {
                     let value = input.take_submitted();
                     let id = id.clone();
-                    self.state.resolve_dialog(
-                        pi_rpc::RpcExtensionUIResponse::Value { id, value },
-                    );
+                    self.state
+                        .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Value { id, value });
                 }
                 _ => edit_keys(input, key),
             },
             Some(DialogState::Editor { id, input, .. }) => match (code, ctrl) {
+                (KeyCode::Right, _) if alt => defer = 1,
+                (KeyCode::Left, _) if alt => defer = -1,
                 (KeyCode::Esc, _) => {
                     let id = id.clone();
-                    self.state.resolve_dialog(
-                        pi_rpc::RpcExtensionUIResponse::Cancelled {
+                    self.state
+                        .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Cancelled {
                             id,
                             cancelled: true,
-                        },
-                    );
+                        });
                 }
                 // Ctrl+Enter / Ctrl+S submit; Enter inserts a newline.
                 (KeyCode::Enter, true) | (KeyCode::Char('s'), true) => {
                     let value = input.take_submitted();
                     let id = id.clone();
-                    self.state.resolve_dialog(
-                        pi_rpc::RpcExtensionUIResponse::Value { id, value },
-                    );
+                    self.state
+                        .resolve_dialog(pi_rpc::RpcExtensionUIResponse::Value { id, value });
                 }
                 (KeyCode::Enter, false) => input.insert_char('\n'),
                 _ => edit_keys(input, key),
             },
-            Some(DialogState::Plugin { id, spec, driver, .. }) => {
+            Some(DialogState::Plugin {
+                id, spec, driver, ..
+            }) => {
                 match driver {
                     // Plugin-driven: every key is forwarded as an
                     // `extension_ui_event`; Esc dismisses locally only when
@@ -1274,10 +1278,13 @@ impl App {
                             self.send_ui_event(&id, pi_rpc::UiEvent::Dismissed);
                             self.state.cancel_dialog();
                         } else {
-                            self.send_ui_event(&id, pi_rpc::UiEvent::Key {
-                                key: key_id(key),
-                                mods: key_mods(key),
-                            });
+                            self.send_ui_event(
+                                &id,
+                                pi_rpc::UiEvent::Key {
+                                    key: key_id(key),
+                                    mods: key_mods(key),
+                                },
+                            );
                         }
                     }
                     // Client-driven fields land in P3; for now Esc cancels.
@@ -1365,6 +1372,9 @@ impl App {
             }
             None => return false,
         }
+        if defer != 0 {
+            self.state.defer_question(defer);
+        }
         self.state.dom_dirty = true;
         true
     }
@@ -1417,9 +1427,7 @@ impl App {
                             crate::state::TrayKind::Subagent => {
                                 if self.state.streaming {
                                     self.send_cmd(RpcCommand::Abort);
-                                    self.state.push_system(
-                                        "abort sent (cancels the whole run)",
-                                    );
+                                    self.state.push_system("abort sent (cancels the whole run)");
                                 }
                             }
                         }
@@ -1515,12 +1523,7 @@ impl App {
     /// target is `content_height - (bubble height + heights below)`.
     fn scroll_to_message(&mut self, msg_idx: usize) {
         self.state.follow_tail = false;
-        let Some(target) = self
-            .state
-            .messages
-            .get(msg_idx)
-            .and_then(|m| m.node_id)
-        else {
+        let Some(target) = self.state.messages.get(msg_idx).and_then(|m| m.node_id) else {
             return;
         };
         let content_h = self
@@ -1564,12 +1567,7 @@ impl App {
         } else {
             ""
         };
-        let hint = input_box::hint_for(
-            &state.input,
-            &state.attachments,
-            state.attachment_sel,
-            tip,
-        );
+        let hint = input_box::hint_for(&state.input, &state.attachments, state.attachment_sel, tip);
         if state
             .settings
             .get("show_cwd_in_input_border")
@@ -1640,11 +1638,7 @@ impl App {
                 };
                 self.state.attachment_sel = None;
                 if self.state.streaming {
-                    self.send_cmd(streaming_input_command(
-                        self.state.steering_mode,
-                        p,
-                        images,
-                    ));
+                    self.send_cmd(streaming_input_command(self.state.steering_mode, p, images));
                 } else {
                     self.send_cmd(RpcCommand::Prompt {
                         message: p,
@@ -1673,6 +1667,14 @@ impl App {
         // (0,0) forces the next set_viewport → Device rebuild with the
         // new color_scheme; the redraw/rebuild flags repaint all cells.
         self.last_viewport = (0, 0);
+        // Signature caches gate component syncs — reset them so every
+        // component re-pushes its theme-colored inline styles (e.g. the
+        // spinner's per-frame fusion gradient) on the next frame.
+        self.spinner_sig = u64::MAX;
+        self.input_sig = u64::MAX;
+        self.status_sig = u64::MAX;
+        self.dialog_sig = u64::MAX;
+        self.completion_sig = u64::MAX;
         self.renderer.needs_full_redraw = true;
         self.state.needs_rebuild = true;
         self.state.dom_dirty = true;
@@ -1694,17 +1696,13 @@ impl App {
         match cmd {
             LocalCmd::Model(None) => self.send_report(RpcCommand::GetAvailableModels),
             LocalCmd::Model(Some(spec)) => self.set_model_from_spec(&spec),
-            LocalCmd::Thinking(None) => {
-                self.send_report(RpcCommand::GetAvailableThinkingLevels)
-            }
-            LocalCmd::Thinking(Some(level)) => {
-                match parse_thinking_level(&level) {
-                    Some(level) => self.send_report(RpcCommand::SetThinkingLevel { level }),
-                    None => self.state.push_system(format!(
-                        "unknown thinking level '{level}' (off|minimal|low|medium|high|xhigh|max)"
-                    )),
-                }
-            }
+            LocalCmd::Thinking(None) => self.send_report(RpcCommand::GetAvailableThinkingLevels),
+            LocalCmd::Thinking(Some(level)) => match parse_thinking_level(&level) {
+                Some(level) => self.send_report(RpcCommand::SetThinkingLevel { level }),
+                None => self.state.push_system(format!(
+                    "unknown thinking level '{level}' (off|minimal|low|medium|high|xhigh|max)"
+                )),
+            },
             LocalCmd::NewSession => self.send_report(RpcCommand::NewSession {
                 parent_session: None,
             }),
@@ -1724,9 +1722,9 @@ impl App {
                 custom_instructions: instructions,
             }),
             LocalCmd::Session => self.send_report(RpcCommand::GetSessionStats),
-            LocalCmd::Export(path) => self.send_report(RpcCommand::ExportHtml {
-                output_path: path,
-            }),
+            LocalCmd::Export(path) => {
+                self.send_report(RpcCommand::ExportHtml { output_path: path })
+            }
             LocalCmd::Name(name) => self.send_report(RpcCommand::SetSessionName { name }),
             LocalCmd::Copy => self.send_report(RpcCommand::GetLastAssistantText),
             LocalCmd::Clear => self.state.clear_messages(),
@@ -1747,8 +1745,7 @@ impl App {
                                 .settings
                                 .insert("theme_auto_detect".into(), false);
                             self.apply_theme(kind);
-                            self.state
-                                .push_system(format!("theme → {}", kind.name()));
+                            self.state.push_system(format!("theme → {}", kind.name()));
                         }
                         None => {
                             let names: Vec<&str> =
@@ -1818,9 +1815,8 @@ impl App {
                     ));
                     self.send_report(RpcCommand::GetAvailableModels);
                 } else {
-                    self.state.push_system(format!(
-                        "unknown model '{spec}' — use /model to pick"
-                    ));
+                    self.state
+                        .push_system(format!("unknown model '{spec}' — use /model to pick"));
                 }
             }
         }
@@ -1847,7 +1843,12 @@ impl App {
             LocalAction::ToggleSetting => {
                 // Toggle in place and keep the picker open: flip the
                 // value, then re-open on the same row (the Enter arm
-                // already closed the dialog).
+                // already closed the dialog). Preserve the active
+                // filter so repeated toggles don't lose the search.
+                let keep_filter = match &self.state.dialog {
+                    Some(DialogState::Local { sel, .. }) => sel.filter.clone(),
+                    _ => String::new(),
+                };
                 if let Some(key) = crate::state::SETTINGS_KEYS.get(index).copied() {
                     let on = !self.state.settings.get(key).copied().unwrap_or(true);
                     self.state.settings.insert(key.to_string(), on);
@@ -1897,12 +1898,8 @@ impl App {
                             // Boolean proxy: off permanently dismisses the
                             // startup banner; on restores it only before the
                             // first user message in this run.
-                            self.state.banner_visible = on
-                                && !self
-                                    .state
-                                    .messages
-                                    .iter()
-                                    .any(|m| m.kind == MsgKind::User);
+                            self.state.banner_visible =
+                                on && !self.state.messages.iter().any(|m| m.kind == MsgKind::User);
                             self.state.needs_rebuild = true;
                         }
                         "show_tips" | "show_cwd_in_input_border" => {}
@@ -1910,7 +1907,14 @@ impl App {
                     }
                     self.state.open_local_select(LocalAction::ToggleSetting);
                     if let Some(DialogState::Local { sel, .. }) = &mut self.state.dialog {
-                        sel.cursor = index;
+                        sel.filter = keep_filter;
+                        // `index` is an options index; the cursor is a
+                        // filtered index — map back through filtered().
+                        sel.cursor = sel
+                            .filtered()
+                            .iter()
+                            .position(|&oi| oi == index)
+                            .unwrap_or(0);
                     }
                 }
             }
@@ -1927,9 +1931,7 @@ impl App {
                     Some(kind) if index == 0 => {
                         // `auto` row: follow detection, unpin the override.
                         self.state.theme_override = None;
-                        self.state
-                            .settings
-                            .insert("theme_auto_detect".into(), true);
+                        self.state.settings.insert("theme_auto_detect".into(), true);
                         self.apply_theme(kind);
                         self.state
                             .push_system(format!("theme → auto ({})", kind.name()));
@@ -1940,8 +1942,7 @@ impl App {
                             .settings
                             .insert("theme_auto_detect".into(), false);
                         self.apply_theme(kind);
-                        self.state
-                            .push_system(format!("theme → {}", kind.name()));
+                        self.state.push_system(format!("theme → {}", kind.name()));
                     }
                     None => {}
                 }
@@ -1983,9 +1984,7 @@ impl App {
             ResponseEffect::CopyToClipboard(text) => {
                 match copy_to_clipboard(&text) {
                     Ok(()) => self.state.push_system("copied to clipboard"),
-                    Err(e) => self
-                        .state
-                        .push_system(format!("clipboard failed: {e}")),
+                    Err(e) => self.state.push_system(format!("clipboard failed: {e}")),
                 }
                 true
             }
@@ -2529,9 +2528,7 @@ impl App {
                 }
             }
             Ok(_) => self.state.push_system("editor exited non-zero"),
-            Err(e) => self
-                .state
-                .push_system(format!("editor '{editor}': {e}")),
+            Err(e) => self.state.push_system(format!("editor '{editor}': {e}")),
         }
         self.renderer.needs_full_redraw = true;
         self.state.dom_dirty = true;

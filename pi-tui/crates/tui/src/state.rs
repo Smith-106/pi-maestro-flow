@@ -599,8 +599,7 @@ impl InputState {
         let a = self.text[i..j].to_string();
         let b = self.text[j..k].to_string();
         self.record_edit(false);
-        self.text
-            .replace_range(i..k, &format!("{b}{a}"));
+        self.text.replace_range(i..k, &format!("{b}{a}"));
         self.cursor = k;
         self.touch();
     }
@@ -657,8 +656,7 @@ impl InputState {
         let mid = self.text[w1e..w2s].to_string();
         let b = self.text[w2s..w2e].to_string();
         self.record_edit(false);
-        self.text
-            .replace_range(w1s..w2e, &format!("{b}{mid}{a}"));
+        self.text.replace_range(w1s..w2e, &format!("{b}{mid}{a}"));
         self.cursor = w2e;
         self.touch();
     }
@@ -1101,7 +1099,6 @@ impl TrayState {
             .iter()
             .rposition(|e| e.status == TrayStatus::Running)
     }
-
 }
 
 /// Classify a tool call as a tray entry: `bash` with `background:true`
@@ -1189,10 +1186,7 @@ impl CompletionState {
 
     pub fn prev(&mut self) {
         if !self.items.is_empty() {
-            self.cursor = self
-                .cursor
-                .checked_sub(1)
-                .unwrap_or(self.items.len() - 1);
+            self.cursor = self.cursor.checked_sub(1).unwrap_or(self.items.len() - 1);
         }
     }
 }
@@ -1228,6 +1222,12 @@ pub struct AppState {
     pub dialog: Option<DialogState>,
     /// Queued interactive UI requests behind the active dialog.
     pub pending_ui: VecDeque<RpcExtensionUIRequest>,
+    /// The extension-UI request the active dialog is answering —
+    /// re-queued on question deferral (Alt+Left/Right).
+    pub active_req: Option<RpcExtensionUIRequest>,
+    /// Ring position of the active question (0-based) for the
+    /// `[q i+1/N]` indicator; ring size = 1 + pending_ui.len().
+    pub q_pos: usize,
     /// Completed dialog responses awaiting `respond_ui` on the wire.
     pub dialog_result: Option<RpcExtensionUIResponse>,
     /// Transient `notify` toasts.
@@ -1586,14 +1586,9 @@ impl AppState {
                     .messages
                     .iter()
                     .rposition(|m| {
-                        m.kind == MsgKind::Tool
-                            && m.tool_call_id.as_deref() == Some(tool_call_id)
+                        m.kind == MsgKind::Tool && m.tool_call_id.as_deref() == Some(tool_call_id)
                     })
-                    .or_else(|| {
-                        self.messages
-                            .iter()
-                            .rposition(|m| m.kind == MsgKind::Tool)
-                    });
+                    .or_else(|| self.messages.iter().rposition(|m| m.kind == MsgKind::Tool));
                 if let Some(i) = idx {
                     let m = &mut self.messages[i];
                     m.tool_name = Some(tool_name.clone());
@@ -1616,9 +1611,7 @@ impl AppState {
                     .tray
                     .entries
                     .iter()
-                    .rposition(|e| {
-                        e.status == TrayStatus::Running && e.tool == *tool_name
-                    })
+                    .rposition(|e| e.status == TrayStatus::Running && e.tool == *tool_name)
                 {
                     let e = &mut self.tray.entries[i];
                     e.status = if *is_error {
@@ -1637,15 +1630,9 @@ impl AppState {
                 let output = full_text(result);
                 let exit = extract_exit_code(result);
                 // Match the card by tool_call_id (nested tools interleave).
-                if let Some(m) = self
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| {
-                        m.kind == MsgKind::Tool
-                            && m.tool_call_id.as_deref() == Some(tool_call_id)
-                    })
-                {
+                if let Some(m) = self.messages.iter_mut().rev().find(|m| {
+                    m.kind == MsgKind::Tool && m.tool_call_id.as_deref() == Some(tool_call_id)
+                }) {
                     m.tool_status = Some(status);
                     m.tool_name = Some(tool_name.clone());
                     m.tool_exit = exit;
@@ -1656,11 +1643,8 @@ impl AppState {
                         m.tool_output = Some(output);
                     }
                     let args = m.tool_args.clone().unwrap_or(serde_json::Value::Null);
-                    m.tool_lang = crate::components::tool_card::detect_lang(
-                        tool_name,
-                        &args,
-                        result,
-                    );
+                    m.tool_lang =
+                        crate::components::tool_card::detect_lang(tool_name, &args, result);
                     m.dirty = true;
                     self.dom_dirty = true;
                     return true;
@@ -1731,8 +1715,7 @@ impl AppState {
                 error_message,
                 ..
             } => {
-                self.status.transient =
-                    format!("retry {attempt}/{max_attempts}: {error_message}");
+                self.status.transient = format!("retry {attempt}/{max_attempts}: {error_message}");
                 true
             }
             AgentEvent::AutoRetryEnd { success, .. } => {
@@ -1770,11 +1753,7 @@ impl AppState {
                 steering,
                 follow_up,
             } => {
-                self.queued = steering
-                    .iter()
-                    .chain(follow_up.iter())
-                    .cloned()
-                    .collect();
+                self.queued = steering.iter().chain(follow_up.iter()).cloned().collect();
                 true
             }
             _ => is_run_end(e),
@@ -1785,6 +1764,12 @@ impl AppState {
     /// dialog (or queue behind the active one); notifications update
     /// toasts / status / widgets / title / editor text directly.
     fn open_ui(&mut self, req: &RpcExtensionUIRequest) {
+        // Track which request the surface is answering (for deferral);
+        // queued requests don't touch it until promoted.
+        if self.dialog.is_none() && req.expects_response() {
+            self.active_req = Some(req.clone());
+            self.q_pos = self.q_pos.min(self.pending_ui.len());
+        }
         match req {
             RpcExtensionUIRequest::Select {
                 id, title, options, ..
@@ -1844,7 +1829,9 @@ impl AppState {
                 }
             }
             RpcExtensionUIRequest::Notify {
-                message, notify_type, ..
+                message,
+                notify_type,
+                ..
             } => {
                 let text = match notify_type.as_deref() {
                     Some(t) if !t.is_empty() => format!("{t}: {message}"),
@@ -1867,22 +1854,16 @@ impl AppState {
                 widget_key,
                 widget_lines,
                 ..
-            } => {
-                match widget_lines {
-                    Some(lines) => {
-                        if let Some(slot) = self
-                            .widgets
-                            .iter_mut()
-                            .find(|(k, _)| k == widget_key)
-                        {
-                            slot.1 = lines.clone();
-                        } else {
-                            self.widgets.push((widget_key.clone(), lines.clone()));
-                        }
+            } => match widget_lines {
+                Some(lines) => {
+                    if let Some(slot) = self.widgets.iter_mut().find(|(k, _)| k == widget_key) {
+                        slot.1 = lines.clone();
+                    } else {
+                        self.widgets.push((widget_key.clone(), lines.clone()));
                     }
-                    None => self.widgets.retain(|(k, _)| k != widget_key),
                 }
-            }
+                None => self.widgets.retain(|(k, _)| k != widget_key),
+            },
             RpcExtensionUIRequest::SetTitle { title, .. } => {
                 self.term_title = Some(title.clone());
             }
@@ -1962,8 +1943,54 @@ impl AppState {
     /// then promote the next queued interactive request if any.
     pub fn resolve_dialog(&mut self, resp: RpcExtensionUIResponse) {
         self.dialog = None;
+        self.active_req = None;
         self.dialog_result = Some(resp);
         self.promote_pending_ui();
+    }
+
+    /// Defer the active question: re-queue its request and promote the
+    /// next (`dir >= 0`) or previous (`dir < 0`) one in the ring —
+    /// Devin `user_question` next/prev. No response is sent; the
+    /// deferred question keeps its place in the ring order.
+    /// Returns false when there is nothing to rotate to.
+    pub fn defer_question(&mut self, dir: i64) -> bool {
+        let Some(req) = self.active_req.take() else {
+            return false;
+        };
+        if self.pending_ui.is_empty() {
+            self.active_req = Some(req);
+            return false;
+        }
+        if dir >= 0 {
+            // [active, q0..qk-1] → promote q0, active re-queues at back.
+            self.pending_ui.push_back(req);
+        } else {
+            // [active, q0..qk-1] → promote qk-1 (ring prev): move it to
+            // the front, active re-queues at back.
+            if let Some(back) = self.pending_ui.pop_back() {
+                self.pending_ui.push_front(back);
+            }
+            self.pending_ui.push_back(req);
+        }
+        let n = self.pending_ui.len() as i64; // ring size incl. next active
+        self.q_pos = (self.q_pos as i64 + dir).rem_euclid(n) as usize;
+        self.dialog = None;
+        self.promote_pending_ui();
+        true
+    }
+
+    /// `[q i+1/N]` indicator for the dialog chrome while questions are
+    /// queued behind the active one.
+    pub fn q_indicator(&self) -> Option<String> {
+        if self.active_req.is_some() && !self.pending_ui.is_empty() {
+            Some(format!(
+                "[q {}/{}]",
+                self.q_pos + 1,
+                self.pending_ui.len() + 1
+            ))
+        } else {
+            None
+        }
     }
 
     /// Promote queued UI requests after the modal surface frees up: apply
@@ -2105,10 +2132,7 @@ impl AppState {
                     .flatten()
                     .filter_map(|message| {
                         let id = message.get("entryId")?.as_str()?.to_string();
-                        let text = message
-                            .get("text")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let text = message.get("text").and_then(|v| v.as_str()).unwrap_or("");
                         let preview: String = text.chars().take(96).collect();
                         Some((id.clone(), format!("{preview} · {id}")))
                     })
@@ -2250,10 +2274,7 @@ impl AppState {
                     self.push_system("no thinking levels reported by pi");
                     return;
                 }
-                crate::components::select::thinking_picker(
-                    "thinking level",
-                    &self.thinking_levels,
-                )
+                crate::components::select::thinking_picker("thinking level", &self.thinking_levels)
             }
             LocalAction::ToggleSetting => {
                 let options = SETTINGS_KEYS
@@ -2348,18 +2369,17 @@ impl AppState {
     /// Recompute the completion popup from the current input.
     /// `/word` (single token) → commands; `@tok` → file mentions.
     pub fn update_completion(&mut self) {
-        self.input.ghost = if self.input.cursor == self.input.text.len()
-            && !self.input.text.is_empty()
-        {
-            self.input.history.iter().rev().find_map(|entry| {
-                entry
-                    .strip_prefix(&self.input.text)
-                    .filter(|suffix| !suffix.is_empty())
-                    .map(str::to_string)
-            })
-        } else {
-            None
-        };
+        self.input.ghost =
+            if self.input.cursor == self.input.text.len() && !self.input.text.is_empty() {
+                self.input.history.iter().rev().find_map(|entry| {
+                    entry
+                        .strip_prefix(&self.input.text)
+                        .filter(|suffix| !suffix.is_empty())
+                        .map(str::to_string)
+                })
+            } else {
+                None
+            };
 
         let upto = &self.input.text[..self.input.cursor];
         // `/cmd` — only when the slash is the first char and no
@@ -2431,9 +2451,7 @@ impl AppState {
             .iter()
             .filter_map(|path| crate::fuzzy::score(token, path).map(|score| (score, path)))
             .collect();
-        scored.sort_by(|(a_score, a), (b_score, b)| {
-            b_score.cmp(a_score).then_with(|| a.cmp(b))
-        });
+        scored.sort_by(|(a_score, a), (b_score, b)| b_score.cmp(a_score).then_with(|| a.cmp(b)));
         scored
             .into_iter()
             .take(50)
@@ -2510,8 +2528,7 @@ impl AppState {
     /// is `node` (mouse click on a `data-hit-expand` region).
     pub fn toggle_tool_by_node(&mut self, node: blitz_dom::NodeId) -> bool {
         if let Some(m) = self.messages.iter_mut().find(|m| {
-            (m.kind == MsgKind::Tool || m.kind == MsgKind::Thinking)
-                && m.node_id == Some(node)
+            (m.kind == MsgKind::Tool || m.kind == MsgKind::Thinking) && m.node_id == Some(node)
         }) {
             m.expanded = !m.expanded;
             m.dirty = true;
@@ -2760,7 +2777,7 @@ mod tests {
         assert_eq!(i.cursor, 2);
         assert!(i.next_line());
         assert_eq!(i.cursor, 6); // back to col 2 of line 2
-        // clamp to shorter line
+                                 // clamp to shorter line
         let mut i = input("a\nbcd", 4);
         assert!(i.prev_line());
         assert_eq!(i.cursor, 1);
@@ -2838,6 +2855,9 @@ mod tests {
         // clearing the query drops all marks
         s.query.clear();
         assert_eq!(s.refresh(&mut state.messages), None);
-        assert!(state.messages.iter().all(|m| m.search_mark == SearchMark::None));
+        assert!(state
+            .messages
+            .iter()
+            .all(|m| m.search_mark == SearchMark::None));
     }
 }

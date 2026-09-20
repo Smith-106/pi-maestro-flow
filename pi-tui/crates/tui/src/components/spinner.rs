@@ -106,10 +106,7 @@ pub fn sync(
     let frame = (tick / SPINNER_FRAME_TICKS) as usize % 16;
     let (r, g, b) = fusion_color(frame, fusion);
     m.set_style_property(h.glyph_span, "color", &format!("rgb({r},{g},{b})"));
-    m.set_node_text(
-        h.glyph_text,
-        mode.spinner_frame(tick / SPINNER_FRAME_TICKS),
-    );
+    m.set_node_text(h.glyph_text, mode.spinner_frame(tick / SPINNER_FRAME_TICKS));
 
     m.set_node_text(h.label_text, " Thinking");
     let dots = (tick / SPINNER_DOT_TICKS) % 3 + 1;
