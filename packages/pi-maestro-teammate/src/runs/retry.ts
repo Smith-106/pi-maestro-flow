@@ -132,6 +132,12 @@ function unwrapRuntimeDiagnostic(message: string): string {
 const MODEL_UNAVAILABLE_ERROR =
   /\bmodel[_\s-]*not[_\s-]*found\b|model\s+["']?[^\s"']+["']?\s+is not supported by any configured account|model\s+["']?[^\s"']+["']?\s+(?:does not exist|is unavailable)(?:\s+or\s+you\s+do\s+not\s+have\s+access)?/i;
 
+// Devin can label a temporary third-party outage as `invalid_argument`. The
+// diagnostic is authoritative here: retrying the same provider may recover,
+// unlike a genuinely invalid request.
+const TEMPORARY_THIRD_PARTY_PROVIDER_ERROR =
+  /\bthird[-\s]*party model provider is experiencing issues and is currently not available\. please try this model again later\b/i;
+
 const FALLBACK_ONLY_ERROR =
   /\b(?:402|insufficient[_\s-]*(?:quota|balance|credits?)|credits? exhausted|billing quota|quota exceeded|out of budget)\b/i;
 
@@ -184,24 +190,49 @@ function classifyByStatus(status: number | undefined): RetryErrorKind | undefine
  * exception: a user/lifecycle cancellation is never a model failure, so they
  * classify as `non-retryable` to avoid replaying stopped work on any model.
  */
-export function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind {
-  if (!message) return "provider";
+export interface RetryErrorClassification {
+  kind: RetryErrorKind;
+  /**
+   * True when no explicit rule matched and the result is the retryable
+   * default (`provider`). Semantic classifiers treat `defaulted` results as
+   * provisional — the unrecognized-input branch is where a JEV adjudication
+   * adds value.
+   */
+  defaulted: boolean;
+}
+
+/**
+ * Detailed variant of {@link classifyRetryError} that also reports whether the
+ * kind came from an explicit pattern/status match or from the unknown-failure
+ * default. Same precedence and same semantics; the wrapper below preserves the
+ * existing contract for sync callers.
+ */
+export function classifyRetryErrorDetailed(
+  message: string | undefined,
+  status?: number,
+): RetryErrorClassification {
+  if (!message) return { kind: "provider", defaulted: true };
   const diagnostic = unwrapRuntimeDiagnostic(message);
   const effectiveStatus = status ?? extractHttpStatusFromMessage(diagnostic);
-  if (effectiveStatus === 401) return "auth";
-  if (MODEL_UNAVAILABLE_ERROR.test(diagnostic)) return "fallback-only";
-  if (effectiveStatus === 403) return "auth";
+  if (effectiveStatus === 401) return { kind: "auth", defaulted: false };
+  if (MODEL_UNAVAILABLE_ERROR.test(diagnostic)) return { kind: "fallback-only", defaulted: false };
+  if (effectiveStatus === 403) return { kind: "auth", defaulted: false };
+  if (TEMPORARY_THIRD_PARTY_PROVIDER_ERROR.test(diagnostic)) return { kind: "provider", defaulted: false };
   const byStatus = classifyByStatus(effectiveStatus);
-  if (byStatus !== undefined) return byStatus;
-  if (AUTH_ERROR.test(diagnostic)) return "auth";
-  if (ABORT_ERROR.test(diagnostic)) return "non-retryable";
-  if (NON_RETRYABLE_ERROR.test(diagnostic)) return "non-retryable";
-  if (LOCAL_INFRASTRUCTURE_ERROR.test(diagnostic)) return "non-retryable";
-  if (FALLBACK_ONLY_ERROR.test(diagnostic)) return "fallback-only";
-  if (STREAM_READ_ERROR.test(diagnostic)) return "network";
-  if (NETWORK_ERROR.test(diagnostic)) return "network";
-  if (PROVIDER_ERROR.test(diagnostic)) return "provider";
-  return "provider";
+  if (byStatus !== undefined) return { kind: byStatus, defaulted: false };
+  if (AUTH_ERROR.test(diagnostic)) return { kind: "auth", defaulted: false };
+  if (ABORT_ERROR.test(diagnostic)) return { kind: "non-retryable", defaulted: false };
+  if (NON_RETRYABLE_ERROR.test(diagnostic)) return { kind: "non-retryable", defaulted: false };
+  if (LOCAL_INFRASTRUCTURE_ERROR.test(diagnostic)) return { kind: "non-retryable", defaulted: false };
+  if (FALLBACK_ONLY_ERROR.test(diagnostic)) return { kind: "fallback-only", defaulted: false };
+  if (STREAM_READ_ERROR.test(diagnostic)) return { kind: "network", defaulted: false };
+  if (NETWORK_ERROR.test(diagnostic)) return { kind: "network", defaulted: false };
+  if (PROVIDER_ERROR.test(diagnostic)) return { kind: "provider", defaulted: false };
+  return { kind: "provider", defaulted: true };
+}
+
+export function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind {
+  return classifyRetryErrorDetailed(message, status).kind;
 }
 
 function defaultModelHealthFailureScope(retryKind: RetryErrorKind): ModelHealthFailureScope {
@@ -313,14 +344,20 @@ export class ModelHealthAttemptState {
 
 /**
  * Pi core owns same-model provider retries in both the root session and
- * teammate children, but older Pi retry classifiers do not recognize the
- * machine-readable `stream_read_error` code. Add a semantic marker they
- * understand without replacing the original diagnostic.
+ * teammate children. Add semantic markers for transient diagnostics its
+ * classifier does not recognize, without replacing the original diagnostic.
  */
 export function normalizePiRetryErrorMessage(message: string | undefined): string | undefined {
+  if (!message) return message;
+  const diagnostic = unwrapRuntimeDiagnostic(message);
   if (
-    !message
-    || classifyRetryError(message) !== "network"
+    TEMPORARY_THIRD_PARTY_PROVIDER_ERROR.test(diagnostic)
+    && !/\bservice.?unavailable\b/i.test(diagnostic)
+  ) {
+    return `${message} (service unavailable)`;
+  }
+  if (
+    classifyRetryError(message) !== "network"
     || !STREAM_READ_ERROR.test(message)
     || /\bnetwork(?: ?error| request)?\b/i.test(message)
   ) {

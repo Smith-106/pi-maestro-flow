@@ -4,6 +4,8 @@ import {
   BACKGROUND_STATUS_HEARTBEAT_MS,
   buildBackgroundStatusHeartbeatMessage,
   createBackgroundStatusHeartbeat,
+  createBackgroundStatusHeartbeatForHost,
+  supportsNativeCacheWarming,
   type BackgroundStatusSnapshot,
 } from "../src/extension/background-status-heartbeat.ts";
 
@@ -151,6 +153,49 @@ test("live interval changes re-arm settled monitoring and fence the replaced tim
   scheduler.fire();
   assert.equal(deliveries, 1);
   assert.throws(() => controller.setIntervalMs(0), /must be positive/);
+});
+
+test("supportsNativeCacheWarming detects pi 0.86 and newer", () => {
+  assert.equal(supportsNativeCacheWarming("0.86.0"), true);
+  assert.equal(supportsNativeCacheWarming("0.86.1"), true);
+  assert.equal(supportsNativeCacheWarming("0.90.0"), true);
+  assert.equal(supportsNativeCacheWarming("1.0.0"), true);
+  assert.equal(supportsNativeCacheWarming("0.85.1"), false);
+  assert.equal(supportsNativeCacheWarming("0.84.4"), false);
+  assert.equal(supportsNativeCacheWarming(undefined), false);
+  assert.equal(supportsNativeCacheWarming(""), false);
+  assert.equal(supportsNativeCacheWarming("dev"), false);
+});
+
+test("pi 0.86 host never schedules or delivers the legacy heartbeat", () => {
+  const scheduler = new FakeScheduler();
+  let deliveries = 0;
+  const controller = createBackgroundStatusHeartbeatForHost("0.86.0", {
+    capture: activeSnapshot,
+    deliver: () => {
+      deliveries += 1;
+      return true;
+    },
+    scheduler,
+  });
+  controller.markSessionSettled();
+  controller.refresh();
+  controller.setIntervalMs(60_000);
+  controller.markSessionActive();
+  controller.reset();
+  assert.equal(scheduler.callbacks.size, 0);
+  assert.equal(deliveries, 0);
+});
+
+test("pre-0.86 hosts retain the legacy heartbeat", () => {
+  const scheduler = new FakeScheduler();
+  const controller = createBackgroundStatusHeartbeatForHost("0.85.1", {
+    capture: activeSnapshot,
+    deliver: () => true,
+    scheduler,
+  });
+  controller.markSessionSettled();
+  assert.equal(scheduler.callbacks.size, 1);
 });
 
 test("reset fences stale timers and failed delivery retries with a fresh interval", () => {

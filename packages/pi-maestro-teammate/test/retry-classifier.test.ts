@@ -158,6 +158,41 @@ test("configured upstream model-unavailable failures switch candidates without s
   assert.equal(isFallbackProviderError(groupedAccountError), true);
 });
 
+test("Devin temporary third-party outages override a misleading invalid_argument classification", () => {
+  const raw = "Devin stream error invalid_argument: The third-party model provider is experiencing issues and is currently not available. Please try this model again later. (trace ID: trace-1)";
+
+  assert.equal(classifyRetryError(raw), "provider");
+  assert.equal(classifyRetryError(raw, 400), "provider");
+  assert.equal(isRetryableProviderError(raw), true);
+  assert.equal(isFallbackProviderError(raw), true);
+
+  const normalized = normalizePiRetryErrorMessage(raw);
+  assert.equal(normalized, `${raw} (service unavailable)`);
+  assert.equal(normalizePiRetryErrorMessage(normalized), normalized);
+  assert.equal(isRetryableAssistantError({
+    role: "assistant",
+    content: [],
+    api: "openai-responses",
+    provider: "devin",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: normalized,
+    timestamp: 0,
+  }), true);
+
+  const genuineInvalidArgument = "invalid_argument: reasoning_effort 'max' is not supported";
+  assert.equal(classifyRetryError(genuineInvalidArgument, 400), "non-retryable");
+  assert.equal(normalizePiRetryErrorMessage(genuineInvalidArgument), genuineInvalidArgument);
+});
+
 test("genuine permanent errors stay non-retryable and not fallback-eligible", () => {
   assert.equal(classifyRetryError("context_length_exceeded"), "non-retryable");
   assert.equal(classifyRetryError("invalid model: gpt-9"), "non-retryable");

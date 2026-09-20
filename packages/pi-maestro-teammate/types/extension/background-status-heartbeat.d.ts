@@ -44,6 +44,13 @@ export interface BackgroundStatusHeartbeatController {
     refresh: () => void;
     reset: () => void;
 }
+/**
+ * Pi 0.86 added native cost-aware prompt-cache warming, which supersedes the
+ * heartbeat's cache-preservation purpose. On those versions the heartbeat is
+ * disabled and the native warmer takes over.
+ */
+export declare function supportsNativeCacheWarming(version: string | undefined): boolean;
+export declare function createBackgroundStatusHeartbeatForHost(version: string | undefined, options: BackgroundStatusHeartbeatOptions): BackgroundStatusHeartbeatController;
 export declare function buildBackgroundStatusHeartbeatMessage(input: BackgroundStatusSnapshot, observedAt?: number): BackgroundStatusHeartbeatMessage;
 export declare function createBackgroundStatusHeartbeat(options: BackgroundStatusHeartbeatOptions): BackgroundStatusHeartbeatController;
 export {};

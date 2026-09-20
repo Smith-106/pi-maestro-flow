@@ -61,6 +61,8 @@ export interface TeammateSettingsProviderOptions {
   discoverRoles?: (cwd: string) => readonly string[];
   discoverRoleSummaries?: (cwd: string) => { name: string; description: string }[];
   applyBackgroundStatusHeartbeatMs?: (intervalMs: number) => Promise<void> | void;
+  /** False on hosts with native cache warming (pi >= 0.86): the heartbeat setting is hidden. */
+  includeBackgroundStatusHeartbeat?: boolean;
   openLegacySettings?: () => Promise<void> | void;
 }
 
@@ -150,6 +152,7 @@ const BUILTIN_TASK_LABELS: Record<string, { en: string; zh: string }> = {
 
 export function createTeammateSettingsProvider(options: TeammateSettingsProviderOptions = {}): TeammateSettingsProvider {
   const instanceId = randomUUID();
+  const includeHeartbeat = options.includeBackgroundStatusHeartbeat !== false;
   const getGlobalPath = options.getGlobalPath ?? getGlobalModelRoutingPath;
   const getProjectPath = options.getProjectPath ?? getProjectModelRoutingPath;
   const taskTypes = options.discoverTaskTypes ?? ((cwd: string) => discoverRoutingTaskTypes(cwd));
@@ -170,13 +173,13 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
         descriptionKey: "teammate.provider.description",
         order: 20,
         capabilities: { read: true, write: true, prepareCommit: true, rollback: "compensating", hotUpdate: true },
-        settings: definitions(types, roles(request.context.cwd), roleSummaries(request.context.cwd)),
+        settings: definitions(types, roles(request.context.cwd), roleSummaries(request.context.cwd), includeHeartbeat),
         catalogs: catalogs(types, roles(request.context.cwd)),
       };
     },
     read: (request) => {
       const resources = readResources(request.context.cwd, getGlobalPath, getProjectPath);
-      return snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd));
+      return snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd), includeHeartbeat);
     },
     validate: (request) => {
       const resources = readResources(request.context.cwd, getGlobalPath, getProjectPath);
@@ -239,7 +242,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
       }
       state.committedRevisions = resources.map((entry) => entry.revision);
       return {
-        snapshot: snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd)),
+        snapshot: snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd), includeHeartbeat),
         revisions: resources.map((entry) => entry.revision),
         changedKeys: state.changedKeys,
         activation: activationForKeys(state.changedKeys),
@@ -267,7 +270,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
       );
       prepared.delete(request.prepareToken);
       const restored = readResources(request.context.cwd, getGlobalPath, getProjectPath);
-      return { rolledBack: true, snapshot: snapshot(restored, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd)) };
+      return { rolledBack: true, snapshot: snapshot(restored, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd), includeHeartbeat) };
     },
     applyRuntime: async (request) => {
       const state = [...prepared.values()].find((entry) => entry.transactionId === request.transactionId);
@@ -325,7 +328,7 @@ export function registerTeammateSettingsProvider(events: SettingsEventBus, provi
   return () => { if (typeof result === "function") result(); };
 }
 
-function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly string[], summaries: readonly { name: string; description: string }[]): SettingDefinition[] {
+function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly string[], summaries: readonly { name: string; description: string }[], includeHeartbeat = true): SettingDefinition[] {
   const settings = taskTypes.flatMap((taskType, index): SettingDefinition[] => [
     {
       key: settingKey(taskType, "model"),
@@ -367,7 +370,7 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
       },
     },
   ]);
-  settings.unshift({
+  if (includeHeartbeat) settings.unshift({
     key: BACKGROUND_STATUS_HEARTBEAT_SETTING_KEY,
     group: "teammate.group.monitoring",
     order: 0,
@@ -465,6 +468,7 @@ function snapshot(
   taskTypes: readonly TeammateTaskType[],
   roles: readonly string[],
   summaries: readonly { name: string; description: string }[],
+  includeHeartbeat = true,
 ): SettingsSnapshot {
   const configured: ConfiguredSettingValue[] = [];
   const effective: SettingsSnapshot["effective"]["values"][number][] = [];
@@ -477,20 +481,22 @@ function snapshot(
   const globalResource = resources.find((entry) => entry.scope === "global")!;
   const projectResource = resources.find((entry) => entry.scope === "project")!;
   const configuredHeartbeatMs = stores.global.backgroundStatusHeartbeatMs;
-  configured.push({
-    key: BACKGROUND_STATUS_HEARTBEAT_SETTING_KEY,
-    scope: "global",
-    state: globalResource.document.error ? "invalid" : configuredHeartbeatMs === undefined ? "absent" : "set",
-    ...(configuredHeartbeatMs === undefined ? {} : { value: configuredHeartbeatMs }),
-    resource: globalResource.revision.resource,
-    ...(globalResource.document.error ? { messageKey: globalResource.document.error } : {}),
-  });
-  effective.push({
-    key: BACKGROUND_STATUS_HEARTBEAT_SETTING_KEY,
-    value: configuredHeartbeatMs ?? BACKGROUND_STATUS_HEARTBEAT_DEFAULT_MS,
-    source: configuredHeartbeatMs === undefined ? "default" : "configured",
-    ...(configuredHeartbeatMs === undefined ? {} : { scope: "global", resource: globalResource.revision.resource }),
-  });
+  if (includeHeartbeat) {
+    configured.push({
+      key: BACKGROUND_STATUS_HEARTBEAT_SETTING_KEY,
+      scope: "global",
+      state: globalResource.document.error ? "invalid" : configuredHeartbeatMs === undefined ? "absent" : "set",
+      ...(configuredHeartbeatMs === undefined ? {} : { value: configuredHeartbeatMs }),
+      resource: globalResource.revision.resource,
+      ...(globalResource.document.error ? { messageKey: globalResource.document.error } : {}),
+    });
+    effective.push({
+      key: BACKGROUND_STATUS_HEARTBEAT_SETTING_KEY,
+      value: configuredHeartbeatMs ?? BACKGROUND_STATUS_HEARTBEAT_DEFAULT_MS,
+      source: configuredHeartbeatMs === undefined ? "default" : "configured",
+      ...(configuredHeartbeatMs === undefined ? {} : { scope: "global", resource: globalResource.revision.resource }),
+    });
+  }
   for (const taskType of taskTypes) {
     for (const field of ["model", "fallbacks", "thinking"] as const) {
       const key = settingKey(taskType, field);

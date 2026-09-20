@@ -18,6 +18,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
@@ -75,7 +76,10 @@ import {
   type MonitorQuerySnapshot,
   type MonitorQueryTimelineGroup,
 } from "./monitor.ts";
-import { createBackgroundStatusHeartbeat } from "./background-status-heartbeat.ts";
+import {
+  createBackgroundStatusHeartbeatForHost,
+  supportsNativeCacheWarming,
+} from "./background-status-heartbeat.ts";
 import {
   MonitorToolExposureController,
   type MonitorCommunicationCapture,
@@ -1851,7 +1855,9 @@ export default function registerTeammateExtension(
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
 
-  const backgroundStatusHeartbeat = createBackgroundStatusHeartbeat({
+  // Pi >= 0.86 warms the prompt cache natively; the monitoring heartbeat is
+  // only needed on older hosts.
+  const backgroundStatusHeartbeat = createBackgroundStatusHeartbeatForHost(PI_VERSION, {
     intervalMs: getGlobalBackgroundStatusHeartbeatMs(),
     capture: () => {
       const activeAgents = [...state.activeRuns.values()]
@@ -10280,6 +10286,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   let widgetCtx: ExtensionContext | null = null;
   let agentWidgetInstalled = false;
   const teammateSettingsProvider = createTeammateSettingsProvider({
+    includeBackgroundStatusHeartbeat: !supportsNativeCacheWarming(PI_VERSION),
     applyBackgroundStatusHeartbeatMs: (intervalMs) => {
       backgroundStatusHeartbeat.setIntervalMs(intervalMs);
     },

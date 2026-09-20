@@ -19,6 +19,8 @@ export interface TeammateSettingsProviderOptions {
         description: string;
     }[];
     applyBackgroundStatusHeartbeatMs?: (intervalMs: number) => Promise<void> | void;
+    /** False on hosts with native cache warming (pi >= 0.86): the heartbeat setting is hidden. */
+    includeBackgroundStatusHeartbeat?: boolean;
     openLegacySettings?: () => Promise<void> | void;
 }
 export declare function createTeammateSettingsProvider(options?: TeammateSettingsProviderOptions): TeammateSettingsProvider;

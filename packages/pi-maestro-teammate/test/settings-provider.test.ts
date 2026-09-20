@@ -78,6 +78,25 @@ test("Teammate provider exposes model, fallback and thinking routing per task ty
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("native cache warming hosts hide the legacy background heartbeat setting", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-native-cache-warming-settings-"));
+  const key = "monitoring.backgroundStatusHeartbeatMs";
+  try {
+    const provider = createTeammateSettingsProvider({
+      getGlobalPath: () => paths(root).global,
+      getProjectPath: paths(root).project,
+      discoverTaskTypes: () => ["analysis"],
+      discoverRoles: () => [],
+      includeBackgroundStatusHeartbeat: false,
+    });
+    const description = await provider.describe({ context: context(root) });
+    assert.equal(description.settings.some((setting) => setting.key === key), false);
+    const snapshot = await provider.read({ context: context(root) });
+    assert.equal(snapshot.configured.values.some((entry) => entry.key === key), false);
+    assert.equal(snapshot.effective.values.some((entry) => entry.key === key), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("background monitoring interval is global, validated, persisted, and applied live", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-heartbeat-settings-"));
   const configPaths = paths(root);

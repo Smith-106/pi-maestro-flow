@@ -54,6 +54,39 @@ export interface BackgroundStatusHeartbeatController {
   reset: () => void;
 }
 
+/**
+ * Pi 0.86 added native cost-aware prompt-cache warming, which supersedes the
+ * heartbeat's cache-preservation purpose. On those versions the heartbeat is
+ * disabled and the native warmer takes over.
+ */
+export function supportsNativeCacheWarming(version: string | undefined): boolean {
+  const match = /^(\d+)\.(\d+)/.exec(version ?? "");
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 0 || (major === 0 && minor >= 86);
+}
+
+/** Inert controller used when the host pi provides native cache warming. */
+function disabledBackgroundStatusHeartbeat(): BackgroundStatusHeartbeatController {
+  return {
+    markSessionActive(): void {},
+    markSessionSettled(): void {},
+    setIntervalMs(): void {},
+    refresh(): void {},
+    reset(): void {},
+  };
+}
+
+export function createBackgroundStatusHeartbeatForHost(
+  version: string | undefined,
+  options: BackgroundStatusHeartbeatOptions,
+): BackgroundStatusHeartbeatController {
+  return supportsNativeCacheWarming(version)
+    ? disabledBackgroundStatusHeartbeat()
+    : createBackgroundStatusHeartbeat(options);
+}
+
 const ACTIVE_TEAMMATE_STATUSES = new Set(["pending", "running", "retrying"]);
 const MAX_STATUS_ROWS = 6;
 
