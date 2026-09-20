@@ -89,11 +89,15 @@ function createThinkingRuntimeHarness(options: {
 }) {
   const commands = new Map<string, any>();
   const handlers = new Map<string, (event: any, ctx: any) => any>();
+  const shortcuts = new Map<string, any>();
   let current = options.current ?? "medium";
   registerApiProviderConfigs({
     registerProvider: options.registerProvider ?? (() => {}),
     registerCommand(name: string, command: any) {
       commands.set(name, command);
+    },
+    registerShortcut(key: string, shortcut: any) {
+      shortcuts.set(key, shortcut);
     },
     getThinkingLevel() {
       return current;
@@ -112,6 +116,7 @@ function createThinkingRuntimeHarness(options: {
   return {
     commands,
     handlers,
+    shortcuts,
     get current() {
       return current;
     },
@@ -336,9 +341,12 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.equal(registered[2].config.name, undefined);
   assert.equal(registered[2].config.models[0].id, "claude-sonnet-4-5");
   assert.deepEqual(registered[2].config.models[0].thinkingLevelMap, { xhigh: "high" });
-  assert.equal(commands.size, 1);
+  assert.equal(commands.size, 3);
   assert.ok(commands.has("api-manager"));
-  assert.equal(commands.has("effort"), false, "official /thinking remains the only top-level thinking command");
+  assert.ok(commands.has("thinking-for-model"));
+  assert.ok(commands.has("model-thinking"));
+  assert.equal(commands.has("thinking"), false, "official /thinking remains the only top-level thinking command");
+  assert.equal(commands.has("effort"), false);
   assert.equal(actionFromArg("effort"), undefined);
   const movedNotices: Array<{ message: string; type: string }> = [];
   await commands.get("api-manager").handler("effort", {
@@ -982,7 +990,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(settings.defaultThinkingLevel, undefined);
   assert.equal(settings.modelThinkingLevels["maestro-openai/gpt-5.4"], "max");
   assert.deepEqual(appliedThinkingLevels, []);
-  assert.equal(runtimeHandlers.has("model_select"), false);
+  assert.equal(runtimeHandlers.has("model_select"), true);
   assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).defaultThinkingLevel, undefined);
   const defaultsPath = join(tempDir, "api-manager.json");
   assert.equal(existsSync(defaultsPath) ? JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults : undefined, undefined);
@@ -2215,7 +2223,7 @@ test("session_start applies a newly migrated current-model default exactly once"
     current: "medium",
     apply(level) { applied.push(level); },
   });
-  assert.equal(harness.handlers.has("model_select"), false, "Pi owns recurring model-switch restoration");
+  assert.equal(harness.handlers.has("model_select"), true, "status display follows model switches without changing Pi's switch semantics");
   const sessionStart = harness.handlers.get("session_start");
   assert.ok(sessionStart);
   const ctx = {
@@ -2242,7 +2250,7 @@ test("session_start applies a newly migrated current-model default exactly once"
     message: "Legacy thinking defaults retained: 1",
     type: "warning",
   });
-  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high" });
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high · model=high" });
 
   await sessionStart!({ type: "session_start", reason: "reload" }, ctx);
   assert.deepEqual(applied, ["high"], "a consumed legacy value is never applied again");
@@ -2250,7 +2258,11 @@ test("session_start applies a newly migrated current-model default exactly once"
   const thinkingSelect = harness.handlers.get("thinking_level_select");
   assert.ok(thinkingSelect);
   thinkingSelect!({ level: "xhigh" }, ctx);
-  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "xhigh" });
+  await waitForCondition(
+    () => statuses.at(-1)?.value === "xhigh · model=high",
+    "thinking_level_select should refresh the status with the current model default",
+  );
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "xhigh · model=high" });
 });
 
 test("session_start migration never overrides resumed-session thinking", async (t) => {
@@ -2295,7 +2307,97 @@ test("session_start migration never overrides resumed-session thinking", async (
   assert.deepEqual(applied, []);
   assert.equal(harness.current, "low");
   assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels["openai/gpt"], "high");
-  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "low" });
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "low · model=high" });
+});
+
+test("/api-manager thinking saves, shows, clears and shortcut binds current model defaults", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-thinking-current-model-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: { openai: { models: [{ id: "gpt", reasoning: true }] } },
+  }));
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1 }));
+  writeFileSync(settingsPath, JSON.stringify({ defaultThinkingLevel: "medium" }));
+
+  const applied: string[] = [];
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
+  const notifications: Array<{ message: string; type: string }> = [];
+  const harness = createThinkingRuntimeHarness({
+    modelsPath,
+    defaultsPath,
+    settingsPath,
+    current: "medium",
+    apply(level) { applied.push(level); },
+  });
+  const ctx = {
+    cwd: tempDir,
+    hasUI: false,
+    model: { provider: "openai", id: "gpt", reasoning: true },
+    ui: {
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+      setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
+    },
+  };
+
+  assert.deepEqual(parseManagerArgs("thinking"), { action: "thinking", thinking: { subAction: "show" } });
+  assert.deepEqual(parseManagerArgs("thinking high"), { action: "thinking", thinking: { subAction: "save", level: "high" } });
+  assert.deepEqual(parseManagerArgs("thinking save low"), { action: "thinking", thinking: { subAction: "save", level: "low" } });
+  assert.deepEqual(parseManagerArgs("thinking clear"), { action: "thinking", thinking: { subAction: "clear" } });
+
+  await harness.commands.get("api-manager").handler("thinking high", ctx);
+  assert.equal(harness.current, "high");
+  assert.deepEqual(applied, ["high"]);
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels["openai/gpt"], "high");
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high · model=high" });
+  assert.match(notifications.at(-1)?.message ?? "", /openai\/gpt = high/);
+
+  await harness.commands.get("api-manager").handler("thinking", ctx);
+  assert.match(notifications.at(-1)?.message ?? "", /当前模型默认：high/);
+
+  await harness.commands.get("api-manager").handler("thinking clear", ctx);
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels, undefined);
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high · model=global" });
+
+  assert.ok(harness.commands.has("thinking-for-model"));
+  await harness.commands.get("thinking-for-model").handler("low", ctx);
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels["openai/gpt"], "low");
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "low · model=low" });
+  assert.ok(harness.commands.has("model-thinking"));
+
+  const selectCalls: Array<{ title: string; options: string[] }> = [];
+  await harness.commands.get("thinking-for-model").handler("", {
+    ...ctx,
+    hasUI: true,
+    ui: {
+      ...ctx.ui,
+      async select(title: string, options: string[]) {
+        selectCalls.push({ title, options });
+        return "medium（全局默认）";
+      },
+    },
+  });
+  assert.deepEqual(selectCalls, [{
+    title: "当前模型默认思考强度（模型：low > 全局：medium）",
+    options: ["off", "minimal", "low（模型默认 · 生效 · 当前）", "medium（全局默认）", "high", "xhigh", "清除模型默认（使用全局）"],
+  }]);
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels["openai/gpt"], "medium");
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "medium · model=medium" });
+
+  await harness.commands.get("thinking-for-model").handler("", {
+    ...ctx,
+    hasUI: true,
+    ui: {
+      ...ctx.ui,
+      async select(_title: string, options: string[]) {
+        return options.at(-1);
+      },
+    },
+  });
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).modelThinkingLevels, undefined);
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "medium · model=global" });
 });
 
 test("Qwen entry path preserves ProviderConfig metadata, compat, and canonical max mapping", async (t) => {
@@ -3103,7 +3205,7 @@ test("/api-manager no-arg configure lists every model globally and edits through
   // Model-centric navigation: one list shows every model; format is only an attribute.
   assert.ok(selectCalls[0]?.options.includes("启用或停用 Provider"));
   assert.ok(selectCalls[0]?.options.some((option) => option.startsWith("Vision 多模态策略")));
-  assert.equal(selectCalls[0]?.options.some((option) => option.includes("思考强度")), false);
+  assert.equal(selectCalls[0]?.options.some((option) => option.includes("思考强度")), true);
   const global = selectCalls.find((call) => call.title !== "选择操作");
   assert.ok(global);
   assert.ok(global!.options.some((option) => option.includes("maestro-openai / model-a")));

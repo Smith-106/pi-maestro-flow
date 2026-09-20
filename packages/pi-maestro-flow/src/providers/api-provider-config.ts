@@ -466,10 +466,11 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "key" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "switch-key" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "key" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "switch-key" | "thinking" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
+const MODEL_THINKING_LEVELS: readonly ApiThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 export const API_RETRY_MAX_RETRIES = NETWORK_RETRY_POLICY.maxRetries;
 // Upper bound for user-configured retry count; deliberately higher than the runtime
 // default so users can raise retries without hitting the runtime's own cap.
@@ -578,6 +579,22 @@ export function registerApiProviderConfigs(
       await handle.openManager(ctx, args);
     },
   });
+  const handleModelThinkingCommand = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    try {
+      const parsed = parseManagerArgs(`thinking ${args}`.trim());
+      await manageCurrentModelThinkingDefault(pi, parsed.thinking, ctx, modelsPath, defaultsPath, settingsPath);
+    } catch (error) {
+      ctx.ui.notify(t("manager.configFailed", { message: errorMessage(error) }), "error");
+    }
+  };
+  pi.registerCommand("thinking-for-model", {
+    description: "Manage thinking default for the current model",
+    handler: handleModelThinkingCommand,
+  });
+  pi.registerCommand("model-thinking", {
+    description: "Manage thinking default for the current model",
+    handler: handleModelThinkingCommand,
+  });
   if (typeof pi.on === "function") {
     pi.on("after_provider_response", async (event, ctx) => {
       if (event.status < 400) return;
@@ -652,9 +669,14 @@ export function registerApiProviderConfigs(
       } catch (error) {
         ctx.ui.notify(`Model filter init failed: ${errorMessage(error)}`, "warning");
       }
-      syncEffortStatus(ctx, pi.getThinkingLevel());
+      await syncCurrentModelThinkingStatus(pi, ctx, settingsPath, defaultsPath);
     });
-    pi.on("thinking_level_select", (event, ctx) => syncEffortStatus(ctx, event.level));
+    pi.on("thinking_level_select", (event, ctx) => {
+      void syncCurrentModelThinkingStatus(pi, ctx, settingsPath, defaultsPath, event.level);
+    });
+    pi.on("model_select", (_event, ctx) => {
+      void syncCurrentModelThinkingStatus(pi, ctx, settingsPath, defaultsPath);
+    });
     pi.on("session_shutdown", (_event, ctx) => syncEffortStatus(ctx, undefined));
   }
   return handle;
@@ -1518,6 +1540,149 @@ function notifyRetrySettings(
   ].join("\n"), "info");
 }
 
+async function currentModelThinkingDefault(
+  ctx: Pick<ExtensionContext, "cwd" | "model" | "ui">,
+  settingsPath: string,
+  defaultsPath: string,
+): Promise<ThinkingLevel | undefined> {
+  if (!ctx.model) return undefined;
+  try {
+    return await loadModelThinkingDefault(ctx.model.provider, ctx.model.id, settingsPath, ctx.cwd, defaultsPath);
+  } catch (error) {
+    ctx.ui.notify(`Unable to load current model thinking default: ${errorMessage(error)}`, "warning");
+    return undefined;
+  }
+}
+
+async function syncCurrentModelThinkingStatus(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionContext, "cwd" | "model" | "ui">,
+  settingsPath: string,
+  defaultsPath: string,
+  levelOverride?: ThinkingLevel,
+): Promise<void> {
+  syncEffortStatus(ctx, levelOverride ?? pi.getThinkingLevel(), await currentModelThinkingDefault(ctx, settingsPath, defaultsPath));
+}
+
+async function saveCurrentModelThinkingDefault(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionContext, "cwd" | "model" | "ui">,
+  settingsPath: string,
+  defaultsPath: string,
+  requestedLevel?: ThinkingLevel,
+): Promise<ThinkingLevel | undefined> {
+  if (!ctx.model) {
+    ctx.ui.notify("当前没有可保存默认思考强度的模型。", "warning");
+    return undefined;
+  }
+  const level = requestedLevel ?? pi.getThinkingLevel();
+  if (!isThinkingLevel(level)) {
+    ctx.ui.notify(`当前思考强度无效，无法保存：${String(level)}`, "warning");
+    return undefined;
+  }
+  await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, level, settingsPath, ctx.cwd, defaultsPath);
+  setPiThinkingLevel(pi, level);
+  await syncCurrentModelThinkingStatus(pi, ctx, settingsPath, defaultsPath);
+  ctx.ui.notify(`已保存当前模型默认思考强度：${ctx.model.provider}/${ctx.model.id} = ${level}`, "info");
+  return level;
+}
+
+async function clearCurrentModelThinkingDefault(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionContext, "cwd" | "model" | "ui">,
+  settingsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  if (!ctx.model) {
+    ctx.ui.notify("当前没有可清除默认思考强度的模型。", "warning");
+    return;
+  }
+  await deleteModelThinkingDefault(ctx.model.provider, ctx.model.id, settingsPath, ctx.cwd, defaultsPath);
+  await syncCurrentModelThinkingStatus(pi, ctx, settingsPath, defaultsPath);
+  ctx.ui.notify(`已清除当前模型默认思考强度：${ctx.model.provider}/${ctx.model.id}`, "info");
+}
+
+function currentModelThinkingLevels(ctx: Pick<ExtensionContext, "model">): ApiThinkingLevel[] {
+  if (!ctx.model?.reasoning) return ["off"];
+  const levels: ApiThinkingLevel[] = MODEL_THINKING_LEVELS.filter((level): level is Exclude<ApiThinkingLevel, "max"> => level !== "max");
+  const thinkingLevelMap = isRecord(ctx.model.thinkingLevelMap) ? ctx.model.thinkingLevelMap : {};
+  if (thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max") levels.push("max");
+  return levels;
+}
+
+async function selectCurrentModelThinkingDefault(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  settingsPath: string,
+  defaultsPath: string,
+): Promise<boolean> {
+  if (!ctx.hasUI) return false;
+  const current = pi.getThinkingLevel();
+  const modelDefault = await currentModelThinkingDefault(ctx, settingsPath, defaultsPath);
+  const globalDefault = currentDefaultThinkingLevel(ctx, modelsPath, settingsPath);
+  const effectiveDefault = modelDefault ?? globalDefault;
+  const labels = new Map<string, ApiThinkingLevel>();
+  for (const level of currentModelThinkingLevels(ctx)) {
+    const markers = [
+      level === modelDefault ? "模型默认" : undefined,
+      level === globalDefault ? "全局默认" : undefined,
+      level === effectiveDefault ? "生效" : undefined,
+      level === current ? "当前" : undefined,
+    ].filter((marker): marker is string => marker !== undefined);
+    labels.set(`${level}${markers.length > 0 ? `（${markers.join(" · ")}）` : ""}`, level);
+  }
+  const clearLabel = "清除模型默认（使用全局）";
+  const choice = await ctx.ui.select(
+    `当前模型默认思考强度（模型：${modelDefault ?? "未设置"} > 全局：${globalDefault}）`,
+    [...labels.keys(), clearLabel],
+  );
+  if (!choice) return true;
+  if (choice === clearLabel) {
+    await clearCurrentModelThinkingDefault(pi, ctx, settingsPath, defaultsPath);
+    return true;
+  }
+  const level = labels.get(choice);
+  if (level) await saveCurrentModelThinkingDefault(pi, ctx, settingsPath, defaultsPath, canonicalThinkingLevel(level));
+  return true;
+}
+
+async function manageCurrentModelThinkingDefault(
+  pi: ExtensionAPI,
+  args: ThinkingManagerArgs | undefined,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+  settingsPath: string,
+): Promise<void> {
+  if (!ctx.model) {
+    ctx.ui.notify("当前没有可管理默认思考强度的模型。", "warning");
+    return;
+  }
+  if (args?.subAction === "save") {
+    await saveCurrentModelThinkingDefault(pi, ctx, settingsPath, defaultsPath, args.level ? canonicalThinkingLevel(args.level) : undefined);
+    return;
+  }
+  if (args?.subAction === "clear") {
+    await clearCurrentModelThinkingDefault(pi, ctx, settingsPath, defaultsPath);
+    return;
+  }
+  if (await selectCurrentModelThinkingDefault(pi, ctx, modelsPath, settingsPath, defaultsPath)) return;
+  const modelDefault = await currentModelThinkingDefault(ctx, settingsPath, defaultsPath);
+  ctx.ui.notify([
+    "当前模型默认思考强度",
+    `Model：${ctx.model.provider}/${ctx.model.id}`,
+    `当前思考强度：${pi.getThinkingLevel()}`,
+    `当前模型默认：${modelDefault ?? "global"}`,
+    `全局默认：${currentDefaultThinkingLevel(ctx, modelsPath, settingsPath)}`,
+    "选择 thinking 强度后会立即保存为当前模型默认值",
+    `保存当前强度：/api-manager thinking save`,
+    `保存指定强度：/api-manager thinking <off|minimal|low|medium|high|xhigh|max>`,
+    `清除模型默认：/api-manager thinking clear`,
+  ].join("\n"), "info");
+  await syncCurrentModelThinkingStatus(pi, ctx, settingsPath, defaultsPath);
+}
+
 async function showApiProviderManager(
   pi: ExtensionAPI,
   args: string,
@@ -1537,6 +1702,10 @@ async function showApiProviderManager(
   }
   const action = parsed.action ?? await chooseAction(ctx, settingsPath, dirname(modelsPath));
   if (!action) return;
+  if (action === "thinking") {
+    await manageCurrentModelThinkingDefault(pi, parsed.thinking, ctx, modelsPath, defaultsPath, settingsPath);
+    return;
+  }
   if (action === "vision") {
     if (!ctx.hasUI) {
       ctx.ui.notify(t("manager.visionNeedTui"), "warning");
@@ -3013,6 +3182,7 @@ import {
   applyThinkingLevelToActiveModel,
   canonicalThinkingLevel,
   channelDisplayName,
+  deleteModelThinkingDefault,
   chooseAction,
   chooseDefaultThinkingLevel,
   buildGlobalModelOptions,
@@ -3079,7 +3249,7 @@ import {
   writeModelsRoot,
   manageProviderKeys,
 } from "./api-provider-ops.ts";
-import type { CacheAgentManagerArgs, CacheManagerArgs, ConfigureModelTarget, RetryManagerArgs } from "./api-provider-ops.ts";
+import type { CacheAgentManagerArgs, CacheManagerArgs, ConfigureModelTarget, RetryManagerArgs, ThinkingManagerArgs } from "./api-provider-ops.ts";
 import { showUsageStatsPanel } from "./usage-stats-panel.ts";
 import {
   applyCacheRetentionEnv,

@@ -87,6 +87,7 @@ const OPS_CATALOGS = {
     "menu.configure": "Add or edit a model",
     "menu.provider": "Manage Provider connection (URL / key / headers)",
     "menu.show": "View model details",
+    "menu.thinking": "Current model thinking default",
     "menu.vision": "Vision multimodal policy (current: {state})",
     "menu.toggle": "Enable or disable a Provider",
     "menu.delete": "Delete a model",
@@ -193,6 +194,7 @@ const OPS_CATALOGS = {
     "menu.configure": "新增或修改模型",
     "menu.provider": "管理 Provider 连接（URL / key / headers）",
     "menu.show": "查看模型详情",
+    "menu.thinking": "当前模型默认思考强度",
     "menu.vision": "Vision 多模态策略（当前：{state}）",
     "menu.toggle": "启用或停用 Provider",
     "menu.delete": "删除模型",
@@ -1633,6 +1635,12 @@ export interface ParsedManagerArgs {
   cacheAgent?: CacheAgentManagerArgs;
   stats?: StatsManagerArgs;
   key?: KeyManagerArgs;
+  thinking?: ThinkingManagerArgs;
+}
+
+export interface ThinkingManagerArgs {
+  subAction?: "show" | "save" | "clear";
+  level?: ApiThinkingLevel;
 }
 
 export interface KeyManagerArgs {
@@ -1706,6 +1714,9 @@ export function parseManagerArgs(args: string): ParsedManagerArgs {
   if (normalized[0] === "key" || normalized[0] === "keys" || normalized[0] === "apikey" || normalized[0] === "apikeys") {
     return parseKeyArgs(values, normalized);
   }
+  if (normalized[0] === "thinking" || normalized[0] === "model-thinking" || normalized[0] === "thinking-default") {
+    return parseThinkingArgs(values, normalized);
+  }
   if (normalized[0] === "switch-key" || normalized[0] === "switchkey" || normalized[0] === "switch") {
     if (values.length === 1) return { action: "switch-key" };
     if (values.length === 2) return { action: "switch-key", key: { subAction: "switch", keyId: values[1] } };
@@ -1736,7 +1747,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | key [status|switch <id>|policy <sticky|round-robin|weighted|failover>|add|remove <id>] | switch-key <id> | show|set|delete|enable|disable|logout|filter|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
+    `用法：/api-manager list | thinking [show|save [off|minimal|low|medium|high|xhigh|max]|clear] | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | key [status|switch <id>|policy <sticky|round-robin|weighted|failover>|add|remove <id>] | switch-key <id> | show|set|delete|enable|disable|logout|filter|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
   );
 }
 
@@ -2046,6 +2057,7 @@ export async function chooseAction(
     { action: "provider", label: opsText("menu.provider") },
     { action: "configure", label: opsText("menu.configure") },
     { action: "show", label: opsText("menu.show") },
+    { action: "thinking", label: opsText("menu.thinking") },
     { action: "vision", label: opsText("menu.vision", { state: opsText(vision.enabled ? "value.on" : "value.off") }) },
     { action: "toggle", label: opsText("menu.toggle") },
     { action: "delete", label: opsText("menu.delete") },
@@ -2063,6 +2075,35 @@ export async function chooseAction(
   ];
   const choice = await ctx.ui.select(opsText("menu.title"), choices.map((entry) => entry.label));
   return choices.find((entry) => entry.label === choice)?.action;
+}
+
+function parseThinkingArgs(values: string[], normalized: string[]): ParsedManagerArgs {
+  // forms:
+  //   thinking                  → show current model default
+  //   thinking show             → show current model default
+  //   thinking save [level]     → save current/specified level as current model default
+  //   thinking <level>          → save specified level as current model default
+  //   thinking clear            → clear current model default
+  if (values.length === 1) return { action: "thinking", thinking: { subAction: "show" } };
+  if (normalized[1] === "show" || normalized[1] === "status") {
+    if (values.length === 2) return { action: "thinking", thinking: { subAction: "show" } };
+    throw usageError();
+  }
+  if (normalized[1] === "save" || normalized[1] === "set" || normalized[1] === "bind" || normalized[1] === "pin") {
+    if (values.length === 2) return { action: "thinking", thinking: { subAction: "save" } };
+    if (values.length === 3 && isThinkingLevel(normalized[2])) {
+      return { action: "thinking", thinking: { subAction: "save", level: normalized[2] } };
+    }
+    throw usageError();
+  }
+  if (normalized[1] === "clear" || normalized[1] === "remove" || normalized[1] === "reset" || normalized[1] === "global") {
+    if (values.length === 2) return { action: "thinking", thinking: { subAction: "clear" } };
+    throw usageError();
+  }
+  if (values.length === 2 && isThinkingLevel(normalized[1])) {
+    return { action: "thinking", thinking: { subAction: "save", level: normalized[1] } };
+  }
+  throw usageError();
 }
 
 function parseStatsArgs(values: string[], normalized: string[]): ParsedManagerArgs {
@@ -2293,6 +2334,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "disable" || value === "off") return "disable";
   if (value === "list" || value === "ls") return "list";
   if (value === "show" || value === "get") return "show";
+  if (value === "thinking" || value === "model-thinking" || value === "thinking-default") return "thinking";
   if (value === "logout") return "logout";
   if (value === "retry") return "retry";
   if (value === "cache" || value === "prompt-cache" || value === "promptcache") return "cache";
@@ -2970,10 +3012,16 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
 export function syncEffortStatus(
   ctx: Pick<ExtensionCommandContext, "ui"> | undefined,
   level: unknown,
+  modelDefault?: unknown,
 ): void {
   const setStatus = ctx?.ui?.setStatus;
   if (typeof setStatus === "function") {
-    setStatus(EFFORT_STATUS_KEY, isThinkingLevel(level) ? level : undefined);
+    if (!isThinkingLevel(level)) {
+      setStatus(EFFORT_STATUS_KEY, undefined);
+      return;
+    }
+    const suffix = isThinkingLevel(modelDefault) ? ` · model=${modelDefault}` : " · model=global";
+    setStatus(EFFORT_STATUS_KEY, `${level}${suffix}`);
   }
 }
 
