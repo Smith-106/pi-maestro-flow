@@ -979,7 +979,11 @@ export class WorkflowCoordinator {
     const prepared = [...argv];
     addFlag(prepared, "--participant", participantId);
     addFlag(prepared, "--actor", participantId);
-    addRequiredFlagIfMissing(prepared, "--request-id", requestId ?? randomUUID());
+    addRequiredFlagIfMissing(
+      prepared,
+      "--request-id",
+      requestId === undefined ? randomUUID() : derivePiToolRequestId(requestId),
+    );
     addRequiredFlagIfMissing(prepared, "--reason", "Pi run-control v3 mutation");
     addBooleanFlag(prepared, "--json");
     if (isV3OpenCommand(argv)) {
@@ -2247,8 +2251,8 @@ export class WorkflowCoordinator {
     try {
       const snapshot = await this.bridge.refresh();
       if (snapshot.execution?.legacyProjection) {
-        this.authorityDiagnostic = "canonical Session uses the legacy session/1.x lifecycle";
-        this.selectedMode = "legacy-host";
+        this.authorityDiagnostic = "canonical Session uses the legacy session/1.x lifecycle without core mutation authority";
+        this.selectedMode = this.options.legacyCompatibility ? "legacy-host" : "fail-closed";
         return this.selectedMode;
       }
       this.observeCoreSnapshot(snapshot);
@@ -3075,6 +3079,13 @@ function derivePlanPublishRequestId(handoffKey: string): string {
   const normalized = handoffKey.trim();
   if (!normalized) throw new Error("Plan handoff key must be non-empty");
   return `req_plan_publish_${createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+function derivePiToolRequestId(toolCallId: string): string {
+  const normalized = toolCallId.trim();
+  if (!normalized) throw new Error("Pi tool call ID must be non-empty");
+  const digest = createHash("sha256").update(`pi-run-control-tool\0${normalized}`, "utf8").digest("hex").slice(0, 32);
+  return `req_pi_tool_${digest}`;
 }
 
 function derivePlanSessionId(handoffKey: string): string {

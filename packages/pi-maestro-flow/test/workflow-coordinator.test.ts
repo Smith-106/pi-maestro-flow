@@ -675,7 +675,7 @@ test("core-execution mutations fail closed for missing support, locator, claim, 
   }
 });
 
-test("legacy session/1.x compatibility projections select legacy-host with a structured core CLI", async () => {
+test("legacy session/1.x compatibility projections fail closed with a structured core CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-legacy-projection-"));
   const snapshot = workflowSnapshot("running");
   snapshot.locator = {
@@ -708,13 +708,26 @@ test("legacy session/1.x compatibility projections select legacy-host with a str
     coreAdapter([], snapshot),
     new WorkflowLeaseStore(root),
   );
+  const compatible = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    coreAdapter([], snapshot),
+    new WorkflowLeaseStore(root),
+    10_000,
+    { legacyCompatibility: true },
+  );
   try {
-    assert.equal(await coordinator.selectMode(), "legacy-host");
-    const attached = await coordinator.attach("pi-legacy-projection");
+    assert.equal(await coordinator.selectMode(), "fail-closed");
+    await assert.rejects(
+      coordinator.attach("pi-legacy-projection"),
+      /legacy session\/1\.x lifecycle without core mutation authority/,
+    );
+    assert.equal(await compatible.selectMode(), "legacy-host");
+    const attached = await compatible.attach("pi-legacy-projection");
     assert.equal(attached.snapshot.execution?.legacyProjection, true);
-    assert.equal(coordinator.mode(), "legacy-host");
+    assert.equal(compatible.mode(), "legacy-host");
   } finally {
     await coordinator.release();
+    await compatible.release();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -1624,6 +1637,34 @@ test("CLI adapter capability-detects and publishes an approved Plan", async () =
     "--approved-at", "2026-08-02T12:00:00.000Z",
     "--json", "--workflow-root", "D:/workspace",
   ]);
+});
+
+test("CLI adapter validates catalog choices and portable request IDs before dispatch", async () => {
+  const catalog = {
+    catalog_version: "2.0",
+    commands: [{
+      command: "run complete",
+      option_specs: [
+        { names: ["--request-id"], required: true, value_arity: 1, repeatable: false, choices: [], value_constraint: "portable-path-segment" },
+        { names: ["--verdict"], required: false, value_arity: 1, repeatable: false, choices: ["done", "done_with_concerns"], value_constraint: null },
+      ],
+      positionals: [{ name: "run-id", required: true, variadic: false, choices: [] }],
+    }],
+  };
+  const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+    if (args.join(" ") === "help --json") return result(args, JSON.stringify(catalog));
+    return result(args, "ok");
+  });
+
+  await assert.rejects(
+    adapter.exec(["run", "complete", "run-1", "--request-id", "run-control:0#abc", "--verdict", "bad"]),
+    /COMMANDER_USAGE: INVALID_VALUE --request-id/,
+  );
+  await assert.rejects(
+    adapter.exec(["run", "complete", "run-1", "--request-id", "req-1", "--verdict", "bad"]),
+    /COMMANDER_USAGE: INVALID_VALUE --verdict/,
+  );
+  await adapter.exec(["run", "complete", "run-1", "--request-id", "req-1", "--verdict", "done"]);
 });
 
 test("CLI adapter keeps top-level passthrough commands rooted by cwd", async () => {
@@ -3134,16 +3175,23 @@ test("session-v3 exec injects participant/actor/request-id/reason/json and expec
     assert.equal(await coordinator.selectMode(), "session-v3");
     assert.equal(coordinator.mode(), "session-v3");
 
+    const toolCallId = "run-control:0#2e91423eb01d4f4b94281705e9d0687a";
+    const expectedToolRequestId = `req_pi_tool_${createHash("sha256")
+      .update(`pi-run-control-tool\0${toolCallId}`, "utf8")
+      .digest("hex")
+      .slice(0, 32)}`;
     const open = await coordinator.exec(
       ["session", "open", "Complete integration", "--id", "session-2"],
       classifyRunControlArgv(["session", "open"]),
       "pi-v3",
+      toolCallId,
     );
     assert.equal(open.command.exitCode, 0);
     const openCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "open")!;
     assert.equal(flagValue(openCall, "--participant"), "pi-v3");
     assert.equal(flagValue(openCall, "--actor"), "pi-v3");
-    assert.ok(flagValue(openCall, "--request-id"));
+    assert.equal(flagValue(openCall, "--request-id"), expectedToolRequestId);
+    assert.doesNotMatch(flagValue(openCall, "--request-id")!, /[:#]/);
     assert.equal(flagValue(openCall, "--reason"), "Pi run-control v3 mutation");
     assert.ok(openCall.includes("--json"));
     assert.equal(openCall.some((argument) => argument.startsWith("--expected-")), false, "open has no CAS expected revision");

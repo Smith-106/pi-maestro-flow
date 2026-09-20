@@ -92,6 +92,7 @@ export interface RunCliCatalogOption {
   value_arity: 0 | 1 | -1;
   repeatable: boolean;
   choices: string[];
+  value_constraint?: "portable-path-segment" | null;
 }
 
 export interface RunCliCatalogCommand {
@@ -101,7 +102,7 @@ export interface RunCliCatalogCommand {
 }
 
 export interface RunCliCatalogError {
-  code: "UNKNOWN_OPTION" | "MISSING_VALUE" | "EXCESS_POSITIONAL" | "MISSING_REQUIRED" | "UNKNOWN_COMMAND";
+  code: "UNKNOWN_OPTION" | "MISSING_VALUE" | "INVALID_VALUE" | "EXCESS_POSITIONAL" | "MISSING_REQUIRED" | "UNKNOWN_COMMAND";
   argument: string;
   commandPath: string;
   suggestion?: string;
@@ -452,12 +453,20 @@ export class RunCliAdapter {
         continue;
       }
       seen.add(name);
-      if (spec.value_arity !== 0 && !argument.includes("=")) {
-        const next = remaining[index + 1];
-        if (!next || (next.startsWith("-") && next !== "-")) {
-          errors.push({ code: "MISSING_VALUE", argument: name, commandPath: command.command });
-        } else {
+      if (spec.value_arity !== 0) {
+        let value = argument.includes("=") ? argument.slice(argument.indexOf("=") + 1) : undefined;
+        if (value === undefined) {
+          const next = remaining[index + 1];
+          if (!next || (next.startsWith("-") && next !== "-")) {
+            errors.push({ code: "MISSING_VALUE", argument: name, commandPath: command.command });
+            continue;
+          }
+          value = next;
           index++;
+        }
+        if ((spec.choices.length > 0 && !spec.choices.includes(value))
+          || (spec.value_constraint === "portable-path-segment" && !isPortablePathSegment(value))) {
+          errors.push({ code: "INVALID_VALUE", argument: name, commandPath: command.command });
         }
       }
     }
@@ -612,6 +621,13 @@ export class RunCliAdapter {
   }
 }
 
+function isPortablePathSegment(value: string): boolean {
+  return value.length > 0 && value !== "." && value !== ".."
+    && !/[\\/<>:"|?*\x00-\x1f]/.test(value)
+    && !/[. ]$/.test(value)
+    && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(value);
+}
+
 function isRunCliCatalogCommand(value: unknown): value is RunCliCatalogCommand {
   if (!value || typeof value !== "object") return false;
   const item = value as { command?: unknown; option_specs?: unknown; positionals?: unknown };
@@ -631,7 +647,10 @@ function isRunCliCatalogOption(value: unknown): value is RunCliCatalogOption {
     && (item.value_arity === 0 || item.value_arity === 1 || item.value_arity === -1)
     && typeof item.repeatable === "boolean"
     && Array.isArray(item.choices)
-    && item.choices.every(choice => typeof choice === "string");
+    && item.choices.every(choice => typeof choice === "string")
+    && (item.value_constraint === undefined
+      || item.value_constraint === null
+      || item.value_constraint === "portable-path-segment");
 }
 
 function isRunCliCatalogPositional(value: unknown): value is RunCliCatalogCommand["positionals"][number] {
