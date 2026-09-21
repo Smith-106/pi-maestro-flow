@@ -155,6 +155,7 @@ pub fn stylesheet(kind: ThemeKind) -> String {
     --link-hover: {link_hover};
     --code-block-bg: {code_block_bg};
     --code-inline-bg: {code_inline_bg};
+    --tool-cmd: {tool_cmd};
     --diff-insert-bg: {diff_insert_bg};
     --diff-delete-bg: {diff_delete_bg};
     --diff-emphasis-insert-bg: {diff_emphasis_insert_bg};
@@ -221,16 +222,16 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 .text-heading-h1 {{ color: {heading_h1}; }}
 
 .bg-code-block {{
-    background: var(--surface-elevated);
+    background: var(--code-block-bg);
     color: var(--text-primary);
     border-left-width: 1px;
     border-left-style: solid;
-    border-left-color: var(--border-default);
+    border-left-color: var(--accent-primary);
     padding-left: 1px;
     padding-top: 1px;
     padding-bottom: 1px;
 }}
-.bg-code-inline {{ background: var(--surface-overlay); }}
+.bg-code-inline {{ background: var(--code-inline-bg); }}
 .bg-base {{ background: var(--surface-base); }}
 .bg-elevated {{ background: var(--surface-elevated); color: var(--text-primary); }}
 .bg-overlay {{ background: var(--surface-overlay); color: var(--text-primary); }}
@@ -583,7 +584,7 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
     padding-left: 1px;
 }}
 .tool-line {{ color: var(--text-muted); }}
-.tool-cmd {{ color: var(--text-secondary); }}
+.tool-cmd {{ color: var(--tool-cmd); }}
 .tool-foot {{
     color: var(--text-muted);
 }}
@@ -842,6 +843,7 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
         link_hover = v.link_hover,
         code_block_bg = v.code_block_bg,
         code_inline_bg = v.code_inline_bg,
+        tool_cmd = v.tool_cmd,
         diff_insert_bg = v.diff_insert_bg,
         diff_delete_bg = v.diff_delete_bg,
         diff_emphasis_insert_bg = v.diff_emphasis_insert_bg,
@@ -887,6 +889,8 @@ struct Vars {
     link_hover: &'static str,
     code_block_bg: &'static str,
     code_inline_bg: &'static str,
+    /// `$ command` line inside tool cards — the "tool call" accent.
+    tool_cmd: &'static str,
     diff_insert_bg: &'static str,
     diff_delete_bg: &'static str,
     diff_emphasis_insert_bg: &'static str,
@@ -942,8 +946,9 @@ impl Vars {
         text_on_surface_accent: "#5ec4ff",
         link_color: "#5ec4ff",
         link_hover: "#4f94cd",
-        code_block_bg: "#1f1f1f",
-        code_inline_bg: "#002b36",
+        code_block_bg: "#182430",
+        code_inline_bg: "#2b2a20",
+        tool_cmd: "#ff8787",
         diff_insert_bg: "#0d2818",
         diff_delete_bg: "#2d1517",
         diff_emphasis_insert_bg: "#1e4a28",
@@ -989,8 +994,9 @@ impl Vars {
         text_on_surface_accent: "#005a9e",
         link_color: "#0077aa",
         link_hover: "#005a9e",
-        code_block_bg: "#eeeeee",
-        code_inline_bg: "#e8e8e8",
+        code_block_bg: "#eaf2fa",
+        code_inline_bg: "#f5ecd7",
+        tool_cmd: "#cb2431",
         diff_insert_bg: "#d4f5d4",
         diff_delete_bg: "#f5d4d4",
         diff_emphasis_insert_bg: "#a6f3a6",
@@ -1038,8 +1044,9 @@ impl Vars {
         text_on_surface_accent: "#88c0d0",
         link_color: "#88c0d0",
         link_hover: "#81a1c1",
-        code_block_bg: "#3b4252",
-        code_inline_bg: "#434c5e",
+        code_block_bg: "#3a4356",
+        code_inline_bg: "#4a4a3c",
+        tool_cmd: "#bf616a",
         diff_insert_bg: "#2f4438",
         diff_delete_bg: "#4a3238",
         diff_emphasis_insert_bg: "#3f5c46",
@@ -1087,6 +1094,7 @@ impl Vars {
         link_hover: "#2aa198",
         code_block_bg: "#073642",
         code_inline_bg: "#0a3d4c",
+        tool_cmd: "#dc322f",
         diff_insert_bg: "#0d3a24",
         diff_delete_bg: "#3d1a1e",
         diff_emphasis_insert_bg: "#1a5a34",
@@ -1135,6 +1143,7 @@ impl Vars {
         link_hover: "#2aa198",
         code_block_bg: "#eee8d5",
         code_inline_bg: "#eae3cb",
+        tool_cmd: "#dc322f",
         diff_insert_bg: "#cdeccd",
         diff_delete_bg: "#eed5d0",
         diff_emphasis_insert_bg: "#a9dfb0",
@@ -1181,8 +1190,9 @@ impl Vars {
         text_on_surface_accent: "#00d0ff",
         link_color: "#00d0ff",
         link_hover: "#4da3ff",
-        code_block_bg: "#161616",
-        code_inline_bg: "#001d26",
+        code_block_bg: "#0e1e28",
+        code_inline_bg: "#333014",
+        tool_cmd: "#ff5555",
         diff_insert_bg: "#0a2e14",
         diff_delete_bg: "#2e0a0e",
         diff_emphasis_insert_bg: "#145a26",
