@@ -55,6 +55,9 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+      - name: Install system deps (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev
       - name: Build platform package
         run: node packages/pi-fluent-tui/scripts/build-platform.mjs --target ${{ matrix.target }}
       - name: Publish platform package
@@ -66,7 +69,7 @@ jobs:
             if npm view "$spec" version >/dev/null 2>&1; then
               echo "$spec already published — skipping"
             else
-              npm publish "$d" --access public
+              (cd "$d" && npm publish --access public)
             fi
           done
         env:
