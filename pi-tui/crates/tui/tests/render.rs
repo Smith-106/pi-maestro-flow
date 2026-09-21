@@ -91,6 +91,7 @@ impl Fixture {
                 self.state.queued.len(),
                 bg,
                 ssh,
+                self.state.tray.running_subagent(),
             );
             let spinner_label = if self.state.aborting {
                 "Interrupting".to_string()
@@ -474,8 +475,9 @@ fn markdown_renders_blocks() {
 #[test]
 fn tool_card_diff_and_truncation() {
     let mut f = Fixture::new();
-    let mut m = Message::new(MsgKind::Tool, "src/a.rs");
+    let mut m = Message::new(MsgKind::Tool, "");
     m.tool_name = Some("edit".into());
+    m.tool_args = Some(serde_json::json!({"file_path": "src/a.rs"}));
     m.tool_status = Some('✓');
     m.tool_output = Some(
         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,2 @@\n-old line\n+new line\n ctx"
@@ -1757,4 +1759,156 @@ fn subagent_background_hides_nested_cards() {
     f.state.needs_rebuild = true;
     let text = f.frame();
     assert!(text.contains("Read a.rs"), "nested shown:\n{text}");
+}
+
+#[test]
+fn tool_result_content_blocks_render_text() {
+    // pi tool results carry `content` as typed blocks — the card body
+    // must show the joined text, not a pretty-printed JSON dump.
+    let mut f = Fixture::new();
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "t1".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({"command": "echo hi"}),
+    });
+    f.event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: "t1".into(),
+        tool_name: "bash".into(),
+        result: serde_json::json!({
+            "content": [
+                {"type": "text", "text": "hello from stdout"},
+                {"type": "image", "data": "…"}
+            ],
+            "details": {"exit_code": 0}
+        }),
+        is_error: false,
+    });
+    let text = f.frame();
+    assert!(text.contains("hello from stdout"), "content text:\n{text}");
+    assert!(!text.contains("\"type\": \"text\""), "no JSON dump:\n{text}");
+}
+
+#[test]
+fn teammate_update_renders_progress_snapshot() {
+    // A teammate `tool_execution_update` carries
+    // `{content:[{type:text,text}], details:{progress:[…]}}` — the card
+    // body shows one status line per agent, not raw JSON.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({"tasks": [{"name": "researcher", "prompt": "find the bug", "agent": "explore"}]}),
+    });
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({
+            "content": [{"type": "text", "text": "[researcher] running · tools 2 · tokens 512"}],
+            "details": {
+                "mode": "single",
+                "results": [],
+                "progress": [{
+                    "agent": "explore",
+                    "name": "researcher",
+                    "correlationId": "c1",
+                    "taskIndex": 0,
+                    "status": "running",
+                    "toolCount": 2,
+                    "tokens": 512,
+                    "lastMessage": "found the failing test\nin state.rs"
+                }]
+            }
+        }),
+    });
+    // Streamed tool bodies paint on a cadence boundary.
+    for _ in 0..3 {
+        f.state.tick_frame();
+    }
+    let text = f.frame();
+    assert!(
+        text.contains("[researcher] running · tools 2 · tokens 512"),
+        "progress line:\n{text}"
+    );
+    assert!(text.contains("in state.rs"), "last message tail:\n{text}");
+    assert!(!text.contains("\"progress\""), "no JSON dump:\n{text}");
+    // Single-task dispatch folds into the call-level tray row.
+    let e = &f.state.tray.entries[0];
+    assert_eq!(e.title, "researcher");
+    assert_eq!(e.tools, 2);
+    // Status line carries the running subagent cue.
+    assert!(text.contains("[~] researcher"), "status line:\n{text}");
+}
+
+#[test]
+fn teammate_multi_task_creates_per_agent_tray_rows() {
+    use pi_fluent_tui::state::{TrayStatus};
+    let mut f = Fixture::at(100, 30);
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({"tasks": [
+            {"name": "a-scout", "prompt": "scan", "agent": "explore"},
+            {"name": "b-build", "prompt": "build", "agent": "code"}
+        ]}),
+    });
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({
+            "content": [{"type": "text", "text": "[b-build] running · tools 1 · tokens 64"}],
+            "details": {
+                "mode": "parallel",
+                "results": [],
+                "progress": [
+                    {"agent": "explore", "name": "a-scout", "correlationId": "c1",
+                     "taskIndex": 0, "status": "running", "toolCount": 3, "tokens": 120,
+                     "lastMessage": "scanning src/auth.rs\nthree call sites",
+                     "recentTools": [{"name": "grep", "status": "done", "argsPreview": "\"login\""}]},
+                    {"agent": "code", "name": "b-build", "correlationId": "c2",
+                     "taskIndex": 1, "status": "completed", "toolCount": 7, "tokens": 900}
+                ]
+            }
+        }),
+    });
+    // Call-level row + one row per agent, all owned by the call id.
+    let entries = &f.state.tray.entries;
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].title, "teammate · 2 agents");
+    assert!(entries[0].agent_key.is_none());
+    let scout = entries.iter().find(|e| e.title == "a-scout").unwrap();
+    assert_eq!(scout.agent_key.as_deref(), Some("c1"));
+    assert_eq!(scout.status, TrayStatus::Running);
+    assert_eq!(scout.tools, 3);
+    assert_eq!(scout.recent_tools[0].0, "grep");
+    // Per-agent output preview carries the agent's own last message.
+    assert_eq!(scout.last_message, "three call sites");
+    let build = entries.iter().find(|e| e.title == "b-build").unwrap();
+    assert_eq!(build.status, TrayStatus::Done);
+    assert!(build.end_tick.is_some());
+    // Ending the call settles every owned row.
+    f.event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        result: serde_json::json!({
+            "content": [{"type": "text", "text": "a-scout: scanned\nb-build: built"}],
+            "details": {"mode": "parallel", "results": []}
+        }),
+        is_error: false,
+    });
+    assert!(
+        f.state
+            .tray
+            .entries
+            .iter()
+            .all(|e| e.status != TrayStatus::Running),
+        "all rows settled"
+    );
+    let text = f.frame();
+    assert!(text.contains("a-scout: scanned"), "end summary:\n{text}");
+    assert!(text.contains("b-build: built"), "end summary:\n{text}");
 }

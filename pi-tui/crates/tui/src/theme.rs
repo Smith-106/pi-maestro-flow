@@ -583,7 +583,8 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
     border-left-color: var(--border-default);
     padding-left: 1px;
 }}
-.tool-line {{ color: var(--text-muted); }}
+.tool-line {{ color: var(--text-secondary); }}
+.tool-activity {{ color: var(--text-muted); }}
 .tool-cmd {{ color: var(--tool-cmd); }}
 .tool-foot {{
     color: var(--text-muted);

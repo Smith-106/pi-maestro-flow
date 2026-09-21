@@ -506,17 +506,29 @@ pub fn tool_target(args: &serde_json::Value) -> String {
 
 /// Devin-style display verb + target for a tool call
 /// (`● Ran command`, `● Wrote src/app.rs`, `● Searched "foo"`).
-pub fn tool_display(tool_name: &str, args: Option<&serde_json::Value>, fallback: &str) -> String {
-    let n = tool_name.to_ascii_lowercase();
-    let verb = match n.as_str() {
-        "bash" | "shell" | "sh" | "run_command" => "Ran command",
+/// The raw args JSON never reaches the title — only the semantic
+/// target (path / query / url / description) does.
+pub fn tool_display(tool_name: &str, args: Option<&serde_json::Value>) -> String {
+    // Normalize `mcp__srv__tool` / `srv/tool` / `srv:tool` → `tool`.
+    let short = tool_name
+        .rsplit(|c| c == '/' || c == '\\' || c == ':')
+        .next()
+        .unwrap_or(tool_name)
+        .rsplit("__")
+        .next()
+        .unwrap_or(tool_name);
+    let base = short.to_ascii_lowercase();
+    let verb = match base.as_str() {
+        "bash" | "shell" | "sh" | "run_command" | "execute_command" | "run" => "Ran command",
         "write" | "write_file" | "create_file" => "Wrote",
-        "edit" | "edit_file" | "str_replace" | "apply_patch" => "Edited",
+        "edit" | "edit_file" | "str_replace" | "str_replace_editor" | "apply_patch" => "Edited",
         "read" | "read_file" | "view" => "Read",
-        "grep" | "search" | "find" | "rg" | "glob" | "ls" => "Searched",
+        "grep" | "search" | "find" | "rg" | "glob" | "ls" | "list_dir" | "web_search"
+        | "websearch" => "Searched",
         "fetch" | "web_fetch" | "curl" | "http" => "Fetched",
         "task" | "agent" | "subagent" | "teammate" => "Spawned agent",
-        "todo" | "plan" => "Updated plan",
+        "todo" | "todo_write" | "todowrite" | "write_todos" | "todo_read" | "plan"
+        | "plan_write" => "Updated plan",
         "new_context" | "new-context" => "New context",
         "compact" | "compact_context" | "compaction" => "Compacted context",
         _ => "",
@@ -524,18 +536,13 @@ pub fn tool_display(tool_name: &str, args: Option<&serde_json::Value>, fallback:
     let target = args
         .map(tool_target)
         .filter(|t| !t.is_empty())
-        .or_else(|| (!fallback.is_empty()).then(|| fallback.to_string()))
         .unwrap_or_default();
     if verb.is_empty() {
-        // Unknown tool: `name target` (or the args summary).
+        // Unknown tool: `name target` — never the args summary.
         return if target.is_empty() {
-            if fallback.is_empty() {
-                tool_name.to_string()
-            } else {
-                format!("{tool_name} {fallback}")
-            }
+            short.to_string()
         } else {
-            format!("{tool_name} {target}")
+            format!("{short} {target}")
         };
     }
     if target.is_empty() || verb == "Ran command" {
@@ -619,7 +626,7 @@ pub fn build_card(
     let (_gs, glyph_text) = span_text(m, head, status.class(), status_glyph(mode, msg.tool_status));
     let name = msg.tool_name.as_deref().unwrap_or("tool");
     let read_collapsed = is_read_tool(name) && !msg.expanded;
-    let title = tool_display(name, msg.tool_args.as_ref(), &msg.text);
+    let title = tool_display(name, msg.tool_args.as_ref());
     let (_ns, head_text) = span_text(m, head, "tool-name", &format!(" {title}"));
 
     // Body: `$ command` line for shell tools, synthesized diff for
