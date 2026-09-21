@@ -44,6 +44,11 @@ import {
   type FlowClassifierConfig,
 } from "./config.ts";
 import { buildDomainTestInput, signalTypeDomain } from "./domains.ts";
+import {
+  createClassifierSettingsProvider,
+  registerClassifierSettingsProvider,
+} from "./settings-provider.ts";
+import { classifierStatus as engineStatus } from "pi-maestro-teammate/v1/classify";
 
 const DOMAIN_MODES: readonly ClassifierDomainMode[] = ["off", "shadow", "jev"];
 
@@ -65,6 +70,21 @@ export default function registerClassifier(pi: ExtensionAPI): void {
   // Eager registration so `/classifier` works before the first session_start.
   registerBuiltinClassifyDomains();
   registerClassifyDomain(signalTypeDomain);
+
+  // Settings shell surface — same event-bus protocol as the other providers.
+  // `apply` hot-pushes committed config into the engine (activation: live).
+  if (pi.events) {
+    registerClassifierSettingsProvider(pi.events, createClassifierSettingsProvider({
+      getDomains: () => {
+        const status = engineStatus();
+        return listClassifyDomains().map((name) => ({
+          name,
+          modes: status.domains[name]?.supportedModes ?? DOMAIN_MODES,
+        }));
+      },
+      apply: (next) => applyConfig(applyClassifierEnvOverrides(next)),
+    }));
+  }
 
   const appendShadow = (line: string): void => {
     const path = shadowFilePath();

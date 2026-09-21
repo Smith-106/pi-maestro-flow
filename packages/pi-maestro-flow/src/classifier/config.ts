@@ -32,6 +32,7 @@ export const DEFAULT_CLASSIFIER_CONFIG: FlowClassifierConfig = {
     "retry-error": "shadow",
     "file-value": "off",
     "signal-type": "shadow",
+    "prompt-route": "shadow",
   },
 };
 

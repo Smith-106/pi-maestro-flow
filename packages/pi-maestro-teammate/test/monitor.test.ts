@@ -70,6 +70,10 @@ test("root Monitor command entry points exclude the legacy evaluator runtime", a
   assert.doesNotMatch(source, /MonitorController|monitorController|monitorEngine|monitorLedger/);
   assert.equal(source.match(/pi\.registerCommand\("monitor"/g)?.length, 1);
   assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
+  assert.equal(source.match(/pi\.registerCommand\("teammate-abort"/g)?.length, 1);
+  assert.match(source, /pi\.registerCommand\("teammate-abort"[\s\S]*?mode: "abort"/);
+  assert.equal(source.match(/pi\.registerCommand\("teammate-watch"/g)?.length, 1);
+  assert.match(source, /pi\.registerCommand\("teammate-watch"[\s\S]*?observeTargets[\s\S]*?triggerTurn: false/);
   assert.match(source, /kind: "workspace",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: false, message: true, supervise: true \}/);
   assert.match(source, /pi\.events\.on\("bash-bg:update", applyBashBgSnapshot\)/);
   assert.match(source, /createBackgroundStatusHeartbeatForHost\(PI_VERSION, \{[\s\S]*?intervalMs: getGlobalBackgroundStatusHeartbeatMs\(\)[\s\S]*?customType: "background-status-heartbeat"[\s\S]*?triggerTurn: true/);

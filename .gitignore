@@ -155,3 +155,4 @@ pi-tui/target-check/
 pi-tui/target-test/
 pi-tui/spikes/*/target/
 packages/pi-fluent-tui/platforms/
+target-check/

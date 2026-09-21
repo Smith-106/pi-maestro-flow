@@ -2201,7 +2201,9 @@ test("native teammate status widget is stable-mounted and renderKey-gated", () =
   // The widget factory is installed once; the render closure reads the mutable
   // holder instead of capturing a per-update snapshot.
   assert.match(source, /let widgetAgents: ActiveAgent\[\] = \[\];/);
-  assert.match(source, /render\(width: number\): string\[\] \{\s*\n\s*return renderAgentStatusWidget\(widgetAgents, width, theme\);/);
+  assert.match(source, /render\(width: number, height\?: number\): string\[\] \{\s*\n\s*return renderAgentStatusWidget\(widgetAgents, width, theme, height\);/);
+  // RPC hosts drop component factories — the roster degrades to pre-rendered lines.
+  assert.match(source, /widgetCtx\.mode === "rpc"[\s\S]*?setWidget\(\s*"teammate-agents",\s*renderAgentStatusWidget\(widgetAgents, RPC_WIDGET_WIDTH, PLAIN_WIDGET_THEME\)/);
   // Render-key gating: identical visual state never re-installs or repaints.
   assert.match(source, /function agentWidgetRenderKey\(agents: ActiveAgent\[\]\): string/);
   assert.match(source, /if \(agentWidgetInstalled && key === lastWidgetRenderKey\) return;/);

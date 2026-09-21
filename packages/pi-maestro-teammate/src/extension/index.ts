@@ -4420,8 +4420,19 @@ export default function registerTeammateExtension(
         });
       }
 
+      const PROGRESS_OUTPUT_TAIL_LINES = 6;
+      const PROGRESS_OUTPUT_TAIL_LINE_BYTES = 240;
       const progressSnapshot = (): AgentProgressSnapshot[] =>
-        [...progressState.values()].sort((a, b) => a.taskIndex - b.taskIndex);
+        [...progressState.values()].sort((a, b) => a.taskIndex - b.taskIndex)
+          .map((entry) => {
+            // Rolling output tail for RPC-mode hosts, which cannot reach the
+            // in-process read model — bounded so every flush stays small.
+            const run = state.activeRuns.get(entry.correlationId);
+            const tail = run?.outputLog.slice(-PROGRESS_OUTPUT_TAIL_LINES);
+            return tail?.length
+              ? { ...entry, outputTail: tail.map((line) => truncateUtf8Tail(line, PROGRESS_OUTPUT_TAIL_LINE_BYTES)) }
+              : entry;
+          });
 
       const correlationId = randomUUID();
       const initialTaskProvenanceByCorrelationId = new Map<string, MessageProvenanceV1>();
@@ -10535,6 +10546,99 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     },
   });
 
+  // Per-agent terminate for hosts without overlay/keyboard surfaces (RPC
+  // mode): `/teammate-abort <target>` routes an abort envelope the same
+  // way the teammate-send tool's `mode:"abort"` does.
+  pi.registerCommand("teammate-abort", {
+    description: "Terminate a teammate agent by name or correlationId.",
+    async getArgumentCompletions(prefix: string) {
+      try {
+        await workspacePeerLifecycle;
+        await refreshWorkspacePeerOwners();
+      } catch {
+        return null;
+      }
+      const matches = sessionSelectionRows()
+        .filter((row) => row.bindable === true)
+        .map((row) => ({
+          value: row.correlationId,
+          label: row.displayName,
+          description: `${row.agentRole} · ${row.source ?? "workspace peer"} · target=${row.correlationId}`,
+        }))
+        .filter((entry) => entry.value.startsWith(prefix.trimStart()));
+      return matches.length > 0 ? matches : null;
+    },
+    async handler(args: string, ctx) {
+      const target = args.trim();
+      if (!target) {
+        ctx.ui.notify("Usage: /teammate-abort <target>", "warning");
+        return;
+      }
+      const delivery = await routeSessionMessage({
+        selector: target,
+        message: "",
+        mode: "abort",
+        source: "user",
+      });
+      ctx.ui.notify(
+        delivery.delivered
+          ? `aborted ${target}`
+          : delivery.error ?? `failed to abort ${target}`,
+        delivery.delivered ? "info" : "warning",
+      );
+    },
+  });
+
+  // User-facing inspection for hosts without overlay surfaces (RPC mode):
+  // `/teammate-watch <target>` runs the same observe pipeline as the
+  // teammate-watch tool and appends the output as a display-only custom
+  // message — visible in the transcript and persisted for hydration.
+  pi.registerCommand("teammate-watch", {
+    description: "Print a teammate's recent output into the transcript.",
+    async getArgumentCompletions(prefix: string) {
+      try {
+        await workspacePeerLifecycle;
+        await refreshWorkspacePeerOwners();
+      } catch {
+        return null;
+      }
+      const matches = sessionSelectionRows()
+        .filter((row) => row.bindable === true)
+        .map((row) => ({
+          value: row.correlationId,
+          label: row.displayName,
+          description: `${row.agentRole} · ${row.source ?? "workspace peer"} · target=${row.correlationId}`,
+        }))
+        .filter((entry) => entry.value.startsWith(prefix.trimStart()));
+      return matches.length > 0 ? matches : null;
+    },
+    async handler(args: string, ctx) {
+      const target = args.trim();
+      if (!target) {
+        ctx.ui.notify("Usage: /teammate-watch <target>", "warning");
+        return;
+      }
+      const observed = await observeTargets({
+        action: "status",
+        targets: [{ kind: "teammate", id: target }],
+        detail: "full",
+        lines: 60,
+      });
+      const observation = observed.observations[0];
+      if (!observation || !observation.found) {
+        ctx.ui.notify(observation?.summary ?? `Agent "${target}" not found.`, "warning");
+        return;
+      }
+      const output = observation.detail ?? [observation.summary];
+      safeSendMessage(pi, {
+        customType: "teammate-watch",
+        content: `--- ${target} ---\n${output.join("\n")}`,
+        display: true,
+        details: { target },
+      }, { triggerTurn: false });
+    },
+  });
+
   pi.registerCommand("delegate", {
     description: "Delegate an additive task to a fresh or forked independent window after reviewing a planner-produced document.",
     getArgumentCompletions(prefix: string) {
@@ -10826,6 +10930,14 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   let lastWidgetRenderKey: string | undefined;
   let widgetUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // RPC hosts drop component factories and only forward string[] widget
+  // content; the roster degrades to pre-rendered plain lines there.
+  const RPC_WIDGET_WIDTH = 80;
+  const PLAIN_WIDGET_THEME: AgentWidgetTheme = {
+    fg: (_name, text) => text,
+    bold: (text) => text,
+  };
+
   function agentWidgetRenderKey(agents: ActiveAgent[]): string {
     return JSON.stringify(agentWidgetRows(agents).map((row) => [
       row.correlationId,
@@ -10893,6 +11005,15 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     if (agentWidgetInstalled && key === lastWidgetRenderKey) return;
     widgetAgents = visible.map(([, agent]) => agent);
     lastWidgetRenderKey = key;
+
+    if (widgetCtx.mode === "rpc") {
+      widgetCtx.ui.setWidget(
+        "teammate-agents",
+        renderAgentStatusWidget(widgetAgents, RPC_WIDGET_WIDTH, PLAIN_WIDGET_THEME),
+      );
+      agentWidgetInstalled = true;
+      return;
+    }
 
     if (!agentWidgetInstalled) {
       widgetCtx.ui.setWidget("teammate-agents", (tui, theme) => {
