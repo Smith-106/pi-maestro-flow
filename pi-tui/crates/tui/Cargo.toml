@@ -1,9 +1,9 @@
 [package]
 name = "pi-fluent-tui"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
-description = "pi-fluent-tui application crate (P3: Devin-style TUI — pi-rpc + blitz-dom + scrollback)."
+description = "pi-fluent-tui application crate (fluent TUI — pi-rpc + blitz-dom + scrollback)."
 
 [dependencies]
 # --- P0 spike deps: blitz-dom 0.3.0-beta.2 headless layout pipeline ---

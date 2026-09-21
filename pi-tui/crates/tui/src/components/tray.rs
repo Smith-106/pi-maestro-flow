@@ -88,11 +88,11 @@ pub fn render(
         let (line, sub) = match tray.tab {
             TrayTab::Subagents => (
                 "No subagents yet.",
-                "Ask Devin to spawn a subagent for parallel or focused work.",
+                "Ask pi to spawn a subagent for parallel or focused work.",
             ),
             TrayTab::Cloud => (
                 "No cloud agents yet.",
-                "Run /handoff to launch a Devin agent on its own dev machine.",
+                "Run /handoff to launch an agent on its own machine.",
             ),
             TrayTab::Shells => ("No shells yet.", "Ctrl+B runs a command in the background."),
         };

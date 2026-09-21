@@ -16,13 +16,13 @@ use blitz_dom::{DocumentMutator, NodeId};
 use crate::components::dom::{attr, div, qual, span_text};
 
 /// The welcome link (opens in the system browser via `data-hit-link`).
-pub const WELCOME_URL: &str = "https://x.com/cognition";
+pub const WELCOME_URL: &str = "https://github.com/catlog22/pi-maestro-flow";
 
 /// Build the banner under `parent`; returns the banner root node.
 pub fn render(m: &mut DocumentMutator<'_>, parent: NodeId) -> NodeId {
     let root = div(m, parent, "startup-banner");
     let logo = div(m, root, "startup-logo");
-    span_text(m, logo, "", "Devin CLI");
+    span_text(m, logo, "", "pi-fluent-tui");
 
     let wb = div(m, root, "welcome-box");
     span_text(

@@ -63,8 +63,8 @@ impl ThemeKind {
     /// Short picker description (flavor, not a restatement of the name).
     pub fn description(self) -> &'static str {
         match self {
-            Self::Dark => "Devin dark (default)",
-            Self::Light => "Devin light",
+            Self::Dark => "fluent dark (default)",
+            Self::Light => "fluent light",
             Self::Nord => "polar blue",
             Self::SolarizedDark => "precision teal",
             Self::SolarizedLight => "paper",

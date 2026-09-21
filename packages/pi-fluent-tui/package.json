@@ -1,7 +1,7 @@
 {
   "name": "pi-fluent-tui",
-  "version": "0.1.0",
-  "description": "Fluent TUI for pi — a Devin-style terminal interface over pi-rpc.",
+  "version": "0.1.1",
+  "description": "Fluent TUI for pi — a fast, fluent terminal interface over pi-rpc.",
   "keywords": [
     "pi",
     "tui",
@@ -20,11 +20,11 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "pi-fluent-tui-win32-x64": "0.1.0",
-    "pi-fluent-tui-linux-x64": "0.1.0",
-    "pi-fluent-tui-linux-arm64": "0.1.0",
-    "pi-fluent-tui-darwin-x64": "0.1.0",
-    "pi-fluent-tui-darwin-arm64": "0.1.0"
+    "@dyw1234/pi-fluent-tui-win32-x64": "0.1.1",
+    "@dyw1234/pi-fluent-tui-linux-x64": "0.1.1",
+    "@dyw1234/pi-fluent-tui-linux-arm64": "0.1.1",
+    "@dyw1234/pi-fluent-tui-darwin-x64": "0.1.1",
+    "@dyw1234/pi-fluent-tui-darwin-arm64": "0.1.1"
   },
   "scripts": {
     "build:platform": "node scripts/build-platform.mjs"

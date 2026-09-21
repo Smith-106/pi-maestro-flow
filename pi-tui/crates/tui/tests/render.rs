@@ -1218,13 +1218,13 @@ fn tray_empty_subagents_hint() {
 fn startup_banner_shows_then_dismisses() {
     let mut f = Fixture::new();
     let text = f.frame();
-    assert!(text.contains("Devin CLI"), "banner:\n{text}");
-    assert!(text.contains("x.com/cognition"), "welcome link:\n{text}");
+    assert!(text.contains("pi-fluent-tui"), "banner:\n{text}");
+    assert!(text.contains("github.com/catlog22"), "welcome link:\n{text}");
 
     // First prompt dismisses the banner.
     f.state.push_user("hi");
     let text = f.frame();
-    assert!(!text.contains("Devin CLI"), "dismissed:\n{text}");
+    assert!(!text.contains("pi-fluent-tui"), "dismissed:\n{text}");
 }
 
 #[test]

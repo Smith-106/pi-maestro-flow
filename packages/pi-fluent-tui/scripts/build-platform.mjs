@@ -59,7 +59,7 @@ if (!fs.existsSync(built)) {
   process.exit(1);
 }
 
-const name = `pi-fluent-tui-${spec.os}-${spec.cpu}`;
+const name = `@dyw1234/pi-fluent-tui-${spec.os}-${spec.cpu}`;
 const outDir = path.join(PKG_DIR, "platforms", name);
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(path.join(outDir, "bin"), { recursive: true });

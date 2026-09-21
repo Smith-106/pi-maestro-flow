@@ -60,7 +60,14 @@ jobs:
       - name: Publish platform package
         working-directory: packages/pi-fluent-tui/platforms
         run: |
-          cd pi-fluent-tui-* && npm publish --access public
+          for d in */pi-fluent-tui-*/; do
+            spec="$(node -p "require('./$d/package.json').name + '@' + require('./$d/package.json').version")"
+            if npm view "$spec" version >/dev/null 2>&1; then
+              echo "$spec already published — skipping"
+            else
+              npm publish "$d" --access public
+            fi
+          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -75,6 +82,12 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Publish pi-fluent-tui
         working-directory: packages/pi-fluent-tui
-        run: npm publish --access public
+        run: |
+          spec="$(node -p "require('./package.json').name + '@' + require('./package.json').version")"
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "$spec already published — skipping"
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

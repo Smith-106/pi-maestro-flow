@@ -6,11 +6,11 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
 const PLATFORMS = {
-  "win32-x64": "pi-fluent-tui-win32-x64",
-  "linux-x64": "pi-fluent-tui-linux-x64",
-  "linux-arm64": "pi-fluent-tui-linux-arm64",
-  "darwin-x64": "pi-fluent-tui-darwin-x64",
-  "darwin-arm64": "pi-fluent-tui-darwin-arm64",
+  "win32-x64": "@dyw1234/pi-fluent-tui-win32-x64",
+  "linux-x64": "@dyw1234/pi-fluent-tui-linux-x64",
+  "linux-arm64": "@dyw1234/pi-fluent-tui-linux-arm64",
+  "darwin-x64": "@dyw1234/pi-fluent-tui-darwin-x64",
+  "darwin-arm64": "@dyw1234/pi-fluent-tui-darwin-arm64",
 };
 
 const key = `${process.platform}-${process.arch}`;
