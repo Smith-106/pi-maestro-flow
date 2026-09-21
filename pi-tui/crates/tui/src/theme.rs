@@ -499,6 +499,8 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 #status-right {{
     margin-left: auto;
     flex-shrink: 0;
+    display: flex;
+    flex-direction: row;
     color: var(--text-muted);
 }}
 
@@ -506,6 +508,8 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 .status-permission {{ color: var(--text-muted); }}
 .status-thinking {{ color: var(--accent-secondary); }}
 .status-mode {{ color: var(--text-secondary); }}
+.status-cwd {{ color: var(--text-muted); }}
+.status-git {{ color: var(--accent-secondary); }}
 .status-running {{ color: var(--accent-primary); font-weight: bold; }}
 .status-queue, .status-transient {{ color: var(--status-warning); }}
 .status-bg {{ color: var(--status-info); }}
@@ -516,6 +520,19 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 .status-warn {{ color: var(--status-warning); }}
 .status-err {{ color: var(--status-error); }}
 
+/* Right resource group (cockpit): ctx meter, in/out tokens, cost. */
+.status-ctx-ok {{ color: var(--accent-primary); }}
+.status-ctx-warn {{ color: var(--status-warning); }}
+.status-ctx-crit {{ color: var(--status-error); }}
+.status-tok-in {{ color: var(--accent-primary); }}
+.status-tok-out {{ color: var(--status-success); }}
+.status-cost {{ color: var(--status-warning); }}
+
+/* Mid-width: drop low-priority context (path/git) before actionable
+   segments get clipped — same fallback ladder as the cockpit footer. */
+@media (max-width: 119px) {{
+    .status-cwd, .status-git {{ display: none; }}
+}}
 @media (max-width: 79px) {{
     .status-thinking, .status-mode, #status-right {{ display: none; }}
 }}

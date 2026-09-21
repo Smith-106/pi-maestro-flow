@@ -150,4 +150,5 @@ devin-re/
 
 # Rust build artifacts
 pi-tui/target/
+pi-tui/target-check/
 pi-tui/spikes/*/target/

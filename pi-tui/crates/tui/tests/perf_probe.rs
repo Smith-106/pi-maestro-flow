@@ -107,6 +107,8 @@ impl Fx {
                 self.state.queued.len(),
                 bg,
                 ssh,
+                self.state.tray.running_subagent(),
+                self.state.glyphs,
             );
             let spinner_label = if self.state.aborting {
                 "Interrupting".to_string()

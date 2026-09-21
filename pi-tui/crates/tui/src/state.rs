@@ -773,6 +773,15 @@ pub struct StatusState {
     pub mode: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Latest assistant `totalTokens` — context occupancy numerator.
+    pub context_tokens: u64,
+    /// Active model's `contextWindow` (0 = unknown → bar hidden).
+    pub context_window: u64,
+    /// Accumulated USD across assistant `message_end` usage.
+    pub cost: f64,
+    /// Working directory and git branch — local facts, no RPC needed.
+    pub cwd: String,
+    pub git_branch: String,
     /// Extra transient status (e.g. "compacting…", "retrying 2/5").
     pub transient: String,
 }
@@ -985,6 +994,15 @@ pub struct TrayEntry {
     /// tool cards into the main scrollback; backgrounded ones hide them
     /// until the entry finishes. Shells default to background.
     pub foregrounded: bool,
+    /// Owning `tool_call_id` — one dispatch call may expand into several
+    /// per-agent rows that all close together on `tool_execution_end`.
+    pub call_id: String,
+    /// `Some(correlationId|taskIndex)` for per-agent rows synced from a
+    /// teammate `details.progress` snapshot; `None` on the call-level row.
+    pub agent_key: Option<String>,
+    /// Agent's latest message tail (progress `lastMessage`) — the
+    /// per-agent output shown in the tray preview.
+    pub last_message: String,
 }
 
 /// Tray tab an entry belongs to.
@@ -1093,11 +1111,28 @@ impl TrayState {
         self.cursor = 0;
     }
 
-    /// Most recent still-running entry index.
+    /// Most recent still-running entry index. Nested top-level tools
+    /// belong on the call-level row — per-agent rows (`agent_key`) are
+    /// display-only and never own nested cards.
     fn last_running(&self) -> Option<usize> {
         self.entries
             .iter()
-            .rposition(|e| e.status == TrayStatus::Running)
+            .rposition(|e| e.status == TrayStatus::Running && e.agent_key.is_none())
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .rposition(|e| e.status == TrayStatus::Running)
+            })
+    }
+
+    /// Title of the newest still-running subagent row — the status-line
+    /// cue for delegated work (`[~] agent-name`).
+    pub fn running_subagent(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == TrayKind::Subagent && e.status == TrayStatus::Running)
+            .map(|e| e.title.as_str())
     }
 
     /// `(running background shells, of which running ssh)` — the
@@ -1146,6 +1181,25 @@ pub fn tray_kind(tool_name: &str, args: &serde_json::Value) -> Option<TrayKind> 
 /// Display title for a tray entry: `description`/`prompt`/`command`/
 /// `name` arg, else the tool name. First line, truncated to 48 chars.
 fn tray_title(tool_name: &str, args: &serde_json::Value) -> String {
+    // teammate dispatches carry `tasks: [{name?, prompt, …}]` — the
+    // call-level row is the dispatch itself.
+    if tool_name.eq_ignore_ascii_case("teammate") {
+        if let Some(tasks) = args.get("tasks").and_then(|v| v.as_array()) {
+            if tasks.len() > 1 {
+                return format!("teammate · {} agents", tasks.len());
+            }
+            if let Some(t) = tasks.first() {
+                for key in ["name", "prompt", "description"] {
+                    if let Some(s) = t.get(key).and_then(|v| v.as_str()) {
+                        let first = s.lines().next().unwrap_or("").trim();
+                        if !first.is_empty() {
+                            return first.chars().take(48).collect();
+                        }
+                    }
+                }
+            }
+        }
+    }
     for key in ["description", "prompt", "command", "name", "task"] {
         if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
             let first = s.lines().next().unwrap_or("").trim();
@@ -1477,6 +1531,8 @@ impl AppState {
             steering_mode: Some(StreamingBehavior::FollowUp),
             status: StatusState {
                 mode: "send:follow-up".to_string(),
+                cwd: display_cwd(),
+                git_branch: detect_git_branch(),
                 ..StatusState::default()
             },
             banner_visible: true,
@@ -1535,6 +1591,15 @@ impl AppState {
                 t.ticks_left = t.ticks_left.saturating_sub(1);
             }
             self.toasts.retain(|t| t.ticks_left > 0);
+        }
+        // Re-read .git/HEAD every ~5s — branch switches mid-session show up
+        // without a get_state round-trip.
+        if self.tick % 150 == 0 {
+            let branch = detect_git_branch();
+            if branch != self.status.git_branch {
+                self.status.git_branch = branch;
+                dirty = true;
+            }
         }
         dirty
     }
@@ -1614,6 +1679,29 @@ impl AppState {
         }
     }
 
+    /// Shared end-of-run reduction for `agent_end` / `agent_settled`:
+    /// stop the spinner, seal the live bubble, report an abort.
+    fn finish_run(&mut self) {
+        self.streaming = false;
+        self.run_started = None;
+        // An aborted run ends without `turn_end` — seal the last
+        // assistant/thinking bubble here too or it stays live.
+        if let Some(m) = self.messages.last_mut() {
+            if matches!(m.kind, MsgKind::Assistant | MsgKind::Thinking) && !m.sealed {
+                m.sealed = true;
+                if m.kind == MsgKind::Thinking {
+                    m.dirty = true;
+                    self.dom_dirty = true;
+                }
+            }
+        }
+        if self.aborting {
+            self.aborting = false;
+            self.push_system("interrupted");
+        }
+        self.status.transient.clear();
+    }
+
     fn apply_agent(&mut self, e: &AgentEvent) -> bool {
         match e {
             AgentEvent::AgentStart => {
@@ -1627,6 +1715,7 @@ impl AppState {
                 if let Some(u) = usage {
                     self.status.input_tokens = u.input as u64;
                     self.status.output_tokens = u.output as u64;
+                    self.status.context_tokens = u.total_tokens as u64;
                 }
                 if let Some(d) = text_delta(e) {
                     self.append_to_last(MsgKind::Assistant, d);
@@ -1637,14 +1726,22 @@ impl AppState {
                 } else {
                     // Other assistant sub-events (toolcall_*, text_start/end)
                     // don't change visible state.
-                    match &e {
-                        AgentEvent::MessageUpdate {
-                            assistant_message_event: AssistantMessageEvent::Error { .. },
-                            ..
-                        } => {
-                            self.push(Message::new(MsgKind::Error, "assistant stream error"));
+                    if let AgentEvent::MessageUpdate {
+                        assistant_message_event:
+                            AssistantMessageEvent::Error { reason, error },
+                        ..
+                    } = &e
+                    {
+                        // `reason:"aborted"` is the user pressing Esc — the
+                        // abort path already prints "interrupted".
+                        if reason != "aborted" {
+                            let detail = assistant_error_message(error)
+                                .unwrap_or_else(|| reason.clone());
+                            self.push(Message::new(
+                                MsgKind::Error,
+                                format!("assistant error: {detail}"),
+                            ));
                         }
-                        _ => {}
                     }
                 }
                 true
@@ -1681,6 +1778,9 @@ impl AppState {
                             end_tick: None,
                             msg_idx: self.messages.len(),
                             foregrounded: !background,
+                            call_id: tool_call_id.clone(),
+                            agent_key: None,
+                            last_message: String::new(),
                         });
                     }
                     None => {
@@ -1728,29 +1828,38 @@ impl AppState {
                 // Partial result → live tail window in the card body.
                 // Strict tool_call_id match — nested tools interleave,
                 // so falling back to "latest tool card" mis-paints.
-                let partial_out = full_text(partial_result);
-                if let Some(m) = self.messages.iter_mut().rev().find(|m| {
+                // A `details.progress` snapshot (teammate) renders as
+                // per-agent status lines, not the opaque content blob.
+                let partial_out = agent_progress_text(partial_result)
+                    .unwrap_or_else(|| full_text(partial_result));
+                let msg_idx = match self.messages.iter().rposition(|m| {
                     m.kind == MsgKind::Tool && m.tool_call_id.as_deref() == Some(tool_call_id)
                 }) {
-                    m.tool_name = Some(tool_name.clone());
-                    if !partial_out.is_empty() {
-                        m.tool_output = Some(partial_out);
+                    Some(i) => {
+                        let m = &mut self.messages[i];
+                        m.tool_name = Some(tool_name.clone());
+                        if !partial_out.is_empty() {
+                            m.tool_output = Some(partial_out);
+                        }
+                        m.dirty = true;
+                        i
                     }
-                    m.dirty = true;
-                    self.dom_dirty = true;
-                } else {
-                    // Update without a seen start (compaction/replay) —
-                    // create the pending card like `end` does.
-                    let mut m = Message::new(MsgKind::Tool, String::new());
-                    m.tool_name = Some(tool_name.clone());
-                    m.tool_call_id = Some(tool_call_id.clone());
-                    m.tool_status = Some('●');
-                    if !partial_out.is_empty() {
-                        m.tool_output = Some(partial_out);
+                    None => {
+                        // Update without a seen start (compaction/replay) —
+                        // create the pending card like `end` does.
+                        let mut m = Message::new(MsgKind::Tool, String::new());
+                        m.tool_name = Some(tool_name.clone());
+                        m.tool_call_id = Some(tool_call_id.clone());
+                        m.tool_status = Some('●');
+                        if !partial_out.is_empty() {
+                            m.tool_output = Some(partial_out);
+                        }
+                        self.push(m);
+                        self.messages.len() - 1
                     }
-                    self.push(m);
-                    self.dom_dirty = true;
-                }
+                };
+                self.dom_dirty = true;
+                self.sync_agent_rows(tool_call_id, msg_idx, partial_result);
                 true
             }
             AgentEvent::ToolExecutionEnd {
@@ -1759,14 +1868,17 @@ impl AppState {
                 result,
                 is_error,
             } => {
-                // Tray: close the newest running entry with this tool.
-                if let Some(i) = self
-                    .tray
-                    .entries
-                    .iter()
-                    .rposition(|e| e.status == TrayStatus::Running && e.tool == *tool_name)
-                {
-                    let e = &mut self.tray.entries[i];
+                // Tray: close every running row this call owns — the
+                // call-level entry plus its per-agent rows.
+                for e in &mut self.tray.entries {
+                    let owned = if e.call_id.is_empty() {
+                        e.status == TrayStatus::Running && e.tool == *tool_name
+                    } else {
+                        e.call_id == *tool_call_id
+                    };
+                    if !owned || e.status != TrayStatus::Running {
+                        continue;
+                    }
                     e.status = if *is_error {
                         TrayStatus::Failed
                     } else {
@@ -1835,32 +1947,32 @@ impl AppState {
             }
             AgentEvent::MessageEnd { message } => {
                 // If the final assistant message carries usage, update tokens.
+                // Cost accumulates once per message (here, not on updates).
                 if let AgentMessage::Assistant { usage, .. } = message {
                     self.status.input_tokens = usage.input as u64;
                     self.status.output_tokens = usage.output as u64;
+                    self.status.context_tokens = usage.total_tokens as u64;
+                    self.status.cost += usage.cost.total;
                 }
                 false
             }
-            AgentEvent::AgentEnd { .. } | AgentEvent::AgentSettled => {
+            AgentEvent::AgentEnd {
+                messages,
+                will_retry,
+            } => {
+                self.term_notify = Some(if will_retry.unwrap_or(false) {
+                    "pi: retrying…".into()
+                } else if agent_end_failed(messages) {
+                    "pi: agent failed".into()
+                } else {
+                    "pi: agent finished".into()
+                });
+                self.finish_run();
+                true
+            }
+            AgentEvent::AgentSettled => {
                 self.term_notify = Some("pi: agent finished".into());
-                self.streaming = false;
-                self.run_started = None;
-                // An aborted run ends without `turn_end` — seal the last
-                // assistant/thinking bubble here too or it stays live.
-                if let Some(m) = self.messages.last_mut() {
-                    if matches!(m.kind, MsgKind::Assistant | MsgKind::Thinking) && !m.sealed {
-                        m.sealed = true;
-                        if m.kind == MsgKind::Thinking {
-                            m.dirty = true;
-                            self.dom_dirty = true;
-                        }
-                    }
-                }
-                if self.aborting {
-                    self.aborting = false;
-                    self.push_system("interrupted");
-                }
-                self.status.transient.clear();
+                self.finish_run();
                 true
             }
             AgentEvent::CompactionStart { reason } => {
@@ -1888,10 +2000,18 @@ impl AppState {
                 self.status.transient = format!("retry {attempt}/{max_attempts}: {error_message}");
                 true
             }
-            AgentEvent::AutoRetryEnd { success, .. } => {
+            AgentEvent::AutoRetryEnd {
+                success,
+                final_error,
+                ..
+            } => {
                 self.status.transient.clear();
                 if !success {
-                    self.push(Message::new(MsgKind::Error, "auto-retry exhausted"));
+                    let detail = final_error.as_deref().unwrap_or("unknown error");
+                    self.push(Message::new(
+                        MsgKind::Error,
+                        format!("auto-retry exhausted: {detail}"),
+                    ));
                 }
                 true
             }
@@ -2291,6 +2411,7 @@ impl AppState {
             "set_model" => {
                 if let Some(m) = resp.model_data() {
                     self.status.model = m.id.clone();
+                    self.status.context_window = m.context_window as u64;
                     self.push_system(format!("model → {}", m.id));
                 }
                 ResponseEffect::RefreshState
@@ -2298,6 +2419,7 @@ impl AppState {
             "cycle_model" => match resp.cycle_model_data() {
                 Some((m, level)) => {
                     self.status.model = m.id.clone();
+                    self.status.context_window = m.context_window as u64;
                     self.status.thinking = format!("{level:?}").to_lowercase();
                     self.push_system(format!("model → {}", m.id));
                     ResponseEffect::RefreshState
@@ -2430,6 +2552,11 @@ impl AppState {
                     ResponseEffect::None
                 } else {
                     self.clear_messages();
+                    // Fresh session: zero the resource meters.
+                    self.status.input_tokens = 0;
+                    self.status.output_tokens = 0;
+                    self.status.context_tokens = 0;
+                    self.status.cost = 0.0;
                     self.push_system(format!("{}: fresh session", resp.command));
                     ResponseEffect::RefreshState
                 }
@@ -2777,6 +2904,82 @@ impl AppState {
         Some(e.foregrounded)
     }
 
+    /// Sync per-agent tray rows from a teammate `details.progress`
+    /// snapshot carried by `tool_execution_update`. A single-task run
+    /// folds its one snapshot into the call-level row; a multi-task
+    /// dispatch gets one selectable row per agent (stable key:
+    /// `correlationId`, else `taskIndex`).
+    fn sync_agent_rows(&mut self, call_id: &str, msg_idx: usize, v: &serde_json::Value) {
+        let Some(progress) = v
+            .get("details")
+            .and_then(|d| d.get("progress"))
+            .and_then(|p| p.as_array())
+        else {
+            return;
+        };
+        if progress.is_empty() {
+            return;
+        }
+        // Call-level row created at `tool_execution_start`; without it
+        // there is nothing to attach rows to (replayed updates).
+        let Some(parent) = self
+            .tray
+            .entries
+            .iter()
+            .position(|e| e.call_id == call_id && e.agent_key.is_none())
+        else {
+            return;
+        };
+        if progress.len() == 1 {
+            apply_progress_row(&mut self.tray.entries[parent], &progress[0], self.tick);
+            return;
+        }
+        for p in progress {
+            let Some(key) = p
+                .get("correlationId")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+                .or_else(|| p.get("taskIndex").map(|i| i.to_string()))
+            else {
+                continue;
+            };
+            let idx = self
+                .tray
+                .entries
+                .iter()
+                .position(|e| e.call_id == call_id && e.agent_key.as_deref() == Some(key.as_str()));
+            let i = match idx {
+                Some(i) => i,
+                None => {
+                    let color_idx = self.tray.entries.len() % 10;
+                    let (tool, model) = {
+                        let pe = &self.tray.entries[parent];
+                        (pe.tool.clone(), pe.model.clone())
+                    };
+                    self.tray.entries.push(TrayEntry {
+                        kind: TrayKind::Subagent,
+                        title: progress_row_title(p),
+                        tool,
+                        model,
+                        color_idx,
+                        status: TrayStatus::Running,
+                        tools: 0,
+                        recent_tools: Vec::new(),
+                        start_tick: self.tick,
+                        end_tick: None,
+                        msg_idx,
+                        foregrounded: true,
+                        call_id: call_id.to_string(),
+                        agent_key: Some(key),
+                        last_message: String::new(),
+                    });
+                    self.tray.entries.len() - 1
+                }
+            };
+            apply_progress_row(&mut self.tray.entries[i], p, self.tick);
+        }
+    }
+
     /// Toggle `expanded` on the collapsible message whose bubble node id
     /// is `node` (mouse click on a `data-hit-expand` region).
     pub fn toggle_tool_by_node(&mut self, node: blitz_dom::NodeId) -> bool {
@@ -2806,10 +3009,110 @@ fn full_text(v: &serde_json::Value) -> String {
                     return s.to_string();
                 }
             }
+            // Standard pi tool result: `content` is a typed block array
+            // (`[{type:"text", text:"…"}, …]`) — join the text blocks.
+            if let Some(blocks) = map.get("content").and_then(|x| x.as_array()) {
+                let text: Vec<&str> = blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect();
+                if !text.is_empty() {
+                    return text.join("\n");
+                }
+            }
             serde_json::to_string_pretty(v).unwrap_or_default()
         }
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }
+}
+
+/// Display title for one `details.progress` snapshot row.
+fn progress_row_title(p: &serde_json::Value) -> String {
+    p.get("name")
+        .and_then(|x| x.as_str())
+        .or_else(|| p.get("agent").and_then(|x| x.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| "agent".to_string())
+}
+
+/// Map a teammate `AgentProgressStatus` onto the tray lifecycle.
+fn agent_progress_status(s: &str) -> TrayStatus {
+    match s {
+        "completed" => TrayStatus::Done,
+        "failed" | "terminated" => TrayStatus::Failed,
+        _ => TrayStatus::Running,
+    }
+}
+
+/// Fold one progress snapshot into a tray row: title, counters, recent
+/// tools, lifecycle status (end tick stamped once on terminal states).
+fn apply_progress_row(e: &mut TrayEntry, p: &serde_json::Value, tick: u64) {
+    let title = progress_row_title(p);
+    if title != "agent" {
+        e.title = title;
+    }
+    if let Some(t) = p.get("toolCount").and_then(|x| x.as_u64()) {
+        e.tools = t as u32;
+    }
+    if let Some(model) = p.get("resolvedModel").and_then(|x| x.as_str()) {
+        e.model = model.to_string();
+    }
+    if let Some(msg) = p.get("lastMessage").and_then(|x| x.as_str()) {
+        if let Some(last) = msg.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+            e.last_message = last.to_string();
+        }
+    }
+    if let Some(tools) = p.get("recentTools").and_then(|x| x.as_array()) {
+        let recent: Vec<(String, String)> = tools
+            .iter()
+            .filter_map(|t| {
+                let name = t.get("name").and_then(|x| x.as_str())?;
+                let target = t
+                    .get("argsPreview")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some((name.to_string(), target))
+            })
+            .collect();
+        e.recent_tools = {
+            let n = recent.len();
+            recent.into_iter().skip(n.saturating_sub(6)).collect()
+        };
+    }
+    let status = p.get("status").and_then(|x| x.as_str()).unwrap_or("running");
+    let next = agent_progress_status(status);
+    if next != e.status {
+        e.status = next;
+        if next != TrayStatus::Running && e.end_tick.is_none() {
+            e.end_tick = Some(tick);
+        }
+    }
+}
+
+/// Teammate `details.progress` snapshot → per-agent status lines for
+/// the card body: `[name] status · tools N · tokens N` plus the
+/// agent's latest message tail.
+fn agent_progress_text(v: &serde_json::Value) -> Option<String> {
+    let progress = v.get("details")?.get("progress")?.as_array()?;
+    if progress.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for p in progress {
+        let name = progress_row_title(p);
+        let status = p.get("status").and_then(|x| x.as_str()).unwrap_or("running");
+        let tools = p.get("toolCount").and_then(|x| x.as_u64()).unwrap_or(0);
+        let tokens = p.get("tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        lines.push(format!("[{name}] {status} · tools {tools} · tokens {tokens}"));
+        if let Some(msg) = p.get("lastMessage").and_then(|x| x.as_str()) {
+            if let Some(last) = msg.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+                lines.push(format!("  {last}"));
+            }
+        }
+    }
+    Some(lines.join("\n"))
 }
 
 /// Compact one-line summary of a tool args/result JSON value.
@@ -2829,6 +3132,66 @@ fn extract_exit_code(v: &serde_json::Value) -> Option<i64> {
         }
     }
     None
+}
+
+/// Current working directory for the status line — `~`-contracted, and
+/// shortened to the last two components when still long.
+fn display_cwd() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut s = cwd.to_string_lossy().replace('\\', "/");
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let home = home.to_string_lossy().replace('\\', "/");
+        if let Some(rest) = s.strip_prefix(&home) {
+            s = format!("~{rest}");
+        }
+    }
+    const MAX: usize = 40;
+    if s.chars().count() > MAX {
+        let tail: Vec<&str> = s.rsplit('/').filter(|p| !p.is_empty()).take(2).collect();
+        if tail.len() == 2 {
+            return format!("…/{}/{}", tail[1], tail[0]);
+        }
+    }
+    s
+}
+
+/// Git branch from `.git/HEAD`, walking up from cwd — handles worktrees
+/// where `.git` is a `gitdir: <path>` pointer file. Empty outside a repo.
+fn detect_git_branch() -> String {
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    let git_dir = loop {
+        let candidate = dir.join(".git");
+        if candidate.is_dir() {
+            break candidate;
+        }
+        if candidate.is_file() {
+            if let Ok(s) = std::fs::read_to_string(&candidate) {
+                if let Some(p) = s.trim().strip_prefix("gitdir:") {
+                    let p = p.trim();
+                    let resolved = if std::path::Path::new(p).is_absolute() {
+                        std::path::PathBuf::from(p)
+                    } else {
+                        dir.join(p)
+                    };
+                    if resolved.is_dir() {
+                        break resolved;
+                    }
+                }
+            }
+        }
+        if !dir.pop() {
+            return String::new();
+        }
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).unwrap_or_default();
+    let head = head.trim();
+    if let Some(r) = head.strip_prefix("ref: refs/heads/") {
+        r.to_string()
+    } else if head.len() >= 7 {
+        head[..7].to_string() // detached HEAD → short sha
+    } else {
+        String::new()
+    }
 }
 
 fn summarize_args(v: &serde_json::Value) -> String {
@@ -2890,6 +3253,38 @@ pub fn agent_message_text(msg: &AgentMessage) -> Option<(MsgKind, String)> {
         )),
         AgentMessage::Unknown(_) => None,
     }
+}
+
+/// The human-readable detail of a failed assistant message: pi puts it
+/// in `errorMessage` (a flattened extra on `role:"assistant"`).
+fn assistant_error_message(msg: &AgentMessage) -> Option<String> {
+    let extra = match msg {
+        AgentMessage::Assistant { extra, .. } => Some(extra),
+        AgentMessage::Unknown(v) => return v.get("errorMessage")?.as_str().map(str::to_string),
+        _ => None,
+    }?;
+    extra
+        .get("errorMessage")
+        .or_else(|| extra.get("error"))
+        .and_then(|e| e.as_str())
+        .map(str::to_string)
+}
+
+/// Did the run end on an error? `agent_end.messages` carries the final
+/// agent state — the last assistant message's `stopReason` tells.
+fn agent_end_failed(messages: &[AgentMessage]) -> bool {
+    for m in messages.iter().rev() {
+        match m {
+            AgentMessage::Assistant { stop_reason, .. } => return stop_reason == "error",
+            AgentMessage::Unknown(v)
+                if v.get("role").and_then(|r| r.as_str()) == Some("assistant") =>
+            {
+                return v.get("stopReason").and_then(|s| s.as_str()) == Some("error")
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -3281,6 +3676,9 @@ mod tests {
             end_tick: None,
             msg_idx: 0,
             foregrounded: false,
+            call_id: String::new(),
+            agent_key: None,
+            last_message: String::new(),
         };
         tray.entries.push(entry("tail -f log", TrayKind::Shell, TrayStatus::Running));
         tray.entries.push(entry("ssh host uptime", TrayKind::Shell, TrayStatus::Running));

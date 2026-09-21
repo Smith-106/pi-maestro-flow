@@ -92,6 +92,7 @@ impl Fixture {
                 bg,
                 ssh,
                 self.state.tray.running_subagent(),
+                self.state.glyphs,
             );
             let spinner_label = if self.state.aborting {
                 "Interrupting".to_string()
@@ -554,6 +555,8 @@ fn status_line_has_clear_running_and_input_modes() {
     f.state.status.model = "gpt-5.6-sol".into();
     f.state.status.thinking = "high".into();
     f.state.status.mode = "send:steer".into();
+    f.state.status.cwd = "~/p".into();
+    f.state.status.git_branch = "b".into();
     f.state.status.input_tokens = 12;
     f.state.status.output_tokens = 4;
     f.state.permission = PermissionMode::Bypass;
@@ -567,7 +570,8 @@ fn status_line_has_clear_running_and_input_modes() {
     assert!(text.contains("input steer"), "input mode:\n{text}");
     assert!(text.contains("● running"), "running state:\n{text}");
     assert!(text.contains("1 queued"), "queue state:\n{text}");
-    assert!(text.contains("12 in / 4 out"), "token direction:\n{text}");
+    assert!(text.contains("↑12"), "input tokens:\n{text}");
+    assert!(text.contains("↓4"), "output tokens:\n{text}");
 }
 
 #[test]
@@ -594,10 +598,53 @@ fn narrow_status_prioritizes_actionable_state() {
         !text.contains("input steer"),
         "secondary input mode hidden:\n{text}"
     );
-    assert!(
-        !text.contains("12 in / 4 out"),
-        "token detail hidden:\n{text}"
-    );
+    assert!(!text.contains("↑12"), "token detail hidden:\n{text}");
+}
+
+#[test]
+fn status_line_shows_cockpit_resource_group() {
+    let mut f = Fixture::at(120, H);
+    f.state.status.model = "gpt-5.6".into();
+    f.state.status.cwd = "~/work/pi".into();
+    f.state.status.git_branch = "main".into();
+    f.state.status.context_window = 200_000;
+    f.state.status.context_tokens = 86_000;
+    f.state.status.input_tokens = 12_300;
+    f.state.status.output_tokens = 3_400;
+    f.state.status.cost = 0.42;
+
+    let text = f.frame();
+    assert!(text.contains("~/work/pi"), "cwd:\n{text}");
+    assert!(text.contains("⎇ main"), "git branch:\n{text}");
+    assert!(text.contains("43%"), "ctx pct:\n{text}");
+    assert!(text.contains("86k/200k"), "ctx tokens:\n{text}");
+    assert!(text.contains("↑12.3k"), "in tokens:\n{text}");
+    assert!(text.contains("↓3.4k"), "out tokens:\n{text}");
+    assert!(text.contains("$0.42"), "cost:\n{text}");
+}
+
+#[test]
+fn status_line_hides_ctx_meter_without_window() {
+    let mut f = Fixture::at(120, H);
+    f.state.status.model = "gpt-5.6".into();
+    f.state.status.context_tokens = 86_000;
+    // context_window stays 0 → model data not seen yet.
+
+    let text = f.frame();
+    assert!(!text.contains("86k/"), "no meter without window:\n{text}");
+    assert!(!text.contains('['), "no bar brackets:\n{text}");
+}
+
+#[test]
+fn status_line_ctx_meter_ascii_fallback() {
+    let mut f = Fixture::at(120, H);
+    f.state.glyphs = pi_fluent_tui::components::glyphs::GlyphMode::Ascii;
+    f.state.status.context_window = 200_000;
+    f.state.status.context_tokens = 100_000;
+
+    let text = f.frame();
+    assert!(text.contains("#####-----"), "ascii bar:\n{text}");
+    assert!(text.contains("50%"), "pct:\n{text}");
 }
 
 #[test]
@@ -1911,4 +1958,111 @@ fn teammate_multi_task_creates_per_agent_tray_rows() {
     let text = f.frame();
     assert!(text.contains("a-scout: scanned"), "end summary:\n{text}");
     assert!(text.contains("b-build: built"), "end summary:\n{text}");
+}
+
+/// A failed assistant message as pi emits it (`createErrorMessage`):
+/// `stopReason:"error"` + flattened `errorMessage`.
+fn error_assistant_msg(error_message: &str) -> pi_rpc::AgentMessage {
+    serde_json::from_value(serde_json::json!({
+        "role": "assistant",
+        "content": [],
+        "api": "anthropic-messages",
+        "provider": "anthropic",
+        "model": "m",
+        "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                  "totalTokens": 0,
+                  "cost": {"input": 0, "output": 0, "cacheRead": 0,
+                           "cacheWrite": 0, "total": 0}},
+        "stopReason": "error",
+        "errorMessage": error_message,
+        "timestamp": 0.0
+    }))
+    .unwrap()
+}
+
+fn stream_error(reason: &str, error_message: &str) -> AgentEvent {
+    AgentEvent::MessageUpdate {
+        usage: None,
+        assistant_message_event: AssistantMessageEvent::Error {
+            reason: reason.into(),
+            error: Box::new(error_assistant_msg(error_message)),
+        },
+    }
+}
+
+#[test]
+fn assistant_error_event_shows_detail() {
+    // A model/API failure must surface its message, not a bare
+    // "assistant stream error" — the user needs the cause.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(stream_error("error", "HTTP 401: invalid api key"));
+    let text = f.frame();
+    assert!(
+        text.contains("HTTP 401: invalid api key"),
+        "error detail:\n{text}"
+    );
+}
+
+#[test]
+fn assistant_aborted_event_is_silent() {
+    // Esc abort arrives as `reason:"aborted"` — the abort path already
+    // prints "interrupted"; no bogus error line.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.state.aborting = true;
+    f.event(stream_error("aborted", "request aborted"));
+    f.event(AgentEvent::AgentEnd {
+        messages: vec![],
+        will_retry: None,
+    });
+    let text = f.frame();
+    assert!(text.contains("interrupted"), "abort line:\n{text}");
+    assert!(!text.contains("request aborted"), "no error line:\n{text}");
+    assert!(!text.contains("assistant error"), "no error line:\n{text}");
+}
+
+#[test]
+fn auto_retry_lifecycle_is_visible() {
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(stream_error("error", "503 service unavailable"));
+    f.event(AgentEvent::AgentEnd {
+        messages: vec![error_assistant_msg("503 service unavailable")],
+        will_retry: Some(true),
+    });
+    // `willRetry` must not claim the run finished.
+    assert_eq!(f.state.term_notify.as_deref(), Some("pi: retrying…"));
+    f.event(AgentEvent::AutoRetryStart {
+        attempt: 1,
+        max_attempts: 3,
+        delay_ms: 2000,
+        error_message: "503 service unavailable".into(),
+    });
+    assert_eq!(
+        f.state.status.transient,
+        "retry 1/3: 503 service unavailable"
+    );
+    f.event(AgentEvent::AutoRetryEnd {
+        success: false,
+        attempt: 3,
+        final_error: Some("503 service unavailable".into()),
+    });
+    let text = f.frame();
+    assert!(
+        text.contains("auto-retry exhausted: 503 service unavailable"),
+        "final error:\n{text}"
+    );
+}
+
+#[test]
+fn agent_end_on_error_notifies_failure() {
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::AgentEnd {
+        messages: vec![error_assistant_msg("context overflow")],
+        will_retry: Some(false),
+    });
+    assert_eq!(f.state.term_notify.as_deref(), Some("pi: agent failed"));
+    assert!(!f.state.streaming);
 }

@@ -174,8 +174,14 @@ pub fn render(
                 span_text(m, r, "", &text);
             }
         }
-        // Output tail from the entry's tool card.
-        if let Some(msg) = messages.get(e.msg_idx) {
+        // Output tail: per-agent rows show the agent's own last
+        // message; call-level rows tail the shared tool card.
+        if !e.last_message.is_empty() {
+            let l = div(m, pv, "tray-preview-label");
+            span_text(m, l, "", "Output");
+            let r = div(m, pv, "tray-preview-line");
+            span_text(m, r, "", &e.last_message);
+        } else if let Some(msg) = messages.get(e.msg_idx) {
             if msg.kind == MsgKind::Tool {
                 if let Some(out) = &msg.tool_output {
                     let tail: Vec<&str> = out

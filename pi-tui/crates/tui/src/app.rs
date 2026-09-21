@@ -253,10 +253,16 @@ impl App {
         state.status.transient.hash(&mut s);
         state.status.input_tokens.hash(&mut s);
         state.status.output_tokens.hash(&mut s);
+        state.status.context_tokens.hash(&mut s);
+        state.status.context_window.hash(&mut s);
+        state.status.cost.to_bits().hash(&mut s);
+        state.status.cwd.hash(&mut s);
+        state.status.git_branch.hash(&mut s);
         state.streaming.hash(&mut s);
         state.permission.label().hash(&mut s);
         state.queued.len().hash(&mut s);
         state.tray.running_shells().hash(&mut s);
+        state.tray.running_subagent().hash(&mut s);
         s.finish()
     }
 
@@ -2161,6 +2167,7 @@ impl App {
                     if let Some(s) = resp.session_state() {
                         if let Some(m) = s.model {
                             self.state.status.model = m.id;
+                            self.state.status.context_window = m.context_window as u64;
                         }
                         self.state.status.thinking =
                             format!("{:?}", s.thinking_level).to_lowercase();
@@ -2315,6 +2322,8 @@ impl App {
                     self.state.queued.len(),
                     bg,
                     ssh,
+                    self.state.tray.running_subagent(),
+                    self.state.glyphs,
                 );
                 self.status_sig = status_sig;
             }

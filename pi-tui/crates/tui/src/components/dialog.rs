@@ -111,6 +111,7 @@ pub fn signature(state: &AppState) -> u64 {
             e.recent_tools.hash(&mut s);
             e.end_tick.is_some().hash(&mut s);
             e.foregrounded.hash(&mut s);
+            e.last_message.hash(&mut s);
             // Preview shows the tool output tail — length is enough
             // (output is append-only).
             state

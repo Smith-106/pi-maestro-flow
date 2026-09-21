@@ -204,6 +204,8 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
             st.queued.len(),
             bg,
             ssh,
+            st.tray.running_subagent(),
+            st.glyphs,
         );
         components::todo::sync(&mut m, handles.todo_area, &st, st.glyphs);
     }
@@ -361,6 +363,8 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             st.queued.len(),
             bg,
             ssh,
+            st.tray.running_subagent(),
+            st.glyphs,
         );
         let spinner_label = if st.aborting {
             "Interrupting".to_string()
