@@ -11,6 +11,7 @@ pub mod markdown;
 pub mod message_list;
 pub mod overlay;
 pub mod select;
+pub mod selection;
 pub mod spinner;
 pub mod status_line;
 pub mod todo;

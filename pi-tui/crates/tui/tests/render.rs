@@ -1250,7 +1250,8 @@ fn input_hint_shows_rotating_tip() {
 }
 
 #[test]
-fn action_bar_after_last_assistant() {
+fn no_action_bar_after_assistant() {
+    // The good/bad/copy bar was removed — copy is drag-select + right-click.
     let mut f = Fixture::new();
     f.event(AgentEvent::AgentStart);
     f.event(text_delta_ev("answer one"));
@@ -1259,18 +1260,8 @@ fn action_bar_after_last_assistant() {
         will_retry: None,
     });
     let text = f.frame();
-    assert!(text.contains("good"), "action bar:\n{text}");
-    assert!(text.contains("copy"), "action bar:\n{text}");
-    // A newer assistant message moves the bar.
-    f.event(AgentEvent::AgentStart);
-    f.event(text_delta_ev("answer two is longer"));
-    f.event(AgentEvent::AgentEnd {
-        messages: vec![],
-        will_retry: None,
-    });
-    let text = f.frame();
-    // Bar should follow the last assistant bubble (only one "good").
-    assert_eq!(text.matches("good").count(), 1, "one bar:\n{text}");
+    assert!(!text.contains("good"), "no action bar:\n{text}");
+    assert!(!text.contains("copy"), "no action bar:\n{text}");
 }
 
 // ---------- model picker badges + settings (RECON §12.5) ----------

@@ -803,12 +803,6 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
     color: var(--text-secondary);
 }}
 
-/* ---------- message action bar ---------- */
-
-.action-bar {{ display: flex; flex-direction: row; }}
-.action-btn {{ color: var(--text-muted); margin-right: 2px; }}
-.action-btn:hover {{ color: var(--accent-primary); }}
-
 /* ---------- system message kinds ---------- */
 
 .msg-compaction {{

@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::commands::{self, Command, LocalCmd};
 use crate::components::{
-    completion, dialog, input_box, message_list, select, spinner, status_line, todo,
+    completion, dialog, input_box, message_list, select, selection, spinner, status_line, todo,
 };
 use crate::state::{
     agent_message_text, AppState, DialogState, LocalAction, MsgKind, ResponseEffect,
@@ -104,6 +104,14 @@ pub struct App {
     cmd_tx: mpsc::UnboundedSender<RpcResponse>,
     /// `data-hit-*` regions recorded by the last paint (mouse routing).
     hit_regions: Vec<scrollback::HitRegion>,
+    /// Left-button press cell — click-vs-drag discrimination. The click
+    /// dispatch is deferred to `Up` so a drag becomes a selection.
+    mouse_down: Option<(u16, u16)>,
+    /// Hit region under `mouse_down` (reused by the `Up` click).
+    down_hit: Option<scrollback::HitRegion>,
+    /// Selection signature — `(anchor, head)` hash gates repaints of
+    /// the INVERSE post-pass without touching DOM sync.
+    sel_sig: u64,
     /// Last Esc press — a second Esc within `ESC_INTERRUPT_WINDOW`
     /// while streaming sends `abort` (Devin: "esc twice to interrupt").
     last_esc: Option<Instant>,
@@ -189,6 +197,9 @@ impl App {
             cmd_rx,
             cmd_tx,
             hit_regions: Vec::new(),
+            mouse_down: None,
+            down_hit: None,
+            sel_sig: u64::MAX,
             last_esc: None,
             term_size: (w, h),
             last_viewport: (0, 0),
@@ -587,6 +598,10 @@ impl App {
     }
 
     /// Route a mouse event through the painted `data-hit-*` regions.
+    ///
+    /// Click dispatch is deferred from `Down` to `Up`: a `Drag` between
+    /// them turns the gesture into a text selection (INVERSE post-pass)
+    /// instead of a click. `Right` copies the standing selection.
     fn handle_mouse(&mut self, m: crossterm::event::MouseEvent) -> bool {
         let (col, row) = (m.column as i32, m.row as i32);
         let hit = self
@@ -602,6 +617,7 @@ impl App {
             .cloned();
         match m.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.state.clear_selection();
                 let up = m.kind == MouseEventKind::ScrollUp;
                 match hit.as_ref().map(|r| r.kind.as_str()) {
                     // Wheel over the select dropdown moves its cursor.
@@ -628,8 +644,56 @@ impl App {
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                let Some(hit) = hit else { return false };
-                match hit.kind.as_str() {
+                self.mouse_down = Some((m.column, m.row));
+                self.down_hit = hit;
+                // A new press replaces any standing selection.
+                self.state.clear_selection();
+                true
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                let Some(anchor) = self.mouse_down else {
+                    return false;
+                };
+                self.state.sel_anchor.get_or_insert(anchor);
+                self.state.sel_head = Some((m.column, m.row));
+                true
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                let down = self.mouse_down.take();
+                let dhit = self.down_hit.take();
+                // A real drag leaves a selection standing — no click.
+                if let (Some(a), Some(b)) = (self.state.sel_anchor, self.state.sel_head) {
+                    if a != b {
+                        return true;
+                    }
+                }
+                self.state.clear_selection();
+                match (down, dhit) {
+                    (Some(_), Some(hit)) => self.click_hit(&hit),
+                    _ => false,
+                }
+            }
+            // Right-click copies the standing selection to the clipboard.
+            MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+                if self.state.sel_text.is_empty() {
+                    return false;
+                }
+                let n = self.state.sel_text.chars().count();
+                match copy_to_clipboard(&self.state.sel_text) {
+                    Ok(()) => self.state.push_system(format!("copied {n} chars")),
+                    Err(e) => self.state.push_system(format!("clipboard: {e}")),
+                }
+                self.state.clear_selection();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Left-click dispatch — runs on `Up` once the gesture is known to
+    /// be a click, not a drag.
+    fn click_hit(&mut self, hit: &scrollback::HitRegion) -> bool {
+        match hit.kind.as_str() {
                     // Select option: click moves the cursor; clicking the
                     // already-selected row submits it. With no dialog,
                     // `idx` rows belong to the `/` completion popup.
@@ -715,22 +779,6 @@ impl App {
                         self.state.toggle_tool_by_node(hit.node);
                         true
                     }
-                    // Message action bar: feedback / copy.
-                    "action" => {
-                        match hit.payload.as_deref() {
-                            Some("copy") => {
-                                self.send_report(RpcCommand::GetLastAssistantText);
-                            }
-                            Some("up") => {
-                                self.state.push_system("feedback: 👍");
-                            }
-                            Some("down") => {
-                                self.state.push_system("feedback: 👎");
-                            }
-                            _ => {}
-                        }
-                        true
-                    }
                     // Tray row click: move the cursor to that row.
                     "tray" => {
                         if let Some(row) = hit.payload.as_deref().and_then(|p| p.parse().ok()) {
@@ -749,9 +797,6 @@ impl App {
                         true
                     }
                     _ => false,
-                }
-            }
-            _ => false,
         }
     }
 
@@ -759,6 +804,10 @@ impl App {
         // Only act on presses (Windows emits release events too).
         if key.kind == KeyEventKind::Release {
             return false;
+        }
+        // Any key drops the standing mouse selection.
+        if self.state.sel_anchor.is_some() {
+            self.state.clear_selection();
         }
         // Dialogs capture all keys while active.
         if self.state.dialog.is_some() {
@@ -2266,6 +2315,15 @@ impl App {
         let spinner_sig = Self::spinner_signature(&self.state);
         let status_sig = Self::status_signature(&self.state);
         let trace_sig = self.state.trace_signature();
+        // Selection rect changes repaint without DOM sync.
+        let sel_sig = {
+            use std::hash::{Hash, Hasher};
+            let mut s = std::collections::hash_map::DefaultHasher::new();
+            self.state.sel_anchor.hash(&mut s);
+            self.state.sel_head.hash(&mut s);
+            s.finish()
+        };
+        let selection_dirty = sel_sig != self.sel_sig;
         let mut layout_dirty = self.state.dom_dirty
             || self.state.needs_rebuild
             || input_sig != self.input_sig
@@ -2281,6 +2339,7 @@ impl App {
         // scroll, and the renderer has nothing pending — the previous
         // frame is still correct on screen.
         if !layout_dirty
+            && !selection_dirty
             && (w, h) == self.last_viewport
             && self.state.scroll == self.painted_scroll
             && self.renderer.prev_frame.is_some()
@@ -2481,6 +2540,14 @@ impl App {
                 cell.modifier |= cursor.modifier;
             }
         }
+
+        // 7. Drag selection: INVERSE the region and refresh the
+        //    copyable text under it (right-click → clipboard).
+        self.state.sel_text = match (self.state.sel_anchor, self.state.sel_head) {
+            (Some(a), Some(b)) if a != b => selection::apply(&mut surface, a, b),
+            _ => String::new(),
+        };
+        self.sel_sig = sel_sig;
 
         Some(surface)
     }

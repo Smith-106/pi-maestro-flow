@@ -1429,10 +1429,13 @@ pub struct AppState {
     pub banner_visible: bool,
     /// DOM node id of the banner element (owned by message_list::sync).
     pub banner_node: Option<blitz_dom::NodeId>,
-    /// Message index the action bar is attached to (last assistant).
-    pub action_bar_idx: Option<usize>,
-    /// DOM node id of the action bar element.
-    pub action_bar_node: Option<blitz_dom::NodeId>,
+    /// Mouse drag selection — anchor/head in screen cells. Painted
+    /// post-pass with `INVERSE`; `sel_text` holds the extracted copy.
+    pub sel_anchor: Option<(u16, u16)>,
+    /// Drag end point (None until the pointer moves).
+    pub sel_head: Option<(u16, u16)>,
+    /// Text under the selection, re-extracted on every painted frame.
+    pub sel_text: String,
     /// Scrollback search (Ctrl+S) — modal query + match list.
     pub search: Option<SearchState>,
     /// Thinking-trace overlay (Alt+T): full-viewport scroll of every
@@ -1602,6 +1605,13 @@ impl AppState {
             }
         }
         dirty
+    }
+
+    /// Drop the drag selection and its extracted text.
+    pub fn clear_selection(&mut self) {
+        self.sel_anchor = None;
+        self.sel_head = None;
+        self.sel_text.clear();
     }
 
     /// Push a message and mark the DOM dirty.

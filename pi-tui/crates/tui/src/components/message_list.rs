@@ -46,10 +46,8 @@ pub fn rebuild(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState)
     // stale) and clears `layout_children`/`paint_children` so the next
     // resolve can't walk dropped NodeIds (invalid SlotMap key panic).
     crate::components::dom::drop_children(m, inner);
-    // Banner + action bar nodes were dropped with the children.
+    // Banner node was dropped with the children.
     state.banner_node = None;
-    state.action_bar_node = None;
-    state.action_bar_idx = None;
     if state.banner_visible {
         let b = crate::components::banner::render(m, inner);
         state.banner_node = Some(b);
@@ -301,45 +299,7 @@ pub fn sync(m: &mut DocumentMutator<'_>, inner: NodeId, state: &mut AppState) ->
         }
     }
 
-    // Message action bar (RECON §12.4 feedback_up/feedback_down + copy):
-    // a `.action-bar` row inserted after the last assistant bubble.
-    let last_assistant = state
-        .messages
-        .iter()
-        .rposition(|m| m.kind == MsgKind::Assistant);
-    if last_assistant != state.action_bar_idx {
-        if let Some(old) = state.action_bar_node.take() {
-            crate::components::dom::drop_node(m, inner, old);
-        }
-        state.action_bar_idx = last_assistant;
-        if let Some(idx) = last_assistant {
-            if let Some(bubble) = state.messages[idx].node_id {
-                let bar = build_action_bar(m, bubble);
-                state.action_bar_node = Some(bar);
-            }
-        }
-        changed = true;
-    }
     changed
-}
-
-/// Build the `.action-bar` row and insert it right after `bubble`.
-/// Buttons carry `data-hit-action` payloads for mouse routing.
-fn build_action_bar(m: &mut DocumentMutator<'_>, bubble: NodeId) -> NodeId {
-    use crate::components::dom::span_text;
-    let bar = m.create_element(qual("div"), vec![attr("class", "action-bar")]);
-    m.insert_nodes_after(bubble, &[bar]);
-    for (payload, key, verb) in [
-        ("up", "▲", " good"),
-        ("down", "▼", " bad"),
-        ("copy", "⧉", " copy"),
-    ] {
-        let btn = div(m, bar, "action-btn");
-        m.set_attribute(btn, qual("data-hit-action"), payload);
-        span_text(m, btn, "hint-key", key);
-        span_text(m, btn, "hint-verb", verb);
-    }
-    bar
 }
 
 /// Sync the thinking-trace overlay (F3): swaps `#messages-wrap` for
