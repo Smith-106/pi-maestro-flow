@@ -3889,6 +3889,43 @@ test("deriveCompactionThreshold reports configured and ratio-floor reasons", () 
   assert.equal(explicit.reason, "configured");
 });
 
+test("deriveCompactionThreshold honors a usable per-model trigger override", () => {
+  const pinned = deriveCompactionThreshold({
+    reserveTokens: 20_000,
+    contextWindow: 372_000,
+    modelMaxTokens: 64_000,
+    thresholdTokensOverride: 216_000,
+  });
+  assert.ok(pinned.usable);
+  assert.equal(pinned.thresholdTokens, 216_000, "the override replaces the derived trigger");
+  assert.equal(pinned.effectiveReserveTokens, 20_000, "the reported reserve is untouched by the override");
+  assert.equal(pinned.reason, "configured");
+});
+
+test("deriveCompactionThreshold ignores unusable overrides and keeps the derived trigger", () => {
+  for (const thresholdTokensOverride of [0, -1, 1.5, Number.NaN, 400_000, 500_000]) {
+    const model = deriveCompactionThreshold({
+      reserveTokens: 16_384,
+      contextWindow: 400_000,
+      thresholdTokensOverride,
+    });
+    assert.ok(model.usable);
+    assert.equal(model.thresholdTokens, 380_000, `override ${thresholdTokensOverride} falls back to the derived trigger`);
+  }
+});
+
+test("deriveLinkedCompactionThreshold applies the session model's override", () => {
+  const linked = deriveLinkedCompactionThreshold({
+    reserveTokens: 20_000,
+    sessionContextWindow: 372_000,
+    sessionMaxTokens: 64_000,
+    sessionThresholdTokensOverride: 216_000,
+  });
+  assert.ok(linked.usable);
+  assert.equal(linked.limiter, "session");
+  assert.equal(linked.thresholdTokens, 216_000);
+});
+
 test("deriveCompactionThreshold degrades without a usable context window", () => {
   const missing = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: undefined });
   assert.equal(missing.usable, false);
@@ -4039,7 +4076,7 @@ test("output-limit recovery survives shutdown and completes only at correlated l
   await afterCrash.onAgentEnd(ctx);
   assert.equal(replayed.length, 0, "a matching session input suppresses duplicate prompt insertion");
   const beforeReceipt = journal.at(-1)?.data as { phase?: string; recoveryWake?: { state?: string } };
-  assert.equal(beforeReceipt.recoveryWake?.state, "prepared", "a transcript marker alone is not promoted to consumed");
+  assert.equal(beforeReceipt.recoveryWake?.state, "turn-started", "a delivered marker plus a settled turn boundary promotes the wake");
   afterCrash.onBeforeAgentStart(sent[0] ?? "", ctx);
   afterCrash.onAgentStart(ctx);
   const completed = journal.at(-1)?.data as { phase?: string; outputLimit?: unknown; recoveryWake?: { state?: string } };
@@ -4117,6 +4154,90 @@ test("durable wake replays one wakeId across restart and lifecycle receipts are 
   second.onBeforeAgentStart(prompt, ctx);
   second.onAgentStart(ctx);
   assert.equal((journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state, "turn-started", "terminal receipts absorb replay");
+});
+
+test("a follow-up drained without before_agent_start is promoted at the turn boundary", async () => {
+  let branch: Array<Record<string, unknown>> = [];
+  const journal: Array<{ type: string; data: Record<string, unknown> }> = [];
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: Record<string, unknown>) { journal.push({ type, data }); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-drained-followup", getBranch: () => branch },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(sent.length, 1, "idle settle dispatches the staged recovery input");
+  const prepared = journal.at(-1)!.data as { recoveryWake: { state: string } };
+  assert.equal(prepared.recoveryWake.state, "prepared");
+
+  // Pi drains the queued follow-up with agent.continue(): the marker lands
+  // mid-run and agent_start fires WITHOUT a preceding before_agent_start.
+  branch = [
+    { type: "custom", customType: "maestro-auto-compaction-intent", data: prepared },
+    { type: "message", id: "drained-marker", message: { role: "user", content: sent[0] } },
+  ];
+  guard.onAgentStart(ctx);
+  assert.equal(
+    (journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state,
+    "prepared",
+    "agent_start cannot consume a wake that before_agent_start never saw",
+  );
+
+  await guard.onAgentEnd(ctx);
+  const promoted = journal.at(-1)!.data as { phase: string; recoveryWake: { state: string; messageId?: string; turnId?: string } };
+  assert.equal(promoted.recoveryWake.state, "turn-started", "the settled turn promotes the drained wake from branch evidence");
+  assert.equal(promoted.recoveryWake.messageId, "drained-marker");
+  assert.equal(promoted.phase, "cleared");
+
+  guard.onBeforeAgentStart(sent[0] ?? "", ctx);
+  guard.onAgentStart(ctx);
+  assert.equal(
+    (journal.at(-1)!.data as { recoveryWake: { state: string } }).recoveryWake.state,
+    "turn-started",
+    "terminal receipts absorb later lifecycle replay",
+  );
+});
+
+test("a drained wake with a superseding input cancels at the turn boundary", async () => {
+  let branch: Array<Record<string, unknown>> = [];
+  const journal: Array<{ type: string; data: Record<string, unknown> }> = [];
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: Record<string, unknown>) { journal.push({ type, data }); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, { readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }) });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "wake-drained-superseded", getBranch: () => branch },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  const prepared = journal.at(-1)!.data as { recoveryWake: { state: string } };
+  branch = [
+    { type: "custom", customType: "maestro-auto-compaction-intent", data: prepared },
+    { type: "message", message: { role: "user", content: sent[0] } },
+    { type: "message", message: { role: "user", content: "a newer request" } },
+  ];
+  await guard.onAgentEnd(ctx);
+  const cancelled = journal.at(-1)!.data as { recoveryWake: { state: string; reason?: string } };
+  assert.equal(cancelled.recoveryWake.state, "cancelled");
+  assert.match(cancelled.recoveryWake.reason ?? "", /superseded/);
 });
 
 test("a different post-dispatch input cancels the wake even when it copies the marker", async () => {

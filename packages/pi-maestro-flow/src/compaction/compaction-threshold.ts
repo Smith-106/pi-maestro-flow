@@ -156,6 +156,12 @@ export interface CompactionThresholdInput {
   contextWindow: number | undefined;
   modelMaxTokens?: number;
   soft?: { nudgeRatio: number; pruneRatio: number; pruneTargetRatio: number };
+  /**
+   * Absolute trigger for this model, replacing the derived value. Used to pin a
+   * larger window's trigger at the point a known-good summary can still be
+   * hosted; reserveTokens/keepRecentTokens stay untouched.
+   */
+  thresholdTokensOverride?: number;
 }
 
 export interface LinkedCompactionThresholdInput {
@@ -167,6 +173,18 @@ export interface LinkedCompactionThresholdInput {
   /** Apply fixed summary headroom only when a separate summary model is configured. */
   enforceCompactionHeadroom?: boolean;
   soft?: CompactionThresholdInput["soft"];
+  /** Per-model trigger override for the session model (see {@link CompactionThresholdInput}). */
+  sessionThresholdTokensOverride?: number;
+}
+
+/**
+ * A configured per-model trigger replaces the derived value. Only a positive
+ * integer strictly below the window is usable: at or above the window the
+ * trigger could never fire before Pi's own capacity limit.
+ */
+function usableThresholdOverride(value: number | undefined, contextWindow: number): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return undefined;
+  return value < contextWindow ? value : undefined;
 }
 
 /**
@@ -193,8 +211,9 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
   const summaryReserveTokens = typeof input.modelMaxTokens === "number" && input.modelMaxTokens > 0
     ? Math.min(SUMMARY_OUTPUT_RESERVE_CAP, input.modelMaxTokens)
     : 0;
-  const thresholdTokens = Math.max(0, contextWindow - effective - summaryReserveTokens);
-  const reason: CompactionThresholdReason = ratioFloorTokens > configuredReserveTokens
+  const override = usableThresholdOverride(input.thresholdTokensOverride, contextWindow);
+  const thresholdTokens = override ?? Math.max(0, contextWindow - effective - summaryReserveTokens);
+  const reason: CompactionThresholdReason = override === undefined && ratioFloorTokens > configuredReserveTokens
     ? "ratio-floor"
     : "configured";
   const derivation: CompactionThresholdDerivation = {
@@ -268,6 +287,7 @@ export function deriveLinkedCompactionThreshold(
     contextWindow: input.sessionContextWindow,
     modelMaxTokens: input.sessionMaxTokens,
     soft: input.soft,
+    thresholdTokensOverride: input.sessionThresholdTokensOverride,
   });
   const compactionReserve = input.enforceCompactionHeadroom
     && input.compactionContextWindow !== undefined

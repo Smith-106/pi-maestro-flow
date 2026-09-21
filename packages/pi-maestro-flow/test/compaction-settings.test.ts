@@ -13,6 +13,7 @@ import {
   readEffectiveCompactionSettings,
   readScopeCompaction,
   resolveEffectiveCompactionSettings,
+  resolveModelThresholdOverride,
   resolveProjectSettingsPath,
   resolveUserSettingsPath,
   saveCompactionPatch,
@@ -74,6 +75,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       reserveTokens: DEFAULT_RESERVE_TOKENS,
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
       model: undefined,
+      modelThresholds: undefined,
       payloadLimitBytes: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
@@ -82,6 +84,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
         reserveTokens: "default",
         keepRecentTokens: "default",
         model: "default",
+        modelThresholds: "default",
         soft: "default",
         newContext: "default",
         payloadLimitBytes: "default",
@@ -104,6 +107,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       reserveTokens: 24_000,
       keepRecentTokens: 12_000,
       model: undefined,
+      modelThresholds: undefined,
       payloadLimitBytes: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
@@ -112,6 +116,7 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
         reserveTokens: "user",
         keepRecentTokens: "project",
         model: "default",
+        modelThresholds: "default",
         soft: "default",
         newContext: "default",
         payloadLimitBytes: "default",
@@ -145,6 +150,7 @@ test("compaction settings ignore malformed files and invalid optional fields", a
       reserveTokens: DEFAULT_RESERVE_TOKENS,
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
       model: undefined,
+      modelThresholds: undefined,
       payloadLimitBytes: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       newContext: { enabled: DEFAULT_NEW_CONTEXT_ENABLED },
@@ -153,6 +159,7 @@ test("compaction settings ignore malformed files and invalid optional fields", a
         reserveTokens: "default",
         keepRecentTokens: "default",
         model: "default",
+        modelThresholds: "default",
         soft: "default",
         newContext: "default",
         payloadLimitBytes: "default",
@@ -699,6 +706,72 @@ test("saveCompactionScope persists the summary model and clears retired endpoint
   } finally {
     await fixture.dispose();
   }
+});
+
+test("compaction modelThresholds parse, resolve per model, and track source", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: {
+        modelThresholds: {
+          "cpa-responses/deepseek-v4-flash": 216_000,
+          "glm-5.3": 216_000,
+          "bad-negative": -5,
+          "bad-fraction": 1.5,
+          "": 100_000,
+        },
+      },
+    });
+    const effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.deepEqual(effective.modelThresholds, {
+      "cpa-responses/deepseek-v4-flash": 216_000,
+      "glm-5.3": 216_000,
+    });
+    assert.equal(effective.source.modelThresholds, "project");
+    assert.equal(
+      resolveModelThresholdOverride(effective, { provider: "cpa-responses", id: "deepseek-v4-flash" }),
+      216_000,
+    );
+    assert.equal(resolveModelThresholdOverride(effective, { reference: "cpa-responses/deepseek-v4-flash" }), 216_000);
+    assert.equal(resolveModelThresholdOverride(effective, { id: "glm-5.3" }), 216_000);
+    assert.equal(
+      resolveModelThresholdOverride(effective, { provider: "other", id: "glm-5.3" }),
+      216_000,
+      "a bare id resolves when the provider-qualified reference misses",
+    );
+    assert.equal(resolveModelThresholdOverride(effective, { provider: "x", id: "unknown" }), undefined);
+    assert.equal(resolveModelThresholdOverride(effective, undefined), undefined);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction modelThresholds follow project-over-user precedence", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeSettings(fixture.agentDir, {
+      compaction: { modelThresholds: { "p/m": 100_000 } },
+    });
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { modelThresholds: { "p/m": 216_000 } },
+    });
+    const effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.deepEqual(effective.modelThresholds, { "p/m": 216_000 });
+    assert.equal(effective.source.modelThresholds, "project");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction validation rejects unusable modelThresholds entries", () => {
+  const invalid = validateCompactionPatch(
+    { modelThresholds: { "p/zero": 0, "p/fraction": 1.5, "p/huge": 500_000, "  ": 100_000 } },
+    400_000,
+  );
+  assert.equal(invalid.errors.length, 4);
+  assert.match(invalid.errors.join("\n"), /modelThresholds\.p\/huge \(500000\) must be less than contextWindow \(400000\)/);
+  const valid = validateCompactionPatch({ modelThresholds: { "p/m": 216_000 } }, 400_000);
+  assert.equal(valid.errors.length, 0);
 });
 
 async function createFixture() {

@@ -27,6 +27,7 @@ import {
   COMPACTION_FIELDS,
   readCompactionSettings,
   resolveEffectiveCompactionSettings,
+  resolveModelThresholdOverride,
   resolveProjectSettingsPath,
   saveCompactionPatch,
   saveCompactionScope,
@@ -1005,6 +1006,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       compactionContextWindow: compactionModel?.contextWindow,
       compactionMaxTokens: compactionModel?.maxTokens,
       soft: effective.soft,
+      sessionThresholdTokensOverride: resolveModelThresholdOverride(effective, this.params.currentModel),
     });
   }
 

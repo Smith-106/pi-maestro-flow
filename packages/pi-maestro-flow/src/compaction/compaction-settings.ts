@@ -193,6 +193,12 @@ export interface CompactionConfigPatch {
   /** Compaction summary model as `provider/id`; undefined follows the active session model. */
   model?: string;
   /**
+   * Absolute hard-compaction trigger per model (`provider/id`, or bare `id`).
+   * Lets a larger context window keep the trigger at a point a known-good
+   * checkpoint summary can still be hosted; reserveTokens is left untouched.
+   */
+  modelThresholds?: Record<string, number>;
+  /**
    * Optional payload byte ceiling for the estimate request body. When set, the
    * compaction layer evicts the OLDEST eligible messages (oldest-first,
    * images first among equals) before sending so the body stays under the
@@ -215,6 +221,8 @@ export interface EffectiveCompactionSettings {
   keepRecentTokens: number;
   /** Configured compaction model (`provider/id`); undefined follows the active session model. */
   model?: string;
+  /** Per-model hard-compaction triggers; absent entries use the derived trigger. */
+  modelThresholds?: Record<string, number>;
   /** Optional payload byte ceiling; undefined = no ceiling (default). */
   payloadLimitBytes?: number;
   soft: SoftCompactionSettings;
@@ -266,6 +274,8 @@ function readRawCompaction(path: string): CompactionConfigPatch {
     const kr = positiveInt(hard?.keepRecentTokens) ?? positiveInt(c.keepRecentTokens);
     if (kr !== undefined) patch.keepRecentTokens = kr;
     if (typeof c.model === "string" && c.model.trim().length > 0) patch.model = c.model.trim();
+    const modelThresholds = readRawModelThresholds(c.modelThresholds);
+    if (modelThresholds) patch.modelThresholds = modelThresholds;
     const payloadLimit = positiveNumber(c.payloadLimitBytes);
     if (payloadLimit !== undefined) patch.payloadLimitBytes = payloadLimit;
     const soft = readRawSoft(c.soft);
@@ -281,6 +291,21 @@ function readRawCompaction(path: string): CompactionConfigPatch {
 function readRawNewContext(value: unknown): NewContextCompactionConfigPatch | undefined {
   if (!isRecord(value) || typeof value.enabled !== "boolean") return undefined;
   return { enabled: value.enabled };
+}
+
+/**
+ * Read `modelThresholds`, keeping only entries that can actually fire: positive
+ * integers. Window-relative bounds are enforced later by validation, where the
+ * active model's context window is known.
+ */
+function readRawModelThresholds(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const threshold = positiveInt(entry);
+    if (threshold !== undefined && key.trim().length > 0) result[key.trim()] = threshold;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
@@ -400,6 +425,7 @@ export function resolveEffectiveCompactionSettings(
     reserveTokens: "default",
     keepRecentTokens: "default",
     model: "default",
+    modelThresholds: "default",
     soft: "default",
     newContext: "default",
     payloadLimitBytes: "default",
@@ -409,6 +435,7 @@ export function resolveEffectiveCompactionSettings(
   let reserveTokens = DEFAULT_RESERVE_TOKENS;
   let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
   let model: string | undefined;
+  let modelThresholds: Record<string, number> | undefined;
   let payloadLimitBytes: number | undefined;
   const soft: SoftCompactionSettings = createDefaultSoftCompaction();
   const newContext: NewContextCompactionSettings = { enabled: DEFAULT_NEW_CONTEXT_ENABLED };
@@ -418,6 +445,7 @@ export function resolveEffectiveCompactionSettings(
     if (patch.reserveTokens !== undefined) { reserveTokens = patch.reserveTokens; source.reserveTokens = src; }
     if (patch.keepRecentTokens !== undefined) { keepRecentTokens = patch.keepRecentTokens; source.keepRecentTokens = src; }
     if (patch.model !== undefined) { model = patch.model; source.model = src; }
+    if (patch.modelThresholds !== undefined) { modelThresholds = patch.modelThresholds; source.modelThresholds = src; }
     if (patch.payloadLimitBytes !== undefined) { payloadLimitBytes = patch.payloadLimitBytes; source.payloadLimitBytes = src; }
     if (patch.newContext?.enabled !== undefined) {
       newContext.enabled = patch.newContext.enabled;
@@ -464,7 +492,7 @@ export function resolveEffectiveCompactionSettings(
     }
   }
 
-  return { enabled, reserveTokens, keepRecentTokens, model, payloadLimitBytes, soft, newContext, source };
+  return { enabled, reserveTokens, keepRecentTokens, model, modelThresholds, payloadLimitBytes, soft, newContext, source };
 }
 
 export function validateCompactionPatch(
@@ -491,6 +519,23 @@ export function validateCompactionPatch(
   }
   if (patch.payloadLimitBytes !== undefined && !isPositiveFiniteNumber(patch.payloadLimitBytes)) {
     errors.push(`payloadLimitBytes must be a positive finite number`);
+  }
+
+  const modelThresholds = patch.modelThresholds;
+  if (modelThresholds !== undefined) {
+    for (const [key, value] of Object.entries(modelThresholds)) {
+      if (key.trim().length === 0) {
+        errors.push(`modelThresholds keys must be non-empty model references`);
+        continue;
+      }
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        errors.push(`modelThresholds.${key} must be a positive safe integer`);
+        continue;
+      }
+      if (contextWindow !== undefined && value >= contextWindow) {
+        errors.push(`modelThresholds.${key} (${value}) must be less than contextWindow (${contextWindow})`);
+      }
+    }
   }
 
   const rt = patch.reserveTokens;
@@ -912,6 +957,23 @@ export function requireNewContextCompactionEnabled(projectRoot: string): Effecti
   const settings = readEffectiveCompactionSettings(projectRoot);
   if (!settings.newContext.enabled) throw new Error(NEW_CONTEXT_DISABLED_MESSAGE);
   return settings;
+}
+
+/**
+ * Resolve the configured per-model hard-compaction trigger. The canonical
+ * `provider/id` reference wins; a bare `id` is accepted as a convenience for
+ * single-provider setups. Unknown models fall back to the derived trigger.
+ */
+export function resolveModelThresholdOverride(
+  settings: { modelThresholds?: Record<string, number> },
+  model: { provider?: string; id?: string; reference?: string } | undefined,
+): number | undefined {
+  const table = settings.modelThresholds;
+  if (!table || !model) return undefined;
+  const reference = model.reference
+    ?? (model.provider && model.id ? `${model.provider}/${model.id}` : undefined);
+  if (reference !== undefined && table[reference] !== undefined) return table[reference];
+  return model.id !== undefined ? table[model.id] : undefined;
 }
 
 function positiveNumber(value: unknown): number | undefined {

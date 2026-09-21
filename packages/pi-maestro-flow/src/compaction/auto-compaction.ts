@@ -9,6 +9,7 @@ import type {
 import {
   DEFAULT_SOFT_COMPACTION,
   readEffectiveCompactionSettings,
+  resolveModelThresholdOverride,
   type EffectiveCompactionSettings,
   type SoftCompactionSettings,
 } from "./compaction-settings.ts";
@@ -142,7 +143,7 @@ export const MAX_OFF_BRANCH_PRUNE_BYTES = 128 * 1024;
 
 export type CompactionSettings = Pick<
   EffectiveCompactionSettings,
-  "enabled" | "reserveTokens" | "keepRecentTokens" | "model" | "payloadLimitBytes"
+  "enabled" | "reserveTokens" | "keepRecentTokens" | "model" | "modelThresholds" | "payloadLimitBytes"
 > & { soft?: EffectiveCompactionSettings["soft"] };
 
 export interface ContextEstimate {
@@ -912,6 +913,49 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return false;
     }
   }
+  // Pi drains a queued follow-up with a low-level agent.continue(), which emits
+  // agent_start but never before_agent_start. On that path the wake stayed
+  // "prepared" even though the transcript now proves the input landed and its
+  // turn completed, so the durable handoff expired at its deadline instead of
+  // reaching a terminal receipt. Promote it from ground-truth branch evidence;
+  // the entry is appended mid-run, so agent_start is too early — only the
+  // turn boundary observes it.
+  function promoteDrainedWake(ctx: ExtensionContext): void {
+    const wake = state.recoveryWake;
+    if (!wake || wakeIsTerminal(wake)) return;
+    if (wake.state !== "prepared" && wake.state !== "queued") return;
+    if (expireWakeIfNeeded(wake, ctx)) return;
+    if (!branchMatchesWake(ctx, wake)) return;
+    const recorded = branchMessageForWake(ctx, wake);
+    if (!recorded) return;
+    if (branchHasSupersedingInput(ctx, wake)) {
+      transitionWakeTerminal(wake, "cancelled", "a newer user message superseded recovery wake", ctx);
+      return;
+    }
+    const previous = { ...wake };
+    if (recorded.id) wake.messageId = recorded.id;
+    wake.state = "turn-started";
+    wake.turnId = randomUUID();
+    wake.sequence += 1;
+    const pendingContinuation = state.pendingContinuationIntent;
+    const pendingOutput = state.pendingOutputLimitIntent;
+    if (wake.producer === "auto") {
+      state.pendingContinuationIntent = undefined;
+      state.pendingIntent = undefined;
+    } else if (wake.producer === "output-limit") {
+      state.pendingOutputLimitIntent = undefined;
+    }
+    consumedWakeAwaitingStart = undefined;
+    if (!persistPendingIntent(pi, state)) {
+      Object.assign(wake, previous);
+      state.pendingContinuationIntent = pendingContinuation;
+      state.pendingOutputLimitIntent = pendingOutput;
+      state.recoveryWake = wake;
+      notifyBestEffort(ctx, "Recovery input was drained but its correlated receipt could not be persisted; cleanup is fail-closed.", "error");
+      return;
+    }
+    publishWake(wake);
+  }
   function stageInterruptedWake(
     intent: PendingCompactionIntent,
     ctx: ExtensionContext,
@@ -974,6 +1018,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       compactionMaxTokens: compactionModel.maxTokens,
       enforceCompactionHeadroom: settings.model !== undefined,
       soft: settings.soft,
+      sessionThresholdTokensOverride: resolveModelThresholdOverride(settings, sessionModel),
     });
   }
   function isContextExhausted(ctx: ExtensionContext, estimatedTokens: number): boolean {
@@ -2573,6 +2618,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const isCurrentLifecycle = () => generation === state.generation
         && (sessionId === undefined || state.sessionId === undefined || sessionId === state.sessionId);
       if (!isCurrentLifecycle()) return;
+      promoteDrainedWake(ctx);
+      if (!isCurrentLifecycle()) return;
       state.turnCount += 1;
       // The run ended: any within-run critical-loop streak restarts fresh.
       state.criticalLoopStreak = 0;
@@ -4081,6 +4128,8 @@ export function shouldCompactMidTurn(input: {
   contextWindow: number;
   settings: CompactionSettings;
   modelMaxTokens?: number;
+  /** Per-model trigger override for the active session model; see {@link deriveCompactionThreshold}. */
+  thresholdTokensOverride?: number;
 }): boolean {
   if (!input.settings.enabled || input.contextWindow <= input.settings.reserveTokens) return false;
   if (!endsWithCompleteToolResultBatch(input.messages)) return false;
@@ -4090,6 +4139,7 @@ export function shouldCompactMidTurn(input: {
     contextWindow: input.contextWindow,
     modelMaxTokens: input.modelMaxTokens,
     soft: input.settings.soft,
+    thresholdTokensOverride: input.thresholdTokensOverride,
   });
   const softBands = derived.usable && derived.soft
     ? {
