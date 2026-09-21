@@ -13,6 +13,7 @@ dist/
 *.swo
 *~
 scripts
+!packages/pi-fluent-tui/scripts/
 
 # OS
 .DS_Store
