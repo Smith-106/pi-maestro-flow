@@ -200,7 +200,7 @@ em, i {{ font-style: italic; }}
 s, del {{ text-decoration: line-through; }}
 code, pre {{ font-family: monospace; background: var(--surface-elevated); color: var(--text-primary); padding: 0; word-wrap: break-word; }}
 pre {{ white-space: pre-wrap; }}
-hr {{ display: block; width: 100%; height: 1px; margin: 0; padding: 0; border: none; }}
+hr {{ display: block; width: 100%; height: 1px; margin: 0; padding: 0; border: none; color: var(--border-default); }}
 img {{ display: block; }}
 ul, ol {{ margin: 0; padding-left: 2px; }}
 button, input, select, textarea {{ background: var(--surface-elevated); color: var(--text-primary); border: none; padding: 0; }}
