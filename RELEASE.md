@@ -1,81 +1,126 @@
-# v0.30.0 — Gateway Control Surfaces & Progressive Todo Reads
+# v0.31.0 — Fabric Placement, Compaction Reliability & Fluent TUI
 
 ## Overview
 
-This feature release publishes **Flow 0.30.0** and **Teammate 2.6.2** on top
-of v0.29.0. **Cockpit 0.23.0**, **Settings-Core 0.2.1**,
-**Backend-Core 0.1.3**, and **Backends 0.1.3** are unchanged. Flow keeps the
-current external engine pin, `maestro-flow@0.5.86`.
+This feature release publishes **Flow 0.31.0**, **Teammate 2.7.0**, and
+**Cockpit 0.24.0** on top of v0.30.0, and publishes two new packages for the
+first time: **Fabric-Core 0.1.0** and **Fabric 0.1.0**. **Settings-Core 0.2.2**,
+**Backend-Core 0.1.4**, and **Backends 0.1.4** ship supporting changes. The
+external engine requirement is now a floor instead of an exact pin:
+`maestro-flow@>=0.5.87`.
 
-The release extends the authenticated Gateway with durable handoff, governed
-Skill, and fixed-schema Maestro CLI services. Todo reads become progressive and
-bounded, while resumable New Context updates and content-addressed persistence
-reduce prompt and state-file growth. Supporting fixes harden knowledge staging,
-Skill context budgets, SSH Gateway guidance, API request headers, and Teammate
-terminal lifecycle behavior.
+The release lands the multi-host Fabric runtime — route-bound HTTPS channels,
+Connector enrollment over outbound WSS, chunked artifact transfer, and
+route-pinned teammate placement — alongside compaction wake reliability and
+per-model absolute thresholds, a corrected SSH tool schema, RPC/headless
+settings fields, classifier prompt optimization, and the published Fluent TUI.
 
 ## Highlights
 
-### Flow 0.30.0
+### Flow 0.31.0
 
-- **Gateway handoff lifecycle** — Board and Session handoffs use versioned
-  contracts, append-only records, idempotent projection, authorization, and
-  completion snapshots across the Gateway catalog, runtime, stores, and
-  services.
-- **Governed Gateway Skill and Maestro CLI services** — policy-bound Skill
-  access and fixed Maestro search/load/stage operations expose constrained
-  schemas, private execution authority, sanitized environments, receipts, and
-  duplicate-stage protection.
-- **Progressive Todo reads** — `list` returns compact indexes, `get` supports
-  bounded field paging, activation returns an execution brief, and large task
-  content is deduplicated into referenced Todo v8 content records.
-- **Resumable context transitions** — an active Todo update can persist current
-  progress, handoff, and resources before scheduling `new_context`; completed
-  agents record whether their runtime remains wakeable.
-- **Knowledge and Skill safety** — knowledge candidates are staged through
-  private `--content-file` inputs instead of process argv, and the final
-  deduplicated Skill stack is checked against the context budget.
-- **Provider and SSH interoperability** — API Manager adds OpenCode request
-  header presets and correct clearing semantics; SSH Gateway launches expose a
-  `monitorHandle` and require schema discovery before dynamic calls.
-- **Project defaults and guidance** — automatic spec/knowhow skill invocation,
-  default compaction model selection, Gateway/MCP boundary documentation, and
-  refreshed installation guidance align the shipped package with the new
-  control surfaces.
+- **Fabric remote-placement runtime** — durable admission, route-bound HTTPS
+  channels, Connector enrollment and challenge proof, outbound-WSS transport,
+  HMAC-signed route tickets, chunked artifact transfer with per-chunk digests,
+  session-scoped MCP mounts, and Gateway-mounted Connector Hub with CLI
+  controls.
+- **Compaction wake reliability** — recovery wakes drained by Pi's follow-up
+  queue (which emits `agent_start` without `before_agent_start`) are promoted
+  to `turn-started` at the settled boundary from exact branch-marker evidence;
+  superseding user input cancels the wake instead of deadlocking it (#29).
+- **Per-model compaction thresholds** — `compaction.modelThresholds` accepts
+  absolute token overrides keyed by `provider/id` (bare `id` fallback);
+  invalid values fall back to the derived threshold (#28).
+- **Payload-based compaction** — a generic `payloadLimitBytes` budget replaces
+  the image byte cap, triggers on protected-region oversize, persists through
+  the TUI, and runs unconditionally ahead of token pressure.
+- **SSH tool schema fix** — the root `Type.Union` that serialized to
+  `{ properties: {} }` for GLM/Kimi is flattened to a single `Type.Object`
+  with runtime field validation, and imported hosts reuse existing
+  known_hosts fingerprint pins (#30).
+- **RPC/headless settings fields** — configuration commands accept
+  `--field=value` arguments through the existing mutation pipeline; purely
+  interactive overlays emit explicit degradation notices under RPC.
+- **Classifier and providers** — shared rules with JEV classification,
+  per-model thinking defaults, Devin account login with Cascade transport,
+  API key pools with extracted header presets, disabled-provider suspension,
+  and model-failover implicit-sweep exclusions.
+- **Gateway and tunnels** — managed tunnel profiles and config UI, tunnel MCP
+  access controls, isolated browser control, child-abort delivery before IPC
+  close, durable Fabric store recovery, and remote Gateway agent projection.
+- **Install-surface hardening** — the root manifest no longer registers a
+  skills-only `pi` block, so Git-URL installation is a visible no-op rather
+  than silently missing Flow extensions (#22); `.pi` skill/agent mirrors
+  resynced against `maestro-flow` 0.5.87 including the corrected
+  `run recall search` syntax (#24).
+- **Assorted fixes** — scoped workspace search enforcement, serialized usage
+  history writes, RSC table column counting, large-record argument-stack
+  overflow, plan-mode file-editing gating, artifact switching, and LSP
+  file-URI normalization.
 
-### Teammate 2.6.2
+### Teammate 2.7.0
 
-- **Stable agent discovery** — built-in mirrors are deduplicated without hiding
-  project or user roles, with focused discovery regression coverage.
-- **Actionable terminal errors** — settled local agents consistently explain
-  why they cannot receive another message and direct callers toward a fresh
-  dispatch; generated declarations are refreshed from the release source.
+- **Fabric placement** — route-pinned teammate backend, source-side
+  single-attempt runtime port, and the Gateway Agent Endpoint bridge; dispatch
+  threads placement through the Fabric route resolver.
+- **Reliability** — retries and heartbeats aligned with host capabilities,
+  background status heartbeat configuration, hardened stale-child IPC
+  replies, console suppression while the TUI owns the screen, external agent
+  projections, and standalone agent discovery isolation.
+
+### Cockpit 0.24.0
+
+- **Performance** — single-build zen stack, render memoization, patch-health
+  registry, terminal theme integration, and cross-extension ownership
+  contract tests.
+- **Viewport correctness** — duplicated-line detection at viewport
+  boundaries, preserved boundary redraws, and disabled self-evolve status
+  hidden.
+
+### Fabric 0.1.0 / Fabric-Core 0.1.0 (first publish)
+
+- **Fabric-Core** — versioned pure contracts and state validation: ready and
+  safe capability projections plus Phase 3-6 contract definitions.
+- **Fabric** — host-independent connection kernel: Phase 2 kernel, durable
+  admission, route-bound HTTPS channels, Connector lifecycle, artifact
+  transfer, and production device placement.
+
+### Settings-Core 0.2.2 / Backend-Core 0.1.4 / Backends 0.1.4
+
+- `supportsCustomOverlay` replaces `ctx.ui.custom` presence checks for
+  headless/RPC capability detection.
+- Fabric teammate backend with route-pinned endpoints, single-attempt start
+  semantics, provenance stripping, and production device placement.
 
 ## Package version table
 
 | Package | Previous | New |
 |---|---|---|
-| pi-maestro-flow | 0.29.0 | 0.30.0 |
-| pi-maestro-teammate | 2.6.1 | 2.6.2 |
-| pi-cockpit | 0.23.0 | 0.23.0 (unchanged) |
-| pi-maestro-settings-core | 0.2.1 | 0.2.1 (unchanged) |
-| pi-maestro-backend-core | 0.1.3 | 0.1.3 (unchanged) |
-| pi-maestro-backends | 0.1.3 | 0.1.3 (unchanged) |
-| maestro-flow (engine pin) | 0.5.86 | 0.5.86 (unchanged) |
+| pi-maestro-flow | 0.30.0 | 0.31.0 |
+| pi-maestro-teammate | 2.6.2 | 2.7.0 |
+| pi-cockpit | 0.23.0 | 0.24.0 |
+| pi-maestro-settings-core | 0.2.1 | 0.2.2 |
+| pi-maestro-backend-core | 0.1.3 | 0.1.4 |
+| pi-maestro-backends | 0.1.3 | 0.1.4 |
+| pi-maestro-fabric | — | 0.1.0 (first publish) |
+| pi-maestro-fabric-core | — | 0.1.0 (first publish) |
+| maestro-flow (engine) | 0.5.86 (exact) | >=0.5.87 (floor) |
 
 ## Stats
 
-- **14 commits** on top of baseline tag `v0.29.0` before the release metadata
-  commit.
-- **82 implementation/test/support files**, **+4,037 / -270** lines before
-  version, lockfile, release-note, and documentation updates.
+- **132 commits** on top of baseline tag `v0.30.0` before the release
+  metadata commit.
+- **701 files changed**, **+130,080 / -9,013** lines (includes pi-fluent-tui
+  platform binaries and spikes).
 
 ## Install / Upgrade
 
 ```bash
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.0
 ```
 
-This pulls the exact published companion `pi-maestro-teammate@2.6.2` and
-existing `pi-cockpit@0.23.0`, `pi-maestro-settings-core@0.2.1`,
-`pi-maestro-backend-core@0.1.3`, and `pi-maestro-backends@0.1.3`.
+This pulls the published companions `pi-maestro-teammate@2.7.0`,
+`pi-cockpit@0.24.0`, `pi-maestro-settings-core@0.2.2`,
+`pi-maestro-backend-core@0.1.4`, `pi-maestro-backends@0.1.4`,
+`pi-maestro-fabric@0.1.0`, and `pi-maestro-fabric-core@0.1.0`, and requires
+`maestro-flow@>=0.5.87`.

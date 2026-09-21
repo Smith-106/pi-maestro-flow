@@ -8,13 +8,15 @@
 import type { BackendRegistryConfig } from "pi-maestro-backend-core/v1/registry";
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 import { TeammateBackendRegistry } from "pi-maestro-backends";
-import { type FabricBackendRouteResolver } from "pi-maestro-backends/fabric";
+import { type FabricBackendRouteResolver, type FabricBackendRouteResolverAcquirer } from "pi-maestro-backends/fabric";
 import type { RemoteWorkerManagerLike as RemoteManagerPort } from "pi-maestro-backends/remote";
 import { type CliToolsConfig } from "../cli-tools/cli-tools-config.ts";
 import type { AvailableModelEntry } from "../models/model-catalog.ts";
 import { type CompiledModelRegistryPair } from "../models/model-registry.ts";
 import { type PiSubprocessRunExtras } from "./pi-subprocess.ts";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
+/** Legacy resolver factories and generation-tracked dispatch acquirers are both accepted. */
+export type FabricRouteResolverDispatchWiring = (() => FabricBackendRouteResolver) | FabricBackendRouteResolverAcquirer;
 /** Global registration document under Pi's configured agent directory. */
 export declare function getGlobalBackendRegistryPath(): string;
 /** Project registration document relative to the workspace root. */
@@ -80,7 +82,7 @@ export declare function publishedModelRegistryPairSync(workspaceRoot: string): C
  * Callers use this for the whole dispatch so a registry edit cannot split a
  * candidate sweep across two model/deployment projections.
  */
-export declare function dispatchRegistryForProjectionSync(projection: CompiledModelRegistryPair["dispatch"], extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort, fabricRouteResolverOf?: () => FabricBackendRouteResolver): TeammateBackendRegistry;
+export declare function dispatchRegistryForProjectionSync(projection: CompiledModelRegistryPair["dispatch"], extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort, fabricRouteResolverOf?: FabricRouteResolverDispatchWiring): TeammateBackendRegistry;
 /**
  * Resolve the registry a dispatch should use, without an awaited read.
  *
@@ -94,7 +96,7 @@ export declare function dispatchRegistryForProjectionSync(projection: CompiledMo
  * than silently local.
  * @returns the registry, or undefined when the document keeps the legacy path.
  */
-export declare function dispatchRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort, globalFilePath?: string, fabricRouteResolverOf?: () => FabricBackendRouteResolver): TeammateBackendRegistry | undefined;
+export declare function dispatchRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, remoteManagerOf?: () => RemoteManagerPort, globalFilePath?: string, fabricRouteResolverOf?: FabricRouteResolverDispatchWiring): TeammateBackendRegistry | undefined;
 /**
  * Build the registry used by an already-admitted source-local Fabric attempt.
  *
@@ -111,7 +113,7 @@ export declare function dispatchSourceAttemptRegistrySync(workspaceRoot: string,
  * An operator may explicitly register the reserved name to the same module,
  * but may not redirect it to a different implementation.
  */
-export declare function dispatchFabricPlacementRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, fabricRouteResolverOf: () => FabricBackendRouteResolver, remoteManagerOf?: () => RemoteManagerPort, globalFilePath?: string): TeammateBackendRegistry;
+export declare function dispatchFabricPlacementRegistrySync(workspaceRoot: string, extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras, fabricRouteResolverOf: FabricRouteResolverDispatchWiring, remoteManagerOf?: () => RemoteManagerPort, globalFilePath?: string): TeammateBackendRegistry;
 /**
  * Forget cached documents and published pairs so an operator edit takes effect.
  *

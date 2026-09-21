@@ -66,6 +66,23 @@ export interface ModelHealthAttemptSnapshot {
  * exception: a user/lifecycle cancellation is never a model failure, so they
  * classify as `non-retryable` to avoid replaying stopped work on any model.
  */
+export interface RetryErrorClassification {
+    kind: RetryErrorKind;
+    /**
+     * True when no explicit rule matched and the result is the retryable
+     * default (`provider`). Semantic classifiers treat `defaulted` results as
+     * provisional — the unrecognized-input branch is where a JEV adjudication
+     * adds value.
+     */
+    defaulted: boolean;
+}
+/**
+ * Detailed variant of {@link classifyRetryError} that also reports whether the
+ * kind came from an explicit pattern/status match or from the unknown-failure
+ * default. Same precedence and same semantics; the wrapper below preserves the
+ * existing contract for sync callers.
+ */
+export declare function classifyRetryErrorDetailed(message: string | undefined, status?: number): RetryErrorClassification;
 export declare function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind;
 /**
  * Classify a registry-mode failure without coupling retry text parsing to a
@@ -96,9 +113,8 @@ export declare class ModelHealthAttemptState {
 }
 /**
  * Pi core owns same-model provider retries in both the root session and
- * teammate children, but older Pi retry classifiers do not recognize the
- * machine-readable `stream_read_error` code. Add a semantic marker they
- * understand without replacing the original diagnostic.
+ * teammate children. Add semantic markers for transient diagnostics its
+ * classifier does not recognize, without replacing the original diagnostic.
  */
 export declare function normalizePiRetryErrorMessage(message: string | undefined): string | undefined;
 /** Preserve the provider diagnostic while making a raced user cancellation non-retryable to Pi core. */

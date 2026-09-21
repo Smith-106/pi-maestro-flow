@@ -24,6 +24,8 @@ export declare const TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS: number;
  * Periodic status turns keep an idle root session warm while background work
  * remains active. Bound the user setting so it cannot become a high-frequency
  * prompt source or silently stop serving its cache-preservation purpose.
+ * Only used on hosts older than pi 0.86; newer versions warm the cache
+ * natively and the heartbeat is disabled.
  */
 export declare const BACKGROUND_STATUS_HEARTBEAT_DEFAULT_MS: number;
 export declare const BACKGROUND_STATUS_HEARTBEAT_MIN_MS = 60000;

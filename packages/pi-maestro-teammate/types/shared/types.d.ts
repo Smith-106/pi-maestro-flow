@@ -190,6 +190,9 @@ export interface AgentProgressSnapshot {
     /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
     resultReadyAt?: number;
     lastMessage?: string;
+    /** Rolling tail of the agent's output log — lets RPC-mode hosts render
+     *  a short output preview without access to the in-process read model. */
+    outputTail?: string[];
     error?: string;
     requestedModel?: string;
     resolvedModel?: string;

@@ -32,6 +32,13 @@ export interface DiagnosticLogConfig {
     /** Days of log files to retain; older files are pruned. */
     retentionDays: number;
 }
+/**
+ * Redirect every `console.*` call to a no-op while the TUI owns the screen.
+ * The TUI writes via `process.stdout.write` directly, so it is unaffected.
+ * Idempotent; a no-op outside TUI mode (the check is per-call, so console
+ * output is fully preserved in print/rpc/CLI contexts).
+ */
+export declare function installTuiConsoleGuard(): void;
 export declare const DEFAULT_DIAGNOSTIC_CONFIG: DiagnosticLogConfig;
 export interface DiagnosticUiBridge {
     /** Set the status-bar segment text; pass undefined to clear. */

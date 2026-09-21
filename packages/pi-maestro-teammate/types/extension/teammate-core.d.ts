@@ -372,7 +372,7 @@ export declare function compactMetric(value: number): string;
 export declare function toolAction(name: string): string;
 export declare function formatRetryDelay(delayMs: number): string;
 export declare function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[];
-export declare function renderAgentStatusWidget(agents: ActiveAgent[], width: number, theme: AgentWidgetTheme): string[];
+export declare function renderAgentStatusWidget(agents: ActiveAgent[], width: number, theme: AgentWidgetTheme, height?: number): string[];
 export declare function handleChildLifecycleEvent(state: TeammateState, event: Record<string, unknown>): void;
 export declare function restoreMainOwnershipIfHandbackPending(agent: ActiveAgent): LeaseToken | undefined;
 export declare const CHILD_PROXY_TIMEOUT_MS: number;

@@ -811,7 +811,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       ? [...new Set([
           ...baseChain,
           ...config.defaultFallbackModels,
-          ...availableModels(ctx).keys().filter((model) => !IMPLICIT_FALLBACK_EXCLUSIONS.has(model)),
+          ...[...availableModels(ctx).keys()].filter((model) => !IMPLICIT_FALLBACK_EXCLUSIONS.has(model)),
         ])]
       : baseChain;
     const chain = images.length > 0 ? prioritizeMultimodalChain(fallbackChain, availableModels(ctx)) : fallbackChain;

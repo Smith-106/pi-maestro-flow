@@ -1,3 +1,4 @@
+import { type OverlayTheme } from "pi-maestro-settings-core/ui";
 import { type SupportedSettingsLocale } from "./locale.ts";
 export interface SessionSelectionRow {
     correlationId: string;
@@ -23,6 +24,7 @@ interface SessionSendOverlayCallbacks {
 /** Small session picker used by /teammate-send. */
 export declare class SessionSendOverlay {
     private readonly cb;
+    private readonly theme?;
     private sessions;
     private cursor;
     private selected?;
@@ -32,10 +34,11 @@ export declare class SessionSendOverlay {
     private requestRender;
     private readonly t;
     private readonly localeDisposer;
-    constructor(cb: SessionSendOverlayCallbacks, locale?: SupportedSettingsLocale);
+    constructor(cb: SessionSendOverlayCallbacks, locale?: SupportedSettingsLocale, theme?: OverlayTheme | undefined);
     setRequestRender(fn: () => void): void;
+    private paint;
+    private paintBold;
     render(width: number): string[];
-    private frameLine;
     handleInput(data: string): void;
     private toggleSelection;
     private confirm;

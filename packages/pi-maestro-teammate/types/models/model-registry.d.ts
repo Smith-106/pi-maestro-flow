@@ -1,4 +1,5 @@
 import type { BackendRegistration, TeammateExecutionMode } from "pi-maestro-backend-core/v1/registry";
+import type { BackendCapabilities } from "pi-maestro-backend-core/v1/backend";
 import type { CliToolsConfig } from "../cli-tools/cli-tools-config.ts";
 import type { TeammateThinkingLevel } from "../shared/thinking.ts";
 import { type AvailableModelEntry } from "./model-catalog.ts";
@@ -124,5 +125,17 @@ export interface ModelRegistryCompileInputs {
 }
 export declare function parseModelRegistryManifest(raw: string, path?: string): ModelRegistryManifestV2;
 export declare function deriveModelRuntimeDescriptor(deploymentId: string, registration: BackendRegistration): ModelRuntimeDescriptor;
+/**
+ * Whether a registry transport is eligible for one Fabric source-local attempt.
+ *
+ * Known local-process descriptors are already proven by the registry compiler.
+ * Adapter-owned registrations remain eligible so the source runtime can load
+ * their exact configured module and validate its capabilities before either
+ * advertising or starting it. All transports that cross a machine boundary
+ * fail closed here.
+ */
+export declare function isFabricSourceLocalTransport(runtime: ModelRuntimeDescriptor): boolean;
+/** Return a normalized capability table only when all and exactly nine keys are valid. */
+export declare function exactBackendCapabilities(value: unknown): BackendCapabilities | undefined;
 export declare function compileModelRegistryManifest(manifest: ModelRegistryManifestV2, inputs?: ModelRegistryCompileInputs): CompiledModelRegistryPair;
 export declare function isModelRegistryMode(mode: TeammateExecutionMode | undefined): mode is "model-registry";
