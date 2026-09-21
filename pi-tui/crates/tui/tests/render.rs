@@ -81,6 +81,7 @@ impl Fixture {
                 self.state.dialog.is_none(),
                 &hint,
             );
+            let (bg, ssh) = self.state.tray.running_shells();
             status_line::sync(
                 &mut m,
                 &self.handles.status,
@@ -88,13 +89,16 @@ impl Fixture {
                 self.state.streaming,
                 self.state.permission,
                 self.state.queued.len(),
+                bg,
+                ssh,
             );
             pi_fluent_tui::components::spinner::sync(
                 &mut m,
                 &self.handles.spinner,
-                self.state.streaming,
+                self.state.streaming || self.state.aborting,
                 self.state.tick,
-                "esc to interrupt",
+                if self.state.aborting { "Interrupting" } else { "Thinking" },
+                if self.state.aborting { "" } else { "esc to interrupt" },
                 self.state.glyphs,
                 &theme::Theme::new(ThemeKind::Dark).fusion(),
             );
@@ -102,6 +106,13 @@ impl Fixture {
                 &mut m,
                 self.handles.dialog_area,
                 self.handles.widget_area,
+                self.handles.queue_area,
+                &self.state,
+                self.state.glyphs,
+            );
+            pi_fluent_tui::components::todo::sync(
+                &mut m,
+                self.handles.todo_area,
                 &self.state,
                 self.state.glyphs,
             );
@@ -138,6 +149,44 @@ impl Fixture {
     fn event(&mut self, e: AgentEvent) {
         self.state.apply_event(&RpcEvent::Agent(e));
     }
+}
+
+#[test]
+fn thinking_trace_overlay_swaps_messages() {
+    let mut f = Fixture::new();
+    f.state.push_user("think about it");
+    f.state.push(pi_fluent_tui::state::Message::new(
+        pi_fluent_tui::state::MsgKind::Thinking,
+        "reasoning step one\nreasoning step two",
+    ));
+    f.state.trace_open = true;
+    let mut rendered_open = false;
+    {
+        let mut m = f.doc.mutate();
+        pi_fluent_tui::components::message_list::sync(
+            &mut m,
+            f.handles.messages_inner,
+            &mut f.state,
+        );
+        pi_fluent_tui::components::message_list::sync_trace(
+            &mut m,
+            f.handles.messages_wrap,
+            f.handles.trace,
+            f.handles.trace_text,
+            &mut f.state,
+            &mut rendered_open,
+        );
+    }
+    f.doc.resolve(0.0);
+    let mut surface = Surface::new(f.w, f.h);
+    {
+        let mut ctx = PaintContext::new(&f.doc, &mut surface);
+        paint_document(&mut ctx);
+    }
+    let text = surface.to_text();
+    assert!(text.contains("reasoning step one"), "trace text missing:\n{text}");
+    assert!(!text.contains("think about it"), "messages not hidden:\n{text}");
+    assert!(rendered_open);
 }
 
 fn text_delta_ev(delta: &str) -> AgentEvent {
@@ -244,6 +293,36 @@ fn streaming_tool_body_waits_for_a_cadence_boundary() {
 }
 
 #[test]
+fn tool_update_unknown_id_opens_its_own_card() {
+    let mut f = Fixture::new();
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "a1".into(),
+        tool_name: "read".into(),
+        args: serde_json::json!({"path": "src/a.rs"}),
+    });
+    // An update whose start we never saw must not paint onto the
+    // latest card — it opens a fresh pending card instead.
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "ghost".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({"output": "ghost output"}),
+    });
+    let tools: Vec<_> = f
+        .state
+        .messages
+        .iter()
+        .filter(|m| m.kind == MsgKind::Tool)
+        .collect();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].tool_call_id.as_deref(), Some("a1"));
+    assert!(tools[0].tool_output.is_none(), "a1 polluted");
+    assert_eq!(tools[1].tool_call_id.as_deref(), Some("ghost"));
+    assert_eq!(tools[1].tool_output.as_deref(), Some("ghost output"));
+}
+
+#[test]
 fn read_tool_output_is_hidden_until_expanded() {
     let mut f = Fixture::new();
     f.event(AgentEvent::ToolExecutionStart {
@@ -282,8 +361,12 @@ fn markdown_report_has_spacing_and_border_rules() {
     assert!(css.contains("margin-top: 2px;"));
     assert!(css.contains(".md-list {"));
     assert!(css.contains("margin-bottom: 0px;"));
-    assert!(css.contains(".msg-assistant {"));
-    assert!(css.contains("border-left-width: 1px;"));
+    // Agent text output carries no left border bar.
+    assert!(css.contains(
+        ".msg-assistant {\n    align-self: stretch;\n    color: var(--text-primary);\n}"
+    ));
+    // Table frame rules (top/bottom borders reuse the separator color).
+    assert!(css.contains(".md-sep, .md-border {"));
     assert!(css.contains(".bg-code-block {"));
 }
 
@@ -511,14 +594,29 @@ fn narrow_status_prioritizes_actionable_state() {
 fn spinner_line_renders_when_streaming() {
     let mut f = Fixture::new();
     f.state.streaming = true;
-    f.state.tick = 10; // frame 2 at the calmer 165ms cadence
+    f.state.tick = 10; // frame (10/5)%16 = 2
     let text = f.frame();
     assert!(text.contains("Thinking"), "thinking label:\n{text}");
     assert!(text.contains("esc to interrupt"), "interrupt hint:\n{text}");
-    // Braille frame present (unicode mode default).
+    // Braille frame 2, no animated dots after the label.
     assert!(
         text.contains(glyphs::GlyphMode::Unicode.spinner_frame(2)),
-        "braille frame:\n{text}"
+        "spinner frame:\n{text}"
+    );
+    assert!(!text.contains("Thinking."), "no dots:\n{text}");
+}
+
+#[test]
+fn spinner_line_shows_interrupting_while_aborting() {
+    let mut f = Fixture::new();
+    f.state.streaming = false;
+    f.state.aborting = true;
+    f.state.tick = 10;
+    let text = f.frame();
+    assert!(text.contains("Interrupting"), "interrupt label:\n{text}");
+    assert!(
+        !text.contains("esc to interrupt"),
+        "hint hidden while aborting:\n{text}"
     );
 }
 
@@ -1397,18 +1495,85 @@ fn attachment_selection_and_hint() {
 fn queue_update_tracks_queued() {
     let mut f = Fixture::new();
     f.event(AgentEvent::QueueUpdate {
-        steering: vec![],
+        steering: vec!["now".into()],
         follow_up: vec!["msg one".into(), "msg two".into()],
     });
-    assert_eq!(f.state.queued.len(), 2);
+    assert_eq!(f.state.queued.len(), 3);
     let text = f.frame();
-    assert!(text.contains("2 queued"), "status:\n{text}");
+    assert!(text.contains("3 queued"), "status:\n{text}");
+    // Queue list between the working status and the input, with the
+    // steering/follow-up split visible.
+    assert!(text.contains("steering: now"), "steering line:\n{text}");
+    assert!(text.contains("queued: msg one"), "queued line:\n{text}");
+    assert!(text.contains("queued: msg two"), "queued line:\n{text}");
     // Empty update clears.
     f.event(AgentEvent::QueueUpdate {
         steering: vec![],
         follow_up: vec![],
     });
     assert!(f.state.queued.is_empty());
+    let text = f.frame();
+    assert!(!text.contains("queued:"), "queue hidden:\n{text}");
+}
+
+#[test]
+fn todo_strip_lists_persistent_items() {
+    use pi_fluent_tui::state::{TodoItem, TodoStatus};
+    let mut f = Fixture::new();
+    let item = |id: &str, subject: &str, status| TodoItem {
+        id: id.into(),
+        subject: subject.into(),
+        status,
+    };
+    f.state.todos = vec![
+        item("task-1", "done thing", TodoStatus::Completed),
+        item("task-2", "active thing", TodoStatus::InProgress),
+        item("task-3", "blocked thing", TodoStatus::Blocked),
+        item("task-4", "later thing", TodoStatus::Pending),
+    ];
+    let text = f.frame();
+    // Summary + status-ordered rows (in_progress first, completed last).
+    assert!(text.contains("Todo 1/4 · 1 running · 1 blocked"), "summary:\n{text}");
+    // Cockpit rank: in_progress → pending → blocked → completed.
+    let active = text.find("active thing").unwrap();
+    let later = text.find("later thing").unwrap();
+    let blocked = text.find("blocked thing").unwrap();
+    let done = text.find("done thing").unwrap();
+    assert!(active < later && later < blocked && blocked < done, "order:\n{text}");
+    // Clearing hides the strip again.
+    f.state.todos.clear();
+    let text = f.frame();
+    assert!(!text.contains("Todo "), "hidden:\n{text}");
+}
+
+#[test]
+fn status_line_shows_bg_and_ssh_counts() {
+    use pi_fluent_tui::state::{TrayKind, TrayStatus};
+    let mut f = Fixture::new();
+    // Background bash with ssh in its command line counts as both.
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "b1".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({"command": "ssh dev tail -f app.log", "background": true}),
+    });
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "b2".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({"command": "sleep 600", "background": true}),
+    });
+    assert_eq!(f.state.tray.entries.len(), 2);
+    assert_eq!(
+        f.state
+            .tray
+            .entries
+            .iter()
+            .filter(|e| e.kind == TrayKind::Shell && e.status == TrayStatus::Running)
+            .count(),
+        2
+    );
+    let text = f.frame();
+    assert!(text.contains("bg 2"), "bg:\n{text}");
+    assert!(text.contains("ssh 1"), "ssh:\n{text}");
 }
 
 #[test]
@@ -1456,9 +1621,15 @@ fn thinking_collapse_tool_tail_table_math() {
     let text = f.frame();
     // Thinking collapsed to a preview after TurnEnd.
     assert!(text.contains("▸ Thinking"), "collapsed thinking:\n{text}");
-    // Table rendered as aligned columns.
+    // Table rendered as aligned columns with a full frame.
+    assert!(text.contains("┌"), "table top-left:\n{text}");
+    assert!(text.contains("┬"), "table top junction:\n{text}");
+    assert!(text.contains("┐"), "table top-right:\n{text}");
     assert!(text.contains("│ Name"), "table header:\n{text}");
     assert!(text.contains("├"), "table separator:\n{text}");
+    assert!(text.contains("└"), "table bottom-left:\n{text}");
+    assert!(text.contains("┴"), "table bottom junction:\n{text}");
+    assert!(text.contains("┘"), "table bottom-right:\n{text}");
     // Math rendered (inline + display).
     assert!(text.contains("E=mc^2"), "inline math:\n{text}");
     assert!(text.contains("int_0^1"), "display math:\n{text}");

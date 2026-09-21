@@ -194,11 +194,11 @@ span, a, strong, b, em, i, code {{
 h1, h2, h3, h4, h5, h6, p, ul, ol, li {{ margin: 0; padding: 0; }}
 li p {{ display: inline; }}
 h1, h2, h3, h4, h5, h6 {{ font-size: 1em; }}
-a {{ color: var(--link-color); text-decoration: underline; word-break: break-all; }}
+a {{ color: var(--link-color); text-decoration: underline; word-wrap: break-word; }}
 strong, b {{ font-weight: bold; }}
 em, i {{ font-style: italic; }}
 s, del {{ text-decoration: line-through; }}
-code, pre {{ font-family: monospace; background: var(--surface-elevated); color: var(--text-primary); padding: 0; word-break: break-all; }}
+code, pre {{ font-family: monospace; background: var(--surface-elevated); color: var(--text-primary); padding: 0; word-wrap: break-word; }}
 pre {{ white-space: pre-wrap; }}
 hr {{ display: block; width: 100%; height: 1px; margin: 0; padding: 0; border: none; }}
 img {{ display: block; }}
@@ -278,7 +278,7 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 }}
 .md-tr {{ color: var(--text-secondary); }}
 .md-th {{ color: var(--text-primary); font-weight: bold; }}
-.md-sep {{ color: var(--border-default); }}
+.md-sep, .md-border {{ color: var(--border-default); }}
 
 /* Math: `$…$` inline, `$$…$$` display block (raw TeX, accent color). */
 .md-math {{ color: var(--accent-primary); }}
@@ -342,6 +342,20 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
     background: var(--border-default);
 }}
 
+/* Thinking-trace overlay (F3): replaces #messages-wrap in-flow. */
+#trace {{
+    display: none;
+    flex-grow: 1;
+    flex-shrink: 1;
+    flex-basis: 0px;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-style: italic;
+    padding-left: 1px;
+    padding-top: 1px;
+    white-space: pre-wrap;
+}}
+
 /* Scrollback search (Ctrl+S) marks — render-only, no text mutation. */
 .msg-search-hit {{
     border-left-width: 1px;
@@ -364,19 +378,16 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 }}
 
 .msg-user {{
-    align-self: flex-start;
-    max-width: 90%;
+    align-self: stretch;
     background: {user_message_bg};
     color: var(--text-primary);
+    padding-top: 1px;
+    padding-bottom: 1px;
 }}
 
 .msg-assistant {{
     align-self: stretch;
     color: var(--text-primary);
-    border-left-width: 1px;
-    border-left-style: solid;
-    border-left-color: var(--border-default);
-    padding-left: 1px;
 }}
 
 .msg-thinking {{
@@ -496,6 +507,8 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 .status-mode {{ color: var(--text-secondary); }}
 .status-running {{ color: var(--accent-primary); font-weight: bold; }}
 .status-queue, .status-transient {{ color: var(--status-warning); }}
+.status-bg {{ color: var(--status-info); }}
+.status-ssh {{ color: var(--accent-secondary); }}
 .status-accent {{ color: var(--accent-primary); }}
 .status-info {{ color: var(--status-info); }}
 .status-ok {{ color: var(--status-success); }}
@@ -568,11 +581,9 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
     border-left-style: solid;
     border-left-color: var(--border-default);
     padding-left: 1px;
-    padding-top: 1px;
-    padding-bottom: 1px;
 }}
-.tool-line {{ color: var(--text-secondary); }}
-.tool-cmd {{ color: var(--text-primary); }}
+.tool-line {{ color: var(--text-muted); }}
+.tool-cmd {{ color: var(--text-secondary); }}
 .tool-foot {{
     color: var(--text-muted);
 }}
@@ -582,6 +593,21 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 .diff-line-hunk {{ color: var(--accent-primary); font-weight: bold; }}
 .diff-line-file {{ color: var(--text-secondary); font-weight: bold; }}
 .hl-line {{ color: var(--text-secondary); }}
+
+/* Softer palette inside tool output — streaming text stays calm;
+   markdown code blocks keep the vivid syntax set above. */
+.tool-body .hl-line {{ color: var(--text-muted); }}
+.tool-body .syntax-keyword,
+.tool-body .syntax-type,
+.tool-body .syntax-constant,
+.tool-body .syntax-attribute {{ color: var(--accent-secondary); }}
+.tool-body .syntax-string,
+.tool-body .syntax-function,
+.tool-body .syntax-number,
+.tool-body .syntax-operator,
+.tool-body .syntax-variable-builtin,
+.tool-body .syntax-property {{ color: var(--text-secondary); }}
+.tool-body .syntax-comment {{ color: var(--text-muted); }}
 
 /* ---------- spinner / tips / completion ---------- */
 
@@ -598,6 +624,34 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
 #spinner-hint {{ color: var(--text-muted); }}
 
 /* ---------- select dropdown + dialogs ---------- */
+
+#queue-area {{
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    /* Top rule separates the queue list from the working-status line. */
+    border-top: 1px solid var(--border-default);
+    overflow: hidden;
+}}
+
+#todo-area {{
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    /* Top rule separates the todo strip from the status/queue above. */
+    border-top: 1px solid var(--border-default);
+    overflow: hidden;
+}}
+.todo-summary {{ color: var(--text-secondary); font-weight: bold; padding-left: 1px; }}
+.todo-row {{ color: var(--text-primary); padding-left: 1px; }}
+.todo-active {{ font-weight: bold; }}
+.todo-done {{ color: var(--text-muted); }}
+.todo-blocked {{ color: var(--status-error); }}
+.todo-more {{ color: var(--text-muted); padding-left: 1px; }}
+.todo-glyph-done {{ color: var(--status-success); }}
+.todo-glyph-active {{ color: var(--accent-primary); }}
+.todo-glyph-blocked {{ color: var(--status-error); }}
+.todo-glyph-pending {{ color: var(--text-muted); }}
 
 #dialog-area {{ position: relative; flex-shrink: 0; }}
 .select-wrap {{ display: flex; flex-direction: column; }}

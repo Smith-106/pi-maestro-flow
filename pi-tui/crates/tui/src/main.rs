@@ -2,13 +2,16 @@
 //! + scrollback (cell renderer), Devin-style event loop.
 //!
 //! Usage:
-//!   tui [--pi <path>] [--theme <name>] [--full] [--pi-args "<args>"]
+//!   tui [--pi <path>] [--theme <name>] [--minimal] [--pi-args "<args>"]
 //!       [--headless-dump] [--headless-demo] [--headless-prompt <text>]
 //!
-//! By default pi is spawned with `pi_rpc::DEFAULT_ARGS` (all `--no-*`
-//! capability flags — deterministic but no sessions/extensions/skills).
-//! `--full` drops every `--no-*` flag; `--pi-args`/`PI_ARGS` replaces the
-//! argument list entirely (must still include `--mode rpc`).
+//! By default pi is spawned with full capabilities (extensions, skills,
+//! prompt templates, context files, sessions) so `get_commands` reports
+//! plugin commands and `todo-state` entries persist. `--minimal` uses
+//! `pi_rpc::DEFAULT_ARGS` (all `--no-*` flags — deterministic, no
+//! sessions/extensions/skills); `--full` is kept as a legacy alias of
+//! the default. `--pi-args`/`PI_ARGS` replaces the argument list
+//! entirely (must still include `--mode rpc`).
 //!
 //! `--headless-dump` renders one frame to stdout text (no alt-screen, no
 //! pi spawn) — a CI-friendly end-to-end check of DOM → layout → cells.
@@ -27,7 +30,7 @@ fn main() -> io::Result<()> {
     let mut headless_dump = false;
     let mut headless_demo = false;
     let mut headless_prompt: Option<String> = None;
-    let mut full = false;
+    let mut minimal = false;
     let mut pi_args: Option<String> = std::env::var("PI_ARGS").ok();
 
     let mut i = 0;
@@ -64,7 +67,9 @@ fn main() -> io::Result<()> {
                 i += 1;
                 headless_prompt = args.get(i).cloned();
             }
-            "--full" => full = true,
+            "--minimal" => minimal = true,
+            // Legacy alias: full is the default now.
+            "--full" => {}
             "--pi-args" => {
                 i += 1;
                 pi_args = args.get(i).cloned();
@@ -72,7 +77,7 @@ fn main() -> io::Result<()> {
             "-h" | "--help" => {
                 eprintln!(
                     "tui — pi-tui\n\
-                     usage: tui [--pi <path>] [--theme <name>] [--full] [--pi-args \"<args>\"]\n\
+                     usage: tui [--pi <path>] [--theme <name>] [--minimal] [--pi-args \"<args>\"]\n\
                      usage:   [--headless-dump] [--headless-demo] [--headless-prompt <text>]\n\
                      themes: dark|light|nord|solarized-dark|solarized-light|high-contrast\n\
                      env: PI_BIN (pi binary path), PI_TUI_THEME (theme name), PI_ARGS (pi argv override)"
@@ -115,7 +120,7 @@ fn main() -> io::Result<()> {
         .build()?;
 
     rt.block_on(async move {
-        // Arg precedence: --pi-args/PI_ARGS > --full > DEFAULT_ARGS.
+        // Arg precedence: --pi-args/PI_ARGS > --minimal > full.
         let owned_args: Vec<String> = pi_args
             .as_deref()
             .map(|raw| raw.split_whitespace().map(str::to_string).collect())
@@ -124,10 +129,10 @@ fn main() -> io::Result<()> {
         const FULL_ARGS: &[&str] = &["--mode", "rpc"];
         let spawn_args: &[&str] = if !borrowed.is_empty() {
             &borrowed
-        } else if full {
-            FULL_ARGS
-        } else {
+        } else if minimal {
             pi_rpc::DEFAULT_ARGS
+        } else {
+            FULL_ARGS
         };
         let rpc = match PiRpc::spawn(pi_path.as_deref(), spawn_args).await {
             Ok(r) => r,
@@ -189,6 +194,7 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
             true,
             "",
         );
+        let (bg, ssh) = st.tray.running_shells();
         components::status_line::sync(
             &mut m,
             &handles.status,
@@ -196,7 +202,10 @@ fn headless_dump_frame(kind: ThemeKind) -> io::Result<()> {
             false,
             st.permission,
             st.queued.len(),
+            bg,
+            ssh,
         );
+        components::todo::sync(&mut m, handles.todo_area, &st, st.glyphs);
     }
     doc.set_viewport(Viewport::new(60, 20, 1.0, kind.color_scheme()));
     doc.resolve(0.0);
@@ -342,6 +351,7 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             false,
             "",
         );
+        let (bg, ssh) = st.tray.running_shells();
         status_line::sync(
             &mut m,
             &handles.status,
@@ -349,13 +359,16 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             st.streaming,
             st.permission,
             st.queued.len(),
+            bg,
+            ssh,
         );
         spinner::sync(
             &mut m,
             &handles.spinner,
             true,
             st.tick,
-            "esc to interrupt",
+            if st.aborting { "Interrupting" } else { "Thinking" },
+            if st.aborting { "" } else { "esc to interrupt" },
             st.glyphs,
             &theme::Theme::new(kind).fusion(),
         );
@@ -363,9 +376,11 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             &mut m,
             handles.dialog_area,
             handles.widget_area,
+            handles.queue_area,
             &st,
             st.glyphs,
         );
+        components::todo::sync(&mut m, handles.todo_area, &st, st.glyphs);
         completion::sync(&mut m, handles.completion_area, &st, st.glyphs);
     }
     doc.set_viewport(Viewport::new(W as u32, H as u32, 1.0, kind.color_scheme()));

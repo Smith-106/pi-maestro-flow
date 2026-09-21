@@ -5,8 +5,8 @@
 //! ```text
 //! #spinner-line (row, hidden when idle)
 //!   ├─ #spinner-glyph "{frame}"   (per-frame fusion-gradient color)
-//!   ├─ #spinner-label "Thinking"  (accent)
-//!   ├─ #spinner-dots  "." / ".." / "..."   ((tick>>2)%3+1)
+//!   ├─ #spinner-label " Thinking" (accent)
+//!   ├─ #spinner-dots  (unused — kept for DOM shape stability)
 //!   └─ #spinner-hint  " · {hint}"          (InterruptHint: bold accent)
 //! ```
 
@@ -16,9 +16,8 @@ use crate::components::dom::{div, qual, span_text};
 use crate::components::glyphs::GlyphMode;
 
 /// Keep the working indicator calm on a 33ms app tick. The glyph changes
-/// about every 165ms and the dot phase about every 330ms.
+/// about every 165ms.
 pub const SPINNER_FRAME_TICKS: u64 = 5;
-pub const SPINNER_DOT_TICKS: u64 = 10;
 
 /// Fusion gradient endpoints `[lead, highlight, sidekick]` — supplied by
 /// `Theme::fusion()` (the RGB twin of the `--fusion-*` vars; the spinner
@@ -85,13 +84,15 @@ pub struct SpinnerHandles {
 /// Sync the spinner line for the current tick.
 ///
 /// * `active` — whether the agent is streaming (line hidden when false).
-/// * `tick` — app tick counter (33ms); frame = `(tick/3) % 16`.
+/// * `tick` — app tick counter (33ms); frame = `(tick/5) % 16`.
+/// * `label` — the working-state label ("Thinking" / "Interrupting").
 /// * `hint` — the `InterruptHint` text (e.g. "esc to interrupt").
 pub fn sync(
     m: &mut DocumentMutator<'_>,
     h: &SpinnerHandles,
     active: bool,
     tick: u64,
+    label: &str,
     hint: &str,
     mode: GlyphMode,
     fusion: &Fusion,
@@ -108,9 +109,8 @@ pub fn sync(
     m.set_style_property(h.glyph_span, "color", &format!("rgb({r},{g},{b})"));
     m.set_node_text(h.glyph_text, mode.spinner_frame(tick / SPINNER_FRAME_TICKS));
 
-    m.set_node_text(h.label_text, " Thinking");
-    let dots = (tick / SPINNER_DOT_TICKS) % 3 + 1;
-    m.set_node_text(h.dots_text, &".".repeat(dots as usize));
+    m.set_node_text(h.label_text, &format!(" {label}"));
+    m.set_node_text(h.dots_text, "");
     if hint.is_empty() {
         m.set_node_text(h.hint_text, "");
     } else {

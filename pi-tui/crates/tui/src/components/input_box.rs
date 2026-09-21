@@ -47,8 +47,7 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId, No
 
     let box_el = div(m, area, "");
     m.set_attribute(box_el, qual("id"), "input-box");
-    span_text(m, box_el, "", "› ")
-        .0;
+    span_text(m, box_el, "", "› ").0;
     // Give the prompt its id for styling + the hit marker (RECON §12.3).
     let prompt = m.last_child_id(box_el).unwrap();
     m.set_attribute(prompt, qual("id"), "input-prompt");

@@ -1099,6 +1099,24 @@ impl TrayState {
             .iter()
             .rposition(|e| e.status == TrayStatus::Running)
     }
+
+    /// `(running background shells, of which running ssh)` — the
+    /// status-line `bg`/`ssh` indicators. An ssh session is a shell
+    /// entry whose title (command) mentions `ssh`.
+    pub fn running_shells(&self) -> (usize, usize) {
+        let mut shells = 0;
+        let mut ssh = 0;
+        for e in &self.entries {
+            if e.kind != TrayKind::Shell || e.status != TrayStatus::Running {
+                continue;
+            }
+            shells += 1;
+            if e.title.to_ascii_lowercase().contains("ssh") {
+                ssh += 1;
+            }
+        }
+        (shells, ssh)
+    }
 }
 
 /// Classify a tool call as a tray entry: `bash` with `background:true`
@@ -1202,6 +1220,59 @@ pub struct Attachment {
     pub label: String,
 }
 
+/// A message sitting in pi's send queue (`queue_update` event).
+/// `steering` entries inject into the running turn; `follow_up`
+/// entries wait for it to end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueuedMessage {
+    pub text: String,
+    pub steering: bool,
+}
+
+impl From<String> for QueuedMessage {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            steering: false,
+        }
+    }
+}
+
+impl From<&str> for QueuedMessage {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_string())
+    }
+}
+
+/// Normalized todo status (cockpit `mapStatus` equivalents).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Blocked,
+    Completed,
+}
+
+/// One item of the persistent todo snapshot stored in the session's
+/// `todo-state` custom entry — the same durable source cockpit's
+/// `TodoStore` renders.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TodoItem {
+    /// Task id (`task-1`, `5`, …); used for ordering only.
+    pub id: String,
+    /// One-line subject; control chars stripped at ingest.
+    pub subject: String,
+    /// Normalized lifecycle status.
+    pub status: TodoStatus,
+}
+
+/// Single-line safe text: drops ASCII control chars (incl. `\n`,
+/// `\r`, ESC) so untrusted session content cannot inject terminal
+/// escapes or break a rendered row.
+fn clean_line(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Root application state.
 #[derive(Default)]
 pub struct AppState {
@@ -1210,6 +1281,10 @@ pub struct AppState {
     pub status: StatusState,
     /// True while the agent is streaming a response.
     pub streaming: bool,
+    /// True between sending `abort` and the run's terminal event —
+    /// the working indicator reads this to show "Interrupting" while
+    /// pi is still tearing the turn down.
+    pub aborting: bool,
     /// How Enter dispatches input while streaming: steer immediately or
     /// enqueue it as a follow-up. `None` is only possible on `Default`;
     /// `AppState::new` installs pi's follow-up default.
@@ -1236,6 +1311,9 @@ pub struct AppState {
     pub widgets: Vec<(String, Vec<String>)>,
     /// Pending terminal title (`setTitle`) — emitted as OSC on next frame.
     pub term_title: Option<String>,
+    /// Pending desktop notification — emitted as OSC 9 on next frame
+    /// (agent_end / settle).
+    pub term_notify: Option<String>,
     /// Permission mode (Shift+Tab cycles).
     pub permission: PermissionMode,
     /// Glyph table (unicode/ASCII).
@@ -1263,9 +1341,11 @@ pub struct AppState {
     pub session_points: Vec<(String, String)>,
     /// `/settings` boolean toggles (key → on).
     pub settings: std::collections::HashMap<String, bool>,
-    /// pi-reported slash commands (name, "desc (source)") merged into
-    /// the `/` completion list; filled by `get_commands`.
-    pub pi_commands: Vec<(String, String)>,
+    /// pi-reported slash commands `(name, "desc (source)", source)`
+    /// merged into the `/` completion list; filled by `get_commands`.
+    /// `source` is pi's raw `"extension" | "prompt" | "skill"` tag —
+    /// extension commands must dispatch through `prompt`.
+    pub pi_commands: Vec<(String, String, String)>,
     /// Suppress `get_commands` system lines for the background fetch
     /// (startup + completion refresh); `/help` prints them instead.
     pub commands_quiet: bool,
@@ -1276,7 +1356,10 @@ pub struct AppState {
     /// Selected attachment index (attachment_selection context).
     pub attachment_sel: Option<usize>,
     /// Queued messages while streaming (`queue_update` event).
-    pub queued: Vec<String>,
+    pub queued: Vec<QueuedMessage>,
+    /// Persistent todo snapshot hydrated from the session's newest
+    /// `todo-state` custom entry (cockpit `TodoStore` parity).
+    pub todos: Vec<TodoItem>,
     /// Lazily-built file index for `@` completion (cwd-relative paths).
     /// `None` = not built yet; `Some` may be empty.
     pub file_index: Option<Vec<String>>,
@@ -1295,6 +1378,14 @@ pub struct AppState {
     pub action_bar_node: Option<blitz_dom::NodeId>,
     /// Scrollback search (Ctrl+S) — modal query + match list.
     pub search: Option<SearchState>,
+    /// Thinking-trace overlay (Alt+T): full-viewport scroll of every
+    /// `MsgKind::Thinking` message (Devin `alt_screen` action).
+    pub trace_open: bool,
+    /// Scroll offset (cells) of the trace view.
+    pub trace_scroll: u32,
+    /// Signature of the rendered trace content (thinking count + total
+    /// text len) — gates rebuilds; streamed appends bump the len.
+    pub trace_sig: u64,
     /// Scrollbar metrics signature of the last rendered frame
     /// (content_h, view_h, scroll) — gates thumb style writes.
     pub scrollbar_sig: (u32, u32, u32),
@@ -1397,6 +1488,29 @@ impl AppState {
         }
     }
 
+    /// Concatenated thinking text for the trace overlay.
+    pub fn thinking_trace(&self) -> String {
+        self.messages
+            .iter()
+            .filter(|m| m.kind == MsgKind::Thinking)
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Signature for the trace content: message count + total len
+    /// (streamed appends only grow the last thinking message).
+    pub fn trace_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut s = std::collections::hash_map::DefaultHasher::new();
+        for m in &self.messages {
+            if m.kind == MsgKind::Thinking {
+                m.text.len().hash(&mut s);
+            }
+        }
+        s.finish()
+    }
+
     /// `show_tips` setting (drives the rotating input hint).
     pub fn show_tips(&self) -> bool {
         self.settings.get("show_tips").copied().unwrap_or(true)
@@ -1473,7 +1587,27 @@ impl AppState {
                     false
                 }
             }
-            RpcEvent::Response(_) | RpcEvent::Other(_) => false,
+            RpcEvent::Other(value) => {
+                // `extension_error` carries a failed extension command/hook
+                // (e.g. a headless `/api-manager` write). Surface it instead
+                // of silently dropping it.
+                if value.get("type").and_then(|t| t.as_str()) == Some("extension_error") {
+                    let detail = value
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown extension error");
+                    let event = value.get("event").and_then(|e| e.as_str()).unwrap_or("");
+                    self.push_system(if event.is_empty() {
+                        format!("extension error: {detail}")
+                    } else {
+                        format!("extension error ({event}): {detail}")
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
+            RpcEvent::Response(_) => false,
         }
     }
 
@@ -1481,6 +1615,7 @@ impl AppState {
         match e {
             AgentEvent::AgentStart => {
                 self.streaming = true;
+                self.aborting = false;
                 self.status.transient.clear();
                 true
             }
@@ -1568,6 +1703,13 @@ impl AppState {
                 m.tool_call_id = Some(tool_call_id.clone());
                 m.tool_status = Some('●');
                 m.tool_args = Some(args.clone());
+                // Early lang guess (args + tool-name conventions) so
+                // streamed partial output highlights before `end`.
+                m.tool_lang = crate::components::tool_card::detect_lang(
+                    tool_name,
+                    args,
+                    &serde_json::Value::Null,
+                );
                 m.tray_entry = tray_idx;
                 m.nested_under = nested_under;
                 self.push(m);
@@ -1580,22 +1722,29 @@ impl AppState {
                 ..
             } => {
                 // Partial result → live tail window in the card body.
-                // Match by tool_call_id — nested tools interleave.
+                // Strict tool_call_id match — nested tools interleave,
+                // so falling back to "latest tool card" mis-paints.
                 let partial_out = full_text(partial_result);
-                let idx = self
-                    .messages
-                    .iter()
-                    .rposition(|m| {
-                        m.kind == MsgKind::Tool && m.tool_call_id.as_deref() == Some(tool_call_id)
-                    })
-                    .or_else(|| self.messages.iter().rposition(|m| m.kind == MsgKind::Tool));
-                if let Some(i) = idx {
-                    let m = &mut self.messages[i];
+                if let Some(m) = self.messages.iter_mut().rev().find(|m| {
+                    m.kind == MsgKind::Tool && m.tool_call_id.as_deref() == Some(tool_call_id)
+                }) {
                     m.tool_name = Some(tool_name.clone());
                     if !partial_out.is_empty() {
                         m.tool_output = Some(partial_out);
                     }
                     m.dirty = true;
+                    self.dom_dirty = true;
+                } else {
+                    // Update without a seen start (compaction/replay) —
+                    // create the pending card like `end` does.
+                    let mut m = Message::new(MsgKind::Tool, String::new());
+                    m.tool_name = Some(tool_name.clone());
+                    m.tool_call_id = Some(tool_call_id.clone());
+                    m.tool_status = Some('●');
+                    if !partial_out.is_empty() {
+                        m.tool_output = Some(partial_out);
+                    }
+                    self.push(m);
                     self.dom_dirty = true;
                 }
                 true
@@ -1689,7 +1838,23 @@ impl AppState {
                 false
             }
             AgentEvent::AgentEnd { .. } | AgentEvent::AgentSettled => {
+                self.term_notify = Some("pi: agent finished".into());
                 self.streaming = false;
+                // An aborted run ends without `turn_end` — seal the last
+                // assistant/thinking bubble here too or it stays live.
+                if let Some(m) = self.messages.last_mut() {
+                    if matches!(m.kind, MsgKind::Assistant | MsgKind::Thinking) && !m.sealed {
+                        m.sealed = true;
+                        if m.kind == MsgKind::Thinking {
+                            m.dirty = true;
+                            self.dom_dirty = true;
+                        }
+                    }
+                }
+                if self.aborting {
+                    self.aborting = false;
+                    self.push_system("interrupted");
+                }
                 self.status.transient.clear();
                 true
             }
@@ -1753,7 +1918,17 @@ impl AppState {
                 steering,
                 follow_up,
             } => {
-                self.queued = steering.iter().chain(follow_up.iter()).cloned().collect();
+                self.queued = steering
+                    .iter()
+                    .map(|text| QueuedMessage {
+                        text: text.clone(),
+                        steering: true,
+                    })
+                    .chain(follow_up.iter().map(|text| QueuedMessage {
+                        text: text.clone(),
+                        steering: false,
+                    }))
+                    .collect();
                 true
             }
             _ => is_run_end(e),
@@ -1962,15 +2137,17 @@ impl AppState {
             return false;
         }
         if dir >= 0 {
-            // [active, q0..qk-1] → promote q0, active re-queues at back.
+            // Ring rotate left: [active, q0..qk-1] → [q0..qk-1, active];
+            // promote pops q0.
             self.pending_ui.push_back(req);
         } else {
-            // [active, q0..qk-1] → promote qk-1 (ring prev): move it to
-            // the front, active re-queues at back.
+            // Ring rotate right: [active, q0..qk-1] → [qk-1, active,
+            // q0..qk-2]; promote pops qk-1. Original order is preserved
+            // — after answering, the queue continues in display order.
+            self.pending_ui.push_front(req);
             if let Some(back) = self.pending_ui.pop_back() {
                 self.pending_ui.push_front(back);
             }
-            self.pending_ui.push_back(req);
         }
         let n = self.pending_ui.len() as i64; // ring size incl. next active
         self.q_pos = (self.q_pos as i64 + dir).rem_euclid(n) as usize;
@@ -2036,11 +2213,68 @@ impl AppState {
         }
     }
 
+    /// Rebuild `todos` from a `get_entries` response: the newest
+    /// `custom` entry whose `customType` is `todo-state` holds the
+    /// authoritative task map (the todo tool rewrites it whole on
+    /// every mutation). Returns whether the strip content changed.
+    /// This path does NOT touch `session_points` — it is the
+    /// background-hydration twin of the `/resume` `get_entries` arm.
+    pub fn hydrate_todos(&mut self, resp: &RpcResponse) -> bool {
+        let Some(entries) = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("entries"))
+            .and_then(|v| v.as_array())
+        else {
+            return false;
+        };
+        let data = entries
+            .iter()
+            .filter(|e| {
+                e.get("type").and_then(|v| v.as_str()) == Some("custom")
+                    && e.get("customType").and_then(|v| v.as_str()) == Some("todo-state")
+            })
+            .last()
+            .map(|e| e.get("data").unwrap_or(e));
+        let mut todos = Vec::new();
+        if let Some(tasks) = data
+            .and_then(|d| d.get("tasks"))
+            .and_then(|v| v.as_object())
+        {
+            for (id, raw) in tasks {
+                let status = match raw.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+                    "in_progress" | "in-progress" => TodoStatus::InProgress,
+                    "completed" | "complete" => TodoStatus::Completed,
+                    "blocked" => TodoStatus::Blocked,
+                    "deleted" => continue,
+                    _ => TodoStatus::Pending,
+                };
+                let subject = raw
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                todos.push(TodoItem {
+                    id: id.clone(),
+                    subject: clean_line(subject),
+                    status,
+                });
+            }
+        }
+        if todos == self.todos {
+            return false;
+        }
+        self.todos = todos;
+        true
+    }
+
     /// Reduce one command `RpcResponse` into state. Returns the side
     /// effect the app must perform (state refresh, clipboard write).
     /// Failure responses become system lines here too.
     pub fn apply_response(&mut self, resp: &RpcResponse) -> ResponseEffect {
         if !resp.success {
+            if resp.command == "abort" {
+                self.aborting = false;
+            }
             self.push_system(format!(
                 "{} failed: {}",
                 resp.command,
@@ -2232,7 +2466,11 @@ impl AppState {
                         .iter()
                         .map(|c| {
                             let desc = c.description.as_deref().unwrap_or("");
-                            (c.name.clone(), format!("{desc} ({})", c.source))
+                            (
+                                c.name.clone(),
+                                format!("{desc} ({})", c.source),
+                                c.source.clone(),
+                            )
                         })
                         .collect();
                     if self.commands_quiet {
@@ -2241,7 +2479,7 @@ impl AppState {
                         let lines: Vec<String> = self
                             .pi_commands
                             .iter()
-                            .map(|(name, desc)| format!("/{name} — {desc}"))
+                            .map(|(name, desc, _)| format!("/{name} — {desc}"))
                             .collect();
                         for line in lines {
                             self.push_system(line);
@@ -2335,6 +2573,16 @@ impl AppState {
         self.dom_dirty = true;
     }
 
+    /// True when `name` (without the leading `/`) is a pi-reported
+    /// command whose source is `extension`. pi's `steer`/`follow_up`
+    /// reject extension commands — they must go through `prompt`,
+    /// which executes them immediately.
+    pub fn is_extension_command(&self, name: &str) -> bool {
+        self.pi_commands
+            .iter()
+            .any(|(n, _, src)| n == name && src == "extension")
+    }
+
     /// Full `/` completion candidates: built-ins + pi commands.
     /// `display` keeps the usage string (`/model [provider/id]`).
     pub fn command_list(&self) -> Vec<CompletionItem> {
@@ -2354,7 +2602,7 @@ impl AppState {
                 }
             })
             .collect();
-        for (name, desc) in &self.pi_commands {
+        for (name, desc, _source) in &self.pi_commands {
             if !v.iter().any(|i| i.name == *name) {
                 v.push(CompletionItem {
                     name: name.clone(),
@@ -2859,5 +3107,180 @@ mod tests {
             .messages
             .iter()
             .all(|m| m.search_mark == SearchMark::None));
+    }
+
+    fn select_req(id: &str) -> RpcExtensionUIRequest {
+        RpcExtensionUIRequest::Select {
+            id: id.into(),
+            title: format!("q{id}"),
+            options: vec!["a".into(), "b".into()],
+            timeout: None,
+        }
+    }
+
+    #[test]
+    fn deferred_questions_rotate_ring_and_resolve_in_display_order() {
+        let mut state = AppState::new();
+        // Three selects arrive; first opens, rest queue.
+        state.open_ui(&select_req("1"));
+        state.open_ui(&select_req("2"));
+        state.open_ui(&select_req("3"));
+        assert!(matches!(state.dialog, Some(DialogState::Select { .. })));
+        assert_eq!(state.pending_ui.len(), 2);
+        assert_eq!(state.q_indicator().as_deref(), Some("[q 1/3]"));
+
+        // Defer to next: q2 promoted, q1 re-queues at back.
+        assert!(state.defer_question(1));
+        let Some(DialogState::Select { id, .. }) = &state.dialog else {
+            panic!("expected select dialog")
+        };
+        assert_eq!(id, "2");
+        assert_eq!(state.q_indicator().as_deref(), Some("[q 2/3]"));
+
+        // Defer to prev: q1 comes back around the ring.
+        assert!(state.defer_question(-1));
+        let Some(DialogState::Select { id, .. }) = &state.dialog else {
+            panic!("expected select dialog")
+        };
+        assert_eq!(id, "1");
+        assert_eq!(state.q_indicator().as_deref(), Some("[q 1/3]"));
+
+        // Resolving sends only the displayed question's response and
+        // promotes the next queued one.
+        state.resolve_dialog(pi_rpc::RpcExtensionUIResponse::Value {
+            id: "1".into(),
+            value: "a".into(),
+        });
+        assert!(matches!(
+            state.dialog_result,
+            Some(pi_rpc::RpcExtensionUIResponse::Value { .. })
+        ));
+        let Some(DialogState::Select { id, .. }) = &state.dialog else {
+            panic!("expected promoted select")
+        };
+        assert_eq!(id, "2");
+
+        // Drain the ring; indicator disappears when nothing is queued.
+        state.resolve_dialog(pi_rpc::RpcExtensionUIResponse::Value {
+            id: "2".into(),
+            value: "b".into(),
+        });
+        state.resolve_dialog(pi_rpc::RpcExtensionUIResponse::Value {
+            id: "3".into(),
+            value: "a".into(),
+        });
+        assert!(state.dialog.is_none());
+        assert_eq!(state.q_indicator(), None);
+    }
+
+    fn entries_response(entries: serde_json::Value) -> RpcResponse {
+        RpcResponse {
+            id: None,
+            kind: "response".into(),
+            command: "get_entries".into(),
+            success: true,
+            data: Some(serde_json::json!({ "entries": entries })),
+            error: None,
+        }
+    }
+
+    fn todo_entry(tasks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": "e1",
+            "type": "custom",
+            "customType": "todo-state",
+            "data": { "tasks": tasks }
+        })
+    }
+
+    #[test]
+    fn hydrate_todos_reads_latest_todo_state_entry() {
+        let mut state = AppState::new();
+        let resp = entries_response(serde_json::json!([
+            { "id": "e0", "type": "message" },
+            todo_entry(serde_json::json!({
+                "task-1": { "subject": "first pass", "status": "completed" },
+                "task-2": { "subject": "wip", "status": "in_progress" },
+                "task-3": { "subject": "waiting", "status": "blocked" },
+                "task-4": { "subject": "gone", "status": "deleted" },
+                "task-5": { "subject": "later", "status": "pending" }
+            }))
+        ]));
+        assert!(state.hydrate_todos(&resp));
+        assert_eq!(state.todos.len(), 4);
+        let by_id = |id: &str| state.todos.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(by_id("task-1").status, TodoStatus::Completed);
+        assert_eq!(by_id("task-2").status, TodoStatus::InProgress);
+        assert_eq!(by_id("task-3").status, TodoStatus::Blocked);
+        assert_eq!(by_id("task-5").status, TodoStatus::Pending);
+        // Same response again → no change.
+        assert!(!state.hydrate_todos(&resp));
+    }
+
+    #[test]
+    fn hydrate_todos_strips_control_chars_and_newer_entry_wins() {
+        let mut state = AppState::new();
+        let resp = entries_response(serde_json::json!([
+            todo_entry(serde_json::json!({
+                "task-1": { "subject": "stale", "status": "pending" }
+            })),
+            todo_entry(serde_json::json!({
+                "task-9": { "subject": "a\u{1b}[31mline\nbreak", "status": "in-progress" }
+            }))
+        ]));
+        assert!(state.hydrate_todos(&resp));
+        assert_eq!(state.todos.len(), 1);
+        assert_eq!(state.todos[0].id, "task-9");
+        assert_eq!(state.todos[0].status, TodoStatus::InProgress);
+        assert_eq!(state.todos[0].subject, "a[31mlinebreak");
+    }
+
+    #[test]
+    fn hydrate_todos_without_todo_entry_clears_or_keeps() {
+        let mut state = AppState::new();
+        let resp = entries_response(serde_json::json!([
+            { "id": "e0", "type": "message" }
+        ]));
+        // No todo-state entry yet → nothing rendered.
+        assert!(!state.hydrate_todos(&resp));
+        assert!(state.todos.is_empty());
+    }
+
+    #[test]
+    fn extension_commands_are_detected_by_source() {
+        let mut state = AppState::new();
+        state.pi_commands = vec![
+            ("deploy".into(), "Ship it (extension)".into(), "extension".into()),
+            ("review".into(), "Review (skill)".into(), "skill".into()),
+            ("tmpl".into(), "Tpl (prompt)".into(), "prompt".into()),
+        ];
+        assert!(state.is_extension_command("deploy"));
+        assert!(!state.is_extension_command("review"));
+        assert!(!state.is_extension_command("tmpl"));
+        assert!(!state.is_extension_command("unknown"));
+    }
+
+    #[test]
+    fn running_shells_counts_bg_and_ssh() {
+        let mut tray = TrayState::default();
+        let entry = |title: &str, kind, status| TrayEntry {
+            kind,
+            title: title.to_string(),
+            tool: "bash".into(),
+            model: String::new(),
+            color_idx: 0,
+            status,
+            tools: 0,
+            recent_tools: Vec::new(),
+            start_tick: 0,
+            end_tick: None,
+            msg_idx: 0,
+            foregrounded: false,
+        };
+        tray.entries.push(entry("tail -f log", TrayKind::Shell, TrayStatus::Running));
+        tray.entries.push(entry("ssh host uptime", TrayKind::Shell, TrayStatus::Running));
+        tray.entries.push(entry("ssh old", TrayKind::Shell, TrayStatus::Done));
+        tray.entries.push(entry("agent run", TrayKind::Subagent, TrayStatus::Running));
+        assert_eq!(tray.running_shells(), (2, 1));
     }
 }

@@ -10,6 +10,8 @@
 //!   │    ├─ .status-mode
 //!   │    ├─ .status-running
 //!   │    ├─ .status-queue
+//!   │    ├─ .status-bg
+//!   │    ├─ .status-ssh
 //!   │    └─ .status-transient
 //!   └─ #status-right
 //! ```
@@ -29,6 +31,8 @@ pub struct StatusLineHandles {
     pub mode_text: NodeId,
     pub running_text: NodeId,
     pub queue_text: NodeId,
+    pub bg_text: NodeId,
+    pub ssh_text: NodeId,
     pub transient_text: NodeId,
     pub right_text: NodeId,
 }
@@ -46,6 +50,8 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> StatusLineHandles {
     let (_, mode_text) = span_text(m, left, "status-mode", "");
     let (_, running_text) = span_text(m, left, "status-running", "");
     let (_, queue_text) = span_text(m, left, "status-queue", "");
+    let (_, bg_text) = span_text(m, left, "status-bg", "");
+    let (_, ssh_text) = span_text(m, left, "status-ssh", "");
     let (_, transient_text) = span_text(m, left, "status-transient", "");
     let (right_span, right_text) = span_text(m, line, "", "");
     m.set_attribute(right_span, qual("id"), "status-right");
@@ -58,6 +64,8 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> StatusLineHandles {
         mode_text,
         running_text,
         queue_text,
+        bg_text,
+        ssh_text,
         transient_text,
         right_text,
     }
@@ -117,6 +125,8 @@ pub fn sync(
     streaming: bool,
     permission: PermissionMode,
     queued: usize,
+    bg: usize,
+    ssh: usize,
 ) {
     let mut populated = false;
     set_segment(m, handles.model_text, &status.model, &mut populated);
@@ -158,6 +168,26 @@ pub fn sync(
         handles.queue_text,
         if queued > 0 {
             format!("{queued} queued")
+        } else {
+            String::new()
+        },
+        &mut populated,
+    );
+    set_segment(
+        m,
+        handles.bg_text,
+        if bg > 0 {
+            format!("bg {bg}")
+        } else {
+            String::new()
+        },
+        &mut populated,
+    );
+    set_segment(
+        m,
+        handles.ssh_text,
+        if ssh > 0 {
+            format!("ssh {ssh}")
         } else {
             String::new()
         },

@@ -26,7 +26,7 @@ use syntect::highlighting::ScopeSelectors;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
 use crate::components::dom::{div, qual, span_text};
-use crate::components::glyphs::{GlyphMode, status_glyph};
+use crate::components::glyphs::{status_glyph, GlyphMode};
 use crate::state::Message;
 
 /// Output lines shown when the card is collapsed.
@@ -88,7 +88,11 @@ pub fn mime_to_lang(s: &str) -> Option<&'static str> {
 
 /// Guess the output language for a tool call from its name, args, and
 /// result (`mime`/`language`/`path` fields, file extensions).
-pub fn detect_lang(tool_name: &str, args: &serde_json::Value, result: &serde_json::Value) -> Option<&'static str> {
+pub fn detect_lang(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &serde_json::Value,
+) -> Option<&'static str> {
     // Explicit fields on the result win.
     for v in [result, args] {
         for key in ["mime", "mimeType", "language", "lang"] {
@@ -283,10 +287,7 @@ pub fn looks_like_diff(text: &str) -> bool {
 fn diff_class(line: &str, is_file_header: bool) -> &'static str {
     if line.starts_with("@@") {
         "diff-line-hunk"
-    } else if is_file_header
-        || line.starts_with("diff --git")
-        || line.starts_with("Index: ")
-    {
+    } else if is_file_header || line.starts_with("diff --git") || line.starts_with("Index: ") {
         "diff-line-file"
     } else if line.starts_with('-') {
         "diff-line-delete"
@@ -299,10 +300,7 @@ fn diff_class(line: &str, is_file_header: bool) -> &'static str {
 
 /// Common prefix length (chars) of `a`/`b` after the leading +/- sigil.
 fn common_prefix(a: &str, b: &str) -> usize {
-    a.chars()
-        .zip(b.chars())
-        .take_while(|(x, y)| x == y)
-        .count()
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
 /// Common suffix length (chars) of `a`/`b`, not overlapping `prefix`.
@@ -495,12 +493,14 @@ pub fn tool_target(args: &serde_json::Value) -> String {
     get(&["path", "file", "file_path", "filePath", "filename"])
         .or_else(|| get(&["pattern", "query", "glob"]).map(|q| format!("\"{q}\"")))
         .or_else(|| get(&["url", "uri"]))
-        .or_else(|| get(&["command", "cmd"]).map(|c| {
-            c.lines().next().unwrap_or("").chars().take(80).collect()
-        }))
-        .or_else(|| get(&["description", "prompt", "name", "task"]).map(|d| {
-            d.lines().next().unwrap_or("").chars().take(60).collect()
-        }))
+        .or_else(|| {
+            get(&["command", "cmd"])
+                .map(|c| c.lines().next().unwrap_or("").chars().take(80).collect())
+        })
+        .or_else(|| {
+            get(&["description", "prompt", "name", "task"])
+                .map(|d| d.lines().next().unwrap_or("").chars().take(60).collect())
+        })
         .unwrap_or_default()
 }
 
@@ -517,6 +517,8 @@ pub fn tool_display(tool_name: &str, args: Option<&serde_json::Value>, fallback:
         "fetch" | "web_fetch" | "curl" | "http" => "Fetched",
         "task" | "agent" | "subagent" | "teammate" => "Spawned agent",
         "todo" | "plan" => "Updated plan",
+        "new_context" | "new-context" => "New context",
+        "compact" | "compact_context" | "compaction" => "Compacted context",
         _ => "",
     };
     let target = args

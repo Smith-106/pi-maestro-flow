@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::commands::{self, Command, LocalCmd};
 use crate::components::{
-    completion, dialog, input_box, message_list, select, spinner, status_line,
+    completion, dialog, input_box, message_list, select, spinner, status_line, todo,
 };
 use crate::state::{
     agent_message_text, AppState, DialogState, LocalAction, MsgKind, ResponseEffect,
@@ -56,7 +56,18 @@ pub struct DomHandles {
     pub messages_inner: blitz_dom::NodeId,
     /// `#scrollbar` thumb element (geometry synced in `apply_scroll`).
     pub scrollbar_thumb: blitz_dom::NodeId,
+    /// `.messages-wrap` row (hidden while the trace overlay is open).
+    pub messages_wrap: blitz_dom::NodeId,
+    /// `#trace` full-viewport thinking overlay (hidden unless open).
+    pub trace: blitz_dom::NodeId,
+    /// The single text node inside `#trace`.
+    pub trace_text: blitz_dom::NodeId,
     pub spinner: spinner::SpinnerHandles,
+    /// `#queue-area` — queued follow-ups between the working status
+    /// line and the input (top border separates it from the status).
+    pub queue_area: blitz_dom::NodeId,
+    /// `#todo-area` — persistent todo strip below the queue area.
+    pub todo_area: blitz_dom::NodeId,
     pub dialog_area: blitz_dom::NodeId,
     pub widget_area: blitz_dom::NodeId,
     pub input_hint_text: blitz_dom::NodeId,
@@ -82,6 +93,9 @@ pub struct App {
     /// Height of the `#messages` viewport from the last frame (for
     /// PageUp/PageDown scroll math).
     messages_view_h: u32,
+    /// Rendered state of the thinking-trace overlay (mirrors
+    /// `state.trace_open` after the display swap is applied).
+    trace_open: bool,
     /// Outbound command results / async notices.
     notice_rx: mpsc::UnboundedReceiver<String>,
     notice_tx: mpsc::UnboundedSender<String>,
@@ -103,6 +117,7 @@ pub struct App {
     /// when their inputs haven't changed.
     dialog_sig: u64,
     completion_sig: u64,
+    todo_sig: u64,
     /// Signatures of the text-mutating syncs — decide whether
     /// `doc.resolve` is needed at all this frame.
     input_sig: u64,
@@ -179,11 +194,13 @@ impl App {
             last_viewport: (0, 0),
             dialog_sig: u64::MAX,
             completion_sig: u64::MAX,
+            todo_sig: u64::MAX,
             input_sig: u64::MAX,
             spinner_sig: u64::MAX,
             status_sig: u64::MAX,
             surface_spare: None,
             painted_scroll: 0,
+            trace_open: false,
         }
     }
 
@@ -212,16 +229,16 @@ impl App {
         s.finish()
     }
 
-    /// Signature of the spinner inputs (active/frame/dots/hint).
-    /// `tick` itself isn't hashed — only the derived frame/dots, so an
+    /// Signature of the spinner inputs (active/frame/hint).
+    /// `tick` itself isn't hashed — only the derived frame, so an
     /// idle tick doesn't force a resolve.
     fn spinner_signature(state: &AppState) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut s = std::collections::hash_map::DefaultHasher::new();
         state.streaming.hash(&mut s);
-        if state.streaming {
+        state.aborting.hash(&mut s);
+        if state.streaming || state.aborting {
             (state.tick / spinner::SPINNER_FRAME_TICKS).hash(&mut s); // glyph frame
-            ((state.tick / spinner::SPINNER_DOT_TICKS) % 3).hash(&mut s); // dots
         }
         s.finish()
     }
@@ -239,6 +256,7 @@ impl App {
         state.streaming.hash(&mut s);
         state.permission.label().hash(&mut s);
         state.queued.len().hash(&mut s);
+        state.tray.running_shells().hash(&mut s);
         s.finish()
     }
 
@@ -425,6 +443,8 @@ impl App {
                 self.state.push_system(format!("get_state failed: {e}"));
             }
         }
+        // Initial todo hydration — durable state survives reloads.
+        self.fetch_todos();
     }
 
     /// Reduce one RPC event; returns whether a repaint is needed.
@@ -447,6 +467,15 @@ impl App {
             }
         }
         let dirty = self.state.apply_event(&ev);
+        // A settled todo call rewrites the durable `todo-state` entry —
+        // rehydrate the strip in the background.
+        if matches!(
+            &ev,
+            RpcEvent::Agent(AgentEvent::ToolExecutionEnd { tool_name, .. })
+                if tool_name.eq_ignore_ascii_case("todo")
+        ) {
+            self.fetch_todos();
+        }
         // Flush any dialog response queued by the reducer (e.g. a queued
         // request promoted after a resolve).
         self.flush_dialog_result();
@@ -728,6 +757,10 @@ impl App {
         // Dialogs capture all keys while active.
         if self.state.dialog.is_some() {
             return self.handle_dialog_key(key);
+        }
+        // Thinking-trace overlay (Alt+T) is modal while open.
+        if self.state.trace_open {
+            return self.handle_trace_key(key);
         }
         // Scrollback search (Ctrl+S) is modal like the tray.
         if self.state.search.is_some() {
@@ -1012,6 +1045,7 @@ impl App {
                         .is_some_and(|t| t.elapsed() < ESC_INTERRUPT_WINDOW);
                     if armed {
                         self.last_esc = None;
+                        self.state.aborting = true;
                         self.send_cmd(RpcCommand::Abort);
                     } else {
                         self.last_esc = Some(Instant::now());
@@ -1077,6 +1111,13 @@ impl App {
             // Ctrl+S: scrollback search (Ctrl+F is Emacs move-right).
             (KeyCode::Char('s'), true, _) => {
                 self.state.search = Some(crate::state::SearchState::default());
+                self.state.dom_dirty = true;
+                true
+            }
+            // F3: thinking-trace overlay (Devin `alt_screen`).
+            (KeyCode::F(3), _, _) => {
+                self.state.trace_open = true;
+                self.state.trace_scroll = u32::MAX; // clamped to bottom
                 self.state.dom_dirty = true;
                 true
             }
@@ -1518,6 +1559,33 @@ impl App {
         true
     }
 
+    /// Key handling while the thinking-trace overlay is open:
+    /// scroll only; Esc/Alt+T close back to the conversation.
+    fn handle_trace_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(3) => {
+                self.state.trace_open = false;
+            }
+            KeyCode::Up => {
+                self.state.trace_scroll = self.state.trace_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.state.trace_scroll = self.state.trace_scroll.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                let page = self.messages_view_h.max(1);
+                self.state.trace_scroll = self.state.trace_scroll.saturating_sub(page);
+            }
+            KeyCode::PageDown => {
+                let page = self.messages_view_h.max(1);
+                self.state.trace_scroll = self.state.trace_scroll.saturating_add(page);
+            }
+            _ => {}
+        }
+        self.state.dom_dirty = true;
+        true
+    }
+
     /// Scroll the message list so `msg_idx`'s bubble is at the top.
     /// `state.scroll` is a bottom-anchored offset (0 = tail), so the
     /// target is `content_height - (bubble height + heights below)`.
@@ -1549,6 +1617,10 @@ impl App {
 
     /// The `#input-hint` line for this frame.
     fn input_hint(state: &AppState) -> String {
+        // Trace overlay replaces the hint while open.
+        if state.trace_open {
+            return "thinking trace — ↑↓/pgup/pgdn scroll · esc/f3 close".to_string();
+        }
         // Scrollback search bar replaces the hint while open.
         if let Some(s) = &state.search {
             return match s.matches.len() {
@@ -1611,16 +1683,32 @@ impl App {
 
     /// Submit the current input: slash commands are handled locally,
     /// everything else goes to pi as a `prompt`.
+    ///
+    /// While streaming, the first Enter on text queues it as a
+    /// follow-up (default), a second Enter on empty input steers every
+    /// queued message, and a third interrupts the run (Devin ladder).
     fn submit_input(&mut self) {
         let text = self.state.input.take_submitted();
         if text.trim().is_empty() {
+            if self.state.streaming {
+                if self.state.queued.is_empty() {
+                    self.send_cmd(RpcCommand::Abort);
+                } else {
+                    let queued = std::mem::take(&mut self.state.queued);
+                    self.send_cmd(RpcCommand::ClearQueue);
+                    for q in queued {
+                        self.send_cmd(RpcCommand::Steer {
+                            message: q.text,
+                            images: None,
+                        });
+                    }
+                    self.state.dom_dirty = true;
+                }
+            }
             return;
         }
         match commands::parse(&text) {
             Command::Prompt(p) => {
-                // Local echo (deduped against message_start).
-                self.state.push_user(p.clone());
-                self.state.follow_tail = true;
                 // Attached images (Ctrl+V) ride along with the prompt.
                 let images = if self.state.attachments.is_empty() {
                     None
@@ -1638,8 +1726,60 @@ impl App {
                 };
                 self.state.attachment_sel = None;
                 if self.state.streaming {
-                    self.send_cmd(streaming_input_command(self.state.steering_mode, p, images));
+                    let mode = self
+                        .state
+                        .steering_mode
+                        .unwrap_or(StreamingBehavior::FollowUp);
+                    let slash_name = p
+                        .strip_prefix('/')
+                        .and_then(|b| b.split(char::is_whitespace).next())
+                        .unwrap_or("");
+                    let is_ext = self.state.is_extension_command(slash_name);
+                    let cmd = if is_ext {
+                        // Extension commands can't queue — `prompt`
+                        // executes them immediately, before pi's
+                        // streaming check.
+                        RpcCommand::Prompt {
+                            message: p.clone(),
+                            images,
+                            streaming_behavior: None,
+                        }
+                    } else if p.starts_with('/') {
+                        // Skill/template/unknown slash input: `prompt`
+                        // expands it server-side, `streamingBehavior`
+                        // keeps the queue/steer semantics for
+                        // non-command text.
+                        RpcCommand::Prompt {
+                            message: p.clone(),
+                            images,
+                            streaming_behavior: Some(mode),
+                        }
+                    } else {
+                        streaming_input_command(self.state.steering_mode, p.clone(), images)
+                    };
+                    // A queued follow-up stays out of the transcript
+                    // until its message_start — the queue list is its
+                    // echo. Steer messages deliver now, so echo now.
+                    // Extension commands produce no user message on pi's
+                    // side — echoing them would litter the stream.
+                    if !is_ext && mode == StreamingBehavior::Steer {
+                        self.state.push_user(p);
+                        self.state.follow_tail = true;
+                    }
+                    self.send_cmd(cmd);
                 } else {
+                    // Local echo (deduped against message_start).
+                    // Extension commands never produce a user message —
+                    // pi swallows them server-side — so skip the echo.
+                    let is_ext = p
+                        .strip_prefix('/')
+                        .and_then(|b| b.split(char::is_whitespace).next())
+                        .map(|name| self.state.is_extension_command(name))
+                        .unwrap_or(false);
+                    if !is_ext {
+                        self.state.push_user(p.clone());
+                        self.state.follow_tail = true;
+                    }
                     self.send_cmd(RpcCommand::Prompt {
                         message: p,
                         images,
@@ -1760,18 +1900,26 @@ impl App {
             }
             // /unqueue: recall the last queued message into the input.
             // pi only exposes `clear_queue`, so we clear then re-queue
-            // the remaining messages as follow-ups.
+            // the remaining messages in their own mode.
             LocalCmd::Unqueue => {
                 if let Some(last) = self.state.queued.pop() {
                     let rest = std::mem::take(&mut self.state.queued);
                     self.send_cmd(RpcCommand::ClearQueue);
-                    for msg in rest {
-                        self.send_cmd(RpcCommand::FollowUp {
-                            message: msg,
-                            images: None,
+                    for q in rest {
+                        // Re-queue each remaining message in its own mode.
+                        self.send_cmd(if q.steering {
+                            RpcCommand::Steer {
+                                message: q.text,
+                                images: None,
+                            }
+                        } else {
+                            RpcCommand::FollowUp {
+                                message: q.text,
+                                images: None,
+                            }
                         });
                     }
-                    self.state.input.text = last;
+                    self.state.input.text = last.text;
                     self.state.input.cursor = self.state.input.text.len();
                     self.state.dom_dirty = true;
                 } else {
@@ -1972,8 +2120,27 @@ impl App {
         });
     }
 
+    /// Background `get_entries` fetch for the todo strip. The response
+    /// is re-tagged `todo_entries` so `handle_cmd_response` hydrates
+    /// `state.todos` instead of routing it into the `/resume` picker
+    /// (which shares the same wire command).
+    fn fetch_todos(&mut self) {
+        let rpc = Arc::clone(&self.rpc);
+        let tx = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut resp) = rpc.send(&RpcCommand::GetEntries { since: None }).await {
+                resp.command = "todo_entries".into();
+                let _ = tx.send(resp);
+            }
+        });
+    }
+
     /// Reduce a slash-command response: state reducer + side effects.
     fn handle_cmd_response(&mut self, resp: RpcResponse) -> bool {
+        // Background todo fetches never reach apply_response.
+        if resp.command == "todo_entries" {
+            return self.state.hydrate_todos(&resp);
+        }
         match self.state.apply_response(&resp) {
             ResponseEffect::RefreshState => {
                 // Fire-and-forget: the get_state response comes back on
@@ -2059,6 +2226,11 @@ impl App {
         if let Some(title) = self.state.term_title.take() {
             out.push_str(&format!("\x1b]2;{title}\x07"));
         }
+        // agent_end → OSC 9 desktop notification (iTerm2/Windows Terminal;
+        // terminals that don't know it ignore the sequence).
+        if let Some(note) = self.state.term_notify.take() {
+            out.push_str(&format!("\x1b]9;{note}\x07"));
+        }
 
         let mut stdout = io::stdout().lock();
         stdout.write_all(out.as_bytes())?;
@@ -2082,16 +2254,21 @@ impl App {
     pub fn paint_frame_at(&mut self, w: u16, h: u16) -> Option<Surface> {
         let dialog_sig = dialog::signature(&self.state);
         let completion_sig = completion::signature(&self.state);
+        let todo_sig = todo::signature(&self.state);
         let input_sig = Self::input_signature(&self.state);
         let spinner_sig = Self::spinner_signature(&self.state);
         let status_sig = Self::status_signature(&self.state);
+        let trace_sig = self.state.trace_signature();
         let mut layout_dirty = self.state.dom_dirty
             || self.state.needs_rebuild
             || input_sig != self.input_sig
             || spinner_sig != self.spinner_sig
             || status_sig != self.status_sig
             || dialog_sig != self.dialog_sig
-            || completion_sig != self.completion_sig;
+            || completion_sig != self.completion_sig
+            || todo_sig != self.todo_sig
+            || trace_sig != self.state.trace_sig
+            || self.trace_open != self.state.trace_open;
 
         // Fully unchanged frame: no DOM mutation, same size, same
         // scroll, and the renderer has nothing pending — the previous
@@ -2128,6 +2305,7 @@ impl App {
                 self.input_sig = input_sig;
             }
             if status_sig != self.status_sig {
+                let (bg, ssh) = self.state.tray.running_shells();
                 status_line::sync(
                     &mut m,
                     &self.handles.status,
@@ -2135,6 +2313,8 @@ impl App {
                     self.state.streaming,
                     self.state.permission,
                     self.state.queued.len(),
+                    bg,
+                    ssh,
                 );
                 self.status_sig = status_sig;
             }
@@ -2142,9 +2322,10 @@ impl App {
                 spinner::sync(
                     &mut m,
                     &self.handles.spinner,
-                    self.state.streaming,
+                    self.state.streaming || self.state.aborting,
                     self.state.tick,
-                    "esc to interrupt",
+                    if self.state.aborting { "Interrupting" } else { "Thinking" },
+                    if self.state.aborting { "" } else { "esc to interrupt" },
                     self.state.glyphs,
                     &self.theme.fusion(),
                 );
@@ -2155,10 +2336,20 @@ impl App {
                     &mut m,
                     self.handles.dialog_area,
                     self.handles.widget_area,
+                    self.handles.queue_area,
                     &self.state,
                     self.state.glyphs,
                 );
                 self.dialog_sig = dialog_sig;
+            }
+            if todo_sig != self.todo_sig {
+                todo::sync(
+                    &mut m,
+                    self.handles.todo_area,
+                    &self.state,
+                    self.state.glyphs,
+                );
+                self.todo_sig = todo_sig;
             }
             if completion_sig != self.completion_sig {
                 completion::sync(
@@ -2169,6 +2360,17 @@ impl App {
                 );
                 self.completion_sig = completion_sig;
             }
+
+            // Thinking-trace overlay (F3): swap #messages-wrap for
+            // #trace; content rebuilds only when thinking text changes.
+            message_list::sync_trace(
+                &mut m,
+                self.handles.messages_wrap,
+                self.handles.trace,
+                self.handles.trace_text,
+                &mut self.state,
+                &mut self.trace_open,
+            );
 
             // 2. Pin #app to the terminal size only when it changed
             //    (set_style_property parses + marks restyle damage).
@@ -2198,13 +2400,30 @@ impl App {
             self.doc.resolve(0.0);
         }
 
-        // 4. Scroll clamp + write.
+        // 4. Scroll clamp + write (messages + trace overlay).
         message_list::apply_scroll(
             &mut self.doc,
             self.handles.messages,
             self.handles.scrollbar_thumb,
             &mut self.state,
         );
+        if self.state.trace_open {
+            let (content_h, view_h) = self
+                .doc
+                .get_node(self.handles.trace)
+                .map(|n| {
+                    (
+                        n.scrollable_overflow().height(),
+                        n.final_layout().size.height as f64,
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+            let max = (content_h - view_h).max(0.0);
+            self.state.trace_scroll = (self.state.trace_scroll as f64).min(max) as u32;
+            if let Some(node) = self.doc.get_node_mut(self.handles.trace) {
+                node.scroll_offset_mut().y = self.state.trace_scroll as f64;
+            }
+        }
         self.painted_scroll = self.state.scroll;
         self.messages_view_h = self
             .doc
@@ -2399,8 +2618,18 @@ pub fn build_skeleton(doc: &mut BaseDocument) -> DomHandles {
     let app = div(&mut m, body, "");
     m.set_attribute(app, qual("id"), "app");
 
-    let (messages, messages_inner, scrollbar_thumb) = message_list::build(&mut m, app);
+    let (messages_wrap, messages, messages_inner, scrollbar_thumb) =
+        message_list::build(&mut m, app);
+    // Thinking-trace overlay: sibling of the wrap, hidden by default.
+    let trace = div(&mut m, app, "");
+    m.set_attribute(trace, qual("id"), "trace");
+    let trace_text = m.create_text_node("");
+    m.append_children(trace, &[trace_text]);
     let spinner = spinner::build(&mut m, app);
+    let queue_area = div(&mut m, app, "");
+    m.set_attribute(queue_area, qual("id"), "queue-area");
+    let todo_area = div(&mut m, app, "");
+    m.set_attribute(todo_area, qual("id"), "todo-area");
     let (dialog_area, widget_area) = dialog::build(&mut m, app);
     let (_area, hint_text, input_text) = input_box::build(&mut m, app);
     let completion_area = completion::build(&mut m, app);
@@ -2414,7 +2643,12 @@ pub fn build_skeleton(doc: &mut BaseDocument) -> DomHandles {
         messages,
         messages_inner,
         scrollbar_thumb,
+        messages_wrap,
+        trace,
+        trace_text,
         spinner,
+        queue_area,
+        todo_area,
         dialog_area,
         widget_area,
         input_hint_text: hint_text,

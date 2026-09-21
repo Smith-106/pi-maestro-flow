@@ -22,10 +22,11 @@ use crate::state::{AppState, Message, MsgKind};
 
 /// Build the `#messages` container under `parent`, wrapped in a
 /// `.messages-wrap` row with a 1-cell `#scrollbar` track.
-/// Returns `(container, container, thumb)` — bubbles append directly;
-/// content flows top-down and `scroll_offset` on the container scrolls
-/// it. `data-hit-scroll` marks the region for mouse wheel routing.
-pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId, NodeId) {
+/// Returns `(wrap, container, container, thumb)` — bubbles append
+/// directly; content flows top-down and `scroll_offset` on the
+/// container scrolls it. `data-hit-scroll` marks the region for mouse
+/// wheel routing.
+pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId, NodeId, NodeId) {
     let wrap = div(m, parent, "messages-wrap");
     let container = div(m, wrap, "");
     m.set_attribute(container, qual("id"), "messages");
@@ -33,7 +34,7 @@ pub fn build(m: &mut DocumentMutator<'_>, parent: NodeId) -> (NodeId, NodeId, No
     let track = div(m, wrap, "");
     m.set_attribute(track, qual("id"), "scrollbar");
     let thumb = div(m, track, "scrollbar-thumb");
-    (container, container, thumb)
+    (wrap, container, container, thumb)
 }
 
 /// Rebuild every message bubble under `inner` from `state.messages`.
@@ -106,7 +107,14 @@ fn bubble_class(msg: &Message, tray_entries: &[crate::state::TrayEntry]) -> Stri
     class
 }
 
-fn append_bubble(m: &mut DocumentMutator<'_>, inner: NodeId, msg: &mut Message, tick: u64, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
+fn append_bubble(
+    m: &mut DocumentMutator<'_>,
+    inner: NodeId,
+    msg: &mut Message,
+    tick: u64,
+    glyphs: crate::components::glyphs::GlyphMode,
+    tray_entries: &[crate::state::TrayEntry],
+) {
     let class = bubble_class(msg, tray_entries);
     let bubble = m.create_element(qual("div"), vec![attr("class", &class)]);
     m.append_children(inner, &[bubble]);
@@ -167,7 +175,13 @@ fn build_thinking(m: &mut DocumentMutator<'_>, bubble: NodeId, msg: &mut Message
 
 /// Re-render a bubble's children in place (markdown re-render / tool
 /// card state change). Keeps the bubble node itself.
-fn rebuild_bubble(m: &mut DocumentMutator<'_>, msg: &mut Message, tick: u64, glyphs: crate::components::glyphs::GlyphMode, tray_entries: &[crate::state::TrayEntry]) {
+fn rebuild_bubble(
+    m: &mut DocumentMutator<'_>,
+    msg: &mut Message,
+    tick: u64,
+    glyphs: crate::components::glyphs::GlyphMode,
+    tray_entries: &[crate::state::TrayEntry],
+) {
     let Some(bubble) = msg.node_id else { return };
     crate::components::dom::drop_children(m, bubble);
     match msg.kind {
@@ -328,6 +342,38 @@ fn build_action_bar(m: &mut DocumentMutator<'_>, bubble: NodeId) -> NodeId {
     bar
 }
 
+/// Sync the thinking-trace overlay (F3): swaps `#messages-wrap` for
+/// `#trace` when `state.trace_open` diverges from `rendered_open`, and
+/// rewrites the trace text when `state.trace_signature()` changed
+/// (streamed thinking appends grow the len).
+pub fn sync_trace(
+    m: &mut DocumentMutator<'_>,
+    wrap: NodeId,
+    trace: NodeId,
+    trace_text: NodeId,
+    state: &mut AppState,
+    rendered_open: &mut bool,
+) {
+    if *rendered_open != state.trace_open {
+        m.set_style_property(
+            wrap,
+            "display",
+            if state.trace_open { "none" } else { "flex" },
+        );
+        m.set_style_property(
+            trace,
+            "display",
+            if state.trace_open { "flex" } else { "none" },
+        );
+        *rendered_open = state.trace_open;
+    }
+    let sig = state.trace_signature();
+    if state.trace_open && sig != state.trace_sig {
+        m.set_node_text(trace_text, &state.thinking_trace());
+        state.trace_sig = sig;
+    }
+}
+
 /// Clamp `state.scroll` to the valid range for the current layout and
 /// write it into the `#messages` node's `scroll_offset`. Also syncs the
 /// `#scrollbar` thumb (height ∝ view/content, top ∝ scroll/max_scroll),
@@ -342,7 +388,9 @@ pub fn apply_scroll(
     state: &mut AppState,
 ) {
     let (content_h, view_h) = {
-        let Some(node) = doc.get_node(container) else { return };
+        let Some(node) = doc.get_node(container) else {
+            return;
+        };
         let overflow = node.scrollable_overflow();
         let content_h = overflow.height();
         let view_h = node.final_layout().size.height as f64;

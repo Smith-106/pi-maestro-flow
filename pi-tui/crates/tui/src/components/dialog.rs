@@ -44,6 +44,7 @@ pub fn signature(state: &AppState) -> u64 {
     for toast in &state.toasts {
         toast.text.hash(&mut s);
     }
+    state.q_indicator().hash(&mut s);
     match &state.dialog {
         None => 0u8.hash(&mut s),
         Some(DialogState::Select { .. }) | Some(DialogState::Local { .. }) => {
@@ -74,7 +75,10 @@ pub fn signature(state: &AppState) -> u64 {
             input.cursor.hash(&mut s);
         }
         Some(DialogState::Plugin {
-            spec, frame, cursor, ..
+            spec,
+            frame,
+            cursor,
+            ..
         }) => {
             5u8.hash(&mut s);
             spec.title.hash(&mut s);
@@ -89,7 +93,8 @@ pub fn signature(state: &AppState) -> u64 {
         }
     }
     for q in &state.queued {
-        q.hash(&mut s);
+        q.text.hash(&mut s);
+        q.steering.hash(&mut s);
     }
     if state.tray.open {
         true.hash(&mut s);
@@ -121,12 +126,13 @@ pub fn signature(state: &AppState) -> u64 {
     s.finish()
 }
 
-/// Sync the dialog + widget areas from state. Rebuilds children each
-/// call (dialogs are small; rebuild-on-dirty keeps it simple).
+/// Sync the dialog + widget + queue areas from state. Rebuilds children
+/// each call (dialogs are small; rebuild-on-dirty keeps it simple).
 pub fn sync(
     m: &mut DocumentMutator<'_>,
     area: NodeId,
     widget_area: NodeId,
+    queue_area: NodeId,
     state: &AppState,
     mode: GlyphMode,
 ) {
@@ -141,13 +147,37 @@ pub fn sync(
         match dialog {
             DialogState::Select { .. } | DialogState::Local { .. } => {}
             DialogState::Plugin { .. } => crate::components::overlay::render(m, area, dialog),
-            _ => render_dialog(m, area, dialog, mode),
+            _ => {
+                // Queued-question indicator (Devin user_question nav).
+                if let Some(q) = state.q_indicator() {
+                    let row = div(m, area, "dialog-q-indicator");
+                    span_text(m, row, "", &format!("{q} alt+←/→ navigate questions"));
+                }
+                render_dialog(m, area, dialog, mode)
+            }
         }
     }
-    // Queued (follow-up) messages: dimmed lines above the input.
-    for q in &state.queued {
-        let row = div(m, area, "queued-line");
-        span_text(m, row, "", &format!("queued: {}", q.lines().next().unwrap_or("")));
+    // Queued (follow-up) messages: dimmed list between the working
+    // status line and the input, ruled off from it by #queue-area's
+    // top border. Hidden while the queue is empty.
+    crate::components::dom::drop_children(m, queue_area);
+    if state.queued.is_empty() {
+        m.set_style_property(queue_area, "display", "none");
+    } else {
+        m.set_style_property(queue_area, "display", "flex");
+        for q in &state.queued {
+            let row = div(m, queue_area, "queued-line");
+            span_text(
+                m,
+                row,
+                "",
+                &format!(
+                    "{}: {}",
+                    if q.steering { "steering" } else { "queued" },
+                    q.text.lines().next().unwrap_or("")
+                ),
+            );
+        }
     }
     if state.tray.open {
         tray::render(m, area, &state.tray, state.tick, &state.messages);
@@ -162,12 +192,7 @@ pub fn sync(
     }
 }
 
-fn render_dialog(
-    m: &mut DocumentMutator<'_>,
-    area: NodeId,
-    dialog: &DialogState,
-    mode: GlyphMode,
-) {
+fn render_dialog(m: &mut DocumentMutator<'_>, area: NodeId, dialog: &DialogState, mode: GlyphMode) {
     match dialog {
         DialogState::Select { sel, .. } | DialogState::Local { sel, .. } => {
             select::render(m, area, sel, mode);
@@ -252,5 +277,3 @@ fn render_dialog(
         DialogState::Plugin { .. } => {}
     }
 }
-
-

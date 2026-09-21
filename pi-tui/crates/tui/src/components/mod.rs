@@ -13,5 +13,6 @@ pub mod overlay;
 pub mod select;
 pub mod spinner;
 pub mod status_line;
+pub mod todo;
 pub mod tool_card;
 pub mod tray;

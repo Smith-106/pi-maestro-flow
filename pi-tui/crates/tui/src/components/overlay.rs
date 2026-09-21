@@ -23,10 +23,7 @@ use crate::state::DialogState;
 
 /// Render the active plugin overlay into `#dialog-area`.
 pub fn render(m: &mut DocumentMutator<'_>, area: NodeId, dialog: &DialogState) {
-    let DialogState::Plugin {
-        spec, frame, ..
-    } = dialog
-    else {
+    let DialogState::Plugin { spec, frame, .. } = dialog else {
         return;
     };
 
@@ -42,7 +39,15 @@ pub fn render(m: &mut DocumentMutator<'_>, area: NodeId, dialog: &DialogState) {
 
     for row in frame {
         let selected = row.iter().any(|s| s.role == Some(Role::Selected));
-        let r = div(m, card, if selected { "ov-row selected" } else { "ov-row" });
+        let r = div(
+            m,
+            card,
+            if selected {
+                "ov-row selected"
+            } else {
+                "ov-row"
+            },
+        );
         for s in row {
             render_span(m, r, s);
         }

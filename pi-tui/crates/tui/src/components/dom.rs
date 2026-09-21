@@ -1,6 +1,6 @@
 //! Small helpers for programmatic DOM construction via `DocumentMutator`.
 
-use blitz_dom::{Attribute, DocumentMutator, LocalName, Namespace, NodeId, QualName, ns};
+use blitz_dom::{ns, Attribute, DocumentMutator, LocalName, Namespace, NodeId, QualName};
 
 /// `QualName` for an HTML element/attribute local name.
 pub fn qual(local: &str) -> QualName {

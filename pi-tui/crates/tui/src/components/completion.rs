@@ -39,9 +39,9 @@ pub fn signature(state: &AppState) -> u64 {
     let mut s = std::collections::hash_map::DefaultHasher::new();
     state.tray.open.hash(&mut s);
     match &state.dialog {
-        Some(DialogState::Select { sel, .. })
-        | Some(DialogState::Local { sel, .. }) => {
+        Some(DialogState::Select { sel, .. }) | Some(DialogState::Local { sel, .. }) => {
             sel.title.hash(&mut s);
+            state.q_indicator().hash(&mut s);
             sel.cursor.hash(&mut s);
             sel.scroll.hash(&mut s);
             sel.filter.hash(&mut s);
@@ -69,21 +69,19 @@ pub fn signature(state: &AppState) -> u64 {
 }
 
 /// Sync the completion list (rebuilt each frame while open).
-pub fn sync(
-    m: &mut DocumentMutator<'_>,
-    area: NodeId,
-    state: &AppState,
-    mode: GlyphMode,
-) {
+pub fn sync(m: &mut DocumentMutator<'_>, area: NodeId, state: &AppState, mode: GlyphMode) {
     crate::components::dom::drop_children(m, area);
     if state.tray.open {
         return;
     }
     // Select/Local pickers live below the input (native pi style).
     if let Some(dialog) = &state.dialog {
-        if let DialogState::Select { sel, .. } | DialogState::Local { sel, .. } =
-            dialog
-        {
+        if let DialogState::Select { sel, .. } | DialogState::Local { sel, .. } = dialog {
+            // Queued-question indicator (Devin user_question nav).
+            if let Some(q) = state.q_indicator() {
+                let row = div(m, area, "completion-q-indicator");
+                span_text(m, row, "", &format!("{q} alt+←/→ navigate questions"));
+            }
             select::render(m, area, sel, mode);
         }
         return;
@@ -113,7 +111,12 @@ pub fn sync(
         );
         m.set_attribute(row, qual("data-hit-idx"), &i.to_string());
         let marker = if selected { "●" } else { "○" };
-        span_text(m, row, "completion-label", &format!("{marker} {}", item.display));
+        span_text(
+            m,
+            row,
+            "completion-label",
+            &format!("{marker} {}", item.display),
+        );
         if !item.desc.is_empty() {
             span_text(m, row, "completion-desc", &format!("  {}", item.desc));
         }

@@ -8,7 +8,7 @@
 //! `element_data().inline_layout_data`.
 
 use blitz_dom::{
-    Attribute, BaseDocument, DocumentConfig, LocalName, Namespace, NodeId, QualName, ns,
+    ns, Attribute, BaseDocument, DocumentConfig, LocalName, Namespace, NodeId, QualName,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
 

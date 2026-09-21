@@ -6,11 +6,13 @@ use std::time::Instant;
 
 use blitz_dom::{BaseDocument, DocumentConfig};
 use blitz_traits::shell::Viewport;
-use scrollback::{PaintContext, Surface, paint_document};
 use pi_fluent_tui::app;
-use pi_fluent_tui::components::{completion, dialog, input_box, message_list, spinner, status_line};
+use pi_fluent_tui::components::{
+    completion, dialog, input_box, message_list, spinner, status_line, todo,
+};
 use pi_fluent_tui::state::{AppState, DialogState, MsgKind};
 use pi_fluent_tui::theme::{self, ThemeKind};
+use scrollback::{paint_document, PaintContext, Surface};
 
 const W: u16 = 120;
 const H: u16 = 40;
@@ -66,7 +68,11 @@ impl Fx {
         }
         state.input.text = "next prompt".into();
         state.input.cursor = 5;
-        Fx { doc, handles, state }
+        Fx {
+            doc,
+            handles,
+            state,
+        }
     }
 
     fn paint(&mut self) -> Surface {
@@ -91,6 +97,7 @@ impl Fx {
                 self.state.dialog.is_none(),
                 "",
             );
+            let (bg, ssh) = self.state.tray.running_shells();
             status_line::sync(
                 &mut m,
                 &self.handles.status,
@@ -98,13 +105,16 @@ impl Fx {
                 self.state.streaming,
                 self.state.permission,
                 self.state.queued.len(),
+                bg,
+                ssh,
             );
             spinner::sync(
                 &mut m,
                 &self.handles.spinner,
-                self.state.streaming,
+                self.state.streaming || self.state.aborting,
                 self.state.tick,
-                "esc to interrupt",
+                if self.state.aborting { "Interrupting" } else { "Thinking" },
+                if self.state.aborting { "" } else { "esc to interrupt" },
                 self.state.glyphs,
                 &theme::Theme::new(ThemeKind::Dark).fusion(),
             );
@@ -112,6 +122,13 @@ impl Fx {
                 &mut m,
                 self.handles.dialog_area,
                 self.handles.widget_area,
+                self.handles.queue_area,
+                &self.state,
+                self.state.glyphs,
+            );
+            todo::sync(
+                &mut m,
+                self.handles.todo_area,
                 &self.state,
                 self.state.glyphs,
             );
@@ -131,7 +148,12 @@ impl Fx {
             ThemeKind::Dark.color_scheme(),
         ));
         self.doc.resolve(0.0);
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, self.handles.scrollbar_thumb, &mut self.state);
+        message_list::apply_scroll(
+            &mut self.doc,
+            self.handles.messages,
+            self.handles.scrollbar_thumb,
+            &mut self.state,
+        );
         self.paint()
     }
 
@@ -149,7 +171,12 @@ impl Fx {
             self.state.dom_dirty = false;
             self.doc.resolve(0.0);
         }
-        message_list::apply_scroll(&mut self.doc, self.handles.messages, self.handles.scrollbar_thumb, &mut self.state);
+        message_list::apply_scroll(
+            &mut self.doc,
+            self.handles.messages,
+            self.handles.scrollbar_thumb,
+            &mut self.state,
+        );
         self.paint()
     }
 }
@@ -184,7 +211,11 @@ fn perf_probe_idle_frame() {
         let _ = f.paint();
     }
     let paint_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("[perf] paint-only ({} msgs): {:.3}ms/frame", f.state.messages.len(), paint_ms / FRAMES as f64);
+    eprintln!(
+        "[perf] paint-only ({} msgs): {:.3}ms/frame",
+        f.state.messages.len(),
+        paint_ms / FRAMES as f64
+    );
 
     eprintln!(
         "[perf] idle frame ({}x{}, {} msgs): old {:.2}ms → new {:.2}ms ({:.1}x)",
@@ -227,6 +258,7 @@ fn perf_probe_dialog_open_frame() {
                 &mut m,
                 f.handles.dialog_area,
                 f.handles.widget_area,
+                f.handles.queue_area,
                 &f.state,
                 f.state.glyphs,
             );
@@ -234,7 +266,12 @@ fn perf_probe_dialog_open_frame() {
             f.doc.resolve(0.0);
             last_sig = sig;
         }
-        message_list::apply_scroll(&mut f.doc, f.handles.messages, f.handles.scrollbar_thumb, &mut f.state);
+        message_list::apply_scroll(
+            &mut f.doc,
+            f.handles.messages,
+            f.handles.scrollbar_thumb,
+            &mut f.state,
+        );
         let _ = f.paint();
     }
     let new_ms = t0.elapsed().as_secs_f64() * 1000.0;

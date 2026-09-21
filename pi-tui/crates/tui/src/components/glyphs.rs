@@ -112,6 +112,10 @@ impl GlyphMode {
     pub fn asterisk(self) -> &'static str {
         self.g("✱", "*")
     }
+    /// `∞` / `8` — working indicator (sideways-8).
+    pub fn infinity(self) -> &'static str {
+        self.g("∞", "8")
+    }
 
     /// The 16-frame braille spinner (RECON §9 verbatim order).
     /// ASCII mode falls back to a 4-frame `-\|/` cycle.

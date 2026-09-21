@@ -133,18 +133,18 @@ impl<'a, 'd> Builder<'a, 'd> {
             Event::End(tag) => self.end(tag),
             Event::Text(t) => self.emit_text(&t),
             Event::Code(c) => self.emit_span("bg-code-inline text-warning", &c),
-            Event::InlineMath(c) => {
-                self.emit_span("md-math", &c)
-            }
+            Event::InlineMath(c) => self.emit_span("md-math", &c),
             Event::DisplayMath(c) => {
                 let b = self.open_block("md-math-display");
                 span_text(self.m, b, "md-math", &c);
                 self.blocks.pop();
             }
-            Event::Html(h) | Event::InlineHtml(h) => {
-                self.emit_span("md-muted", &h)
-            }
-            Event::SoftBreak | Event::HardBreak => self.emit_text("\n"),
+            Event::Html(h) | Event::InlineHtml(h) => self.emit_span("md-muted", &h),
+            // SoftBreak follows HTML semantics: collapse to a space so
+            // source-wrapped prose reflows to the viewport width instead
+            // of breaking mid-sentence. HardBreak stays a real newline.
+            Event::SoftBreak => self.emit_text(" "),
+            Event::HardBreak => self.emit_text("\n"),
             Event::Rule => {
                 let parent = self.parent();
                 let hr = self.m.create_element(qual("hr"), vec![]);
@@ -239,10 +239,7 @@ impl<'a, 'd> Builder<'a, 'd> {
                 let parent = self.parent();
                 let span = self.m.create_element(
                     qual("a"),
-                    vec![
-                        attr("class", "md-link-target"),
-                        attr("href", &dest_url),
-                    ],
+                    vec![attr("class", "md-link-target"), attr("href", &dest_url)],
                 );
                 self.m.append_children(parent, &[span]);
                 self.blocks.push(span);
@@ -314,7 +311,8 @@ impl<'a, 'd> Builder<'a, 'd> {
     }
 
     /// Emit a buffered table as aligned monospace lines:
-    /// `│ h1 │ h2 │`, `─┼─` header rule, `│ a │ b │` rows.
+    /// `┌─┬─┐` top, `│ h1 │ h2 │` header, `─┼─` header rule,
+    /// `│ a │ b │` rows, `└─┴─┘` bottom.
     /// Column widths use display width (CJK-aware), capped at 40.
     fn emit_table(&mut self, rows: &[Vec<String>]) {
         if rows.is_empty() {
@@ -357,6 +355,19 @@ impl<'a, 'd> Builder<'a, 'd> {
             s
         };
         let tbl = div(self.m, self.parent(), "md-table");
+        // Top/bottom borders: `┌─┬─┐` / `└─┴─┘`, junctions aligned
+        // with the `│` column separators (each cell spans w+2 cols).
+        let mut top = String::from("┌");
+        let mut bottom = String::from("└");
+        for (i, w) in widths.iter().enumerate() {
+            let last = i + 1 == cols;
+            top.push_str(&"─".repeat(w + 2));
+            top.push(if last { '┐' } else { '┬' });
+            bottom.push_str(&"─".repeat(w + 2));
+            bottom.push(if last { '┘' } else { '┴' });
+        }
+        let t = div(self.m, tbl, "md-tr md-border");
+        span_text(self.m, t, "", &top);
         for (ri, r) in rows.iter().enumerate() {
             let mut line = String::from("│");
             for (i, w) in widths.iter().enumerate() {
@@ -380,6 +391,8 @@ impl<'a, 'd> Builder<'a, 'd> {
                 span_text(self.m, s, "", &sep);
             }
         }
+        let b = div(self.m, tbl, "md-tr md-border");
+        span_text(self.m, b, "", &bottom);
     }
 
     fn finish(self) {}
