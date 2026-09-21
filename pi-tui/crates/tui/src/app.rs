@@ -313,15 +313,18 @@ impl App {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Initial session state → status line.
-        self.bootstrap_state().await;
-        // Background command list for `/` completion (quiet — no
-        // system lines; `/help` prints the stored list instead).
+        // First paint — before any pi round-trip resolves. pi's node
+        // boot can take seconds; the UI must not wait on it.
+        self.render_frame()?;
+
+        // Initial session state → status line, command list → `/`
+        // completion, todos → strip. All fire-and-forget: responses
+        // arrive on cmd_rx and land in `handle_cmd_response` once pi
+        // finishes booting.
+        self.send_report(RpcCommand::GetState);
         self.state.commands_quiet = true;
         self.send_report(RpcCommand::GetCommands);
-
-        // First paint.
-        self.render_frame()?;
+        self.fetch_todos();
 
         loop {
             let mut frame_dirty = false;
@@ -440,28 +443,6 @@ impl App {
                 .map(|f| f.surface.to_text())
                 .unwrap_or_default(),
         }
-    }
-
-    /// Pull `get_state` for the status line.
-    async fn bootstrap_state(&mut self) {
-        match self.rpc.send(&RpcCommand::GetState).await {
-            Ok(resp) => {
-                if let Some(s) = resp.session_state() {
-                    if let Some(m) = s.model {
-                        self.state.status.model = m.id;
-                    }
-                    self.state.status.thinking = format!("{:?}", s.thinking_level).to_lowercase();
-                    // The server value controls queue draining; the footer
-                    // reports this TUI's steer/follow-up submission choice.
-                    self.state.streaming = s.is_streaming;
-                }
-            }
-            Err(e) => {
-                self.state.push_system(format!("get_state failed: {e}"));
-            }
-        }
-        // Initial todo hydration — durable state survives reloads.
-        self.fetch_todos();
     }
 
     /// Reduce one RPC event; returns whether a repaint is needed.
