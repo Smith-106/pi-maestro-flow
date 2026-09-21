@@ -59,6 +59,7 @@ jobs:
         run: node packages/pi-fluent-tui/scripts/build-platform.mjs --target ${{ matrix.target }}
       - name: Publish platform package
         working-directory: packages/pi-fluent-tui/platforms
+        shell: bash
         run: |
           for d in */pi-fluent-tui-*/; do
             spec="$(node -p "require('./$d/package.json').name + '@' + require('./$d/package.json').version")"
