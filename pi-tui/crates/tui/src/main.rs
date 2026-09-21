@@ -362,12 +362,20 @@ fn headless_demo_frame(kind: ThemeKind) -> io::Result<()> {
             bg,
             ssh,
         );
+        let spinner_label = if st.aborting {
+            "Interrupting".to_string()
+        } else {
+            match st.run_started {
+                Some(t) => format!("Thinking {}s", t.elapsed().as_secs()),
+                None => "Thinking".to_string(),
+            }
+        };
         spinner::sync(
             &mut m,
             &handles.spinner,
             true,
             st.tick,
-            if st.aborting { "Interrupting" } else { "Thinking" },
+            &spinner_label,
             if st.aborting { "" } else { "esc to interrupt" },
             st.glyphs,
             &theme::Theme::new(kind).fusion(),

@@ -2319,12 +2319,20 @@ impl App {
                 self.status_sig = status_sig;
             }
             if spinner_sig != self.spinner_sig {
+                let spinner_label = if self.state.aborting {
+                    "Interrupting".to_string()
+                } else {
+                    match self.state.run_started {
+                        Some(t) => format!("Thinking {}s", t.elapsed().as_secs()),
+                        None => "Thinking".to_string(),
+                    }
+                };
                 spinner::sync(
                     &mut m,
                     &self.handles.spinner,
                     self.state.streaming || self.state.aborting,
                     self.state.tick,
-                    if self.state.aborting { "Interrupting" } else { "Thinking" },
+                    &spinner_label,
                     if self.state.aborting { "" } else { "esc to interrupt" },
                     self.state.glyphs,
                     &self.theme.fusion(),

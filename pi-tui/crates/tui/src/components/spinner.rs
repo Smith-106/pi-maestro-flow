@@ -1,5 +1,5 @@
-//! `spinner` — 16-frame braille spinner with fusion gradient,
-//! `InterruptHint`, and `Thinking` dots (RECON §9 `spinner`).
+//! `spinner` — Devin-style 8-frame braille snake with fusion gradient,
+//! `InterruptHint`, and a `Thinking {n}s` label.
 //!
 //! DOM shape:
 //! ```text

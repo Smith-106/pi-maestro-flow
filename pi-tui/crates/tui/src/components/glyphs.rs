@@ -117,15 +117,14 @@ impl GlyphMode {
         self.g("∞", "8")
     }
 
-    /// The 16-frame braille spinner (RECON §9 verbatim order).
+    /// Devin-style snake spinner: a 4-dot arc crawls clockwise around the
+    /// braille cell perimeter (path 1→4→5→6→8→7→3→2), 8 frames.
     /// ASCII mode falls back to a 4-frame `-\|/` cycle.
     pub fn spinner_frame(self, tick: u64) -> &'static str {
-        const BRAILLE: [&str; 16] = [
-            "⠜", "⢣", "⡎", "⢱", "⢎", "⡱", "⢇", "⡸", "⢣", "⡜", "⡣", "⢜", "⡱", "⢎", "⡕", "⢪",
-        ];
+        const BRAILLE: [&str; 8] = ["⠹", "⢸", "⣰", "⣤", "⣆", "⡇", "⠏", "⠛"];
         const ASCII: [&str; 4] = ["-", "\\", "|", "/"];
         match self {
-            Self::Unicode => BRAILLE[(tick as usize) % 16],
+            Self::Unicode => BRAILLE[(tick as usize) % 8],
             Self::Ascii => ASCII[(tick as usize) % 4],
         }
     }
@@ -154,8 +153,8 @@ mod tests {
         assert_eq!(GlyphMode::Unicode.ok(), "✓");
         assert_eq!(GlyphMode::Ascii.ok(), "[OK]");
         assert_eq!(GlyphMode::Ascii.chevron(), ">");
-        assert_eq!(GlyphMode::Unicode.spinner_frame(0), "⠜");
-        assert_eq!(GlyphMode::Unicode.spinner_frame(15), "⢪");
-        assert_eq!(GlyphMode::Unicode.spinner_frame(16), "⠜");
+        assert_eq!(GlyphMode::Unicode.spinner_frame(0), "⠹");
+        assert_eq!(GlyphMode::Unicode.spinner_frame(7), "⠛");
+        assert_eq!(GlyphMode::Unicode.spinner_frame(8), "⠹");
     }
 }

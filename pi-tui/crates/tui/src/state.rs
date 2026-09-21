@@ -1285,6 +1285,9 @@ pub struct AppState {
     /// the working indicator reads this to show "Interrupting" while
     /// pi is still tearing the turn down.
     pub aborting: bool,
+    /// Instant the current run started — drives the spinner's elapsed
+    /// seconds readout. Cleared on the run's terminal event.
+    pub run_started: Option<Instant>,
     /// How Enter dispatches input while streaming: steer immediately or
     /// enqueue it as a follow-up. `None` is only possible on `Default`;
     /// `AppState::new` installs pi's follow-up default.
@@ -1616,6 +1619,7 @@ impl AppState {
             AgentEvent::AgentStart => {
                 self.streaming = true;
                 self.aborting = false;
+                self.run_started = Some(Instant::now());
                 self.status.transient.clear();
                 true
             }
@@ -1840,6 +1844,7 @@ impl AppState {
             AgentEvent::AgentEnd { .. } | AgentEvent::AgentSettled => {
                 self.term_notify = Some("pi: agent finished".into());
                 self.streaming = false;
+                self.run_started = None;
                 // An aborted run ends without `turn_end` — seal the last
                 // assistant/thinking bubble here too or it stays live.
                 if let Some(m) = self.messages.last_mut() {
