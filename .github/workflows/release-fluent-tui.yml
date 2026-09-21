@@ -1,0 +1,80 @@
+name: release-fluent-tui
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (must match packages/pi-fluent-tui/package.json)"
+        required: true
+  push:
+    tags:
+      - "fluent-tui-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          PKG=$(node -p "require('./packages/pi-fluent-tui/package.json').version")
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            EXPECTED="${GITHUB_REF_NAME#fluent-tui-v}"
+          else
+            EXPECTED="${{ inputs.version }}"
+          fi
+          if [[ "$PKG" != "$EXPECTED" ]]; then
+            echo "::error::package.json version ($PKG) != release version ($EXPECTED)"
+            exit 1
+          fi
+          echo "version=$PKG" >> "$GITHUB_OUTPUT"
+
+  build-platform:
+    needs: version-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, runs-on: windows-latest }
+          - { target: x86_64-unknown-linux-gnu, runs-on: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, runs-on: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, runs-on: macos-13 }
+          - { target: aarch64-apple-darwin, runs-on: macos-14 }
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Build platform package
+        run: node packages/pi-fluent-tui/scripts/build-platform.mjs --target ${{ matrix.target }}
+      - name: Publish platform package
+        working-directory: packages/pi-fluent-tui/platforms
+        run: |
+          cd pi-fluent-tui-* && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-main:
+    needs: build-platform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Publish pi-fluent-tui
+        working-directory: packages/pi-fluent-tui
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

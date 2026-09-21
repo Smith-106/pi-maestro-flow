@@ -151,4 +151,6 @@ devin-re/
 # Rust build artifacts
 pi-tui/target/
 pi-tui/target-check/
+pi-tui/target-test/
 pi-tui/spikes/*/target/
+packages/pi-fluent-tui/platforms/
