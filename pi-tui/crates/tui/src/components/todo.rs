@@ -33,7 +33,7 @@ pub fn signature(state: &AppState) -> u64 {
     s.finish()
 }
 
-fn status_rank(status: TodoStatus) -> u8 {
+pub(crate) fn status_rank(status: TodoStatus) -> u8 {
     match status {
         TodoStatus::InProgress => 0,
         TodoStatus::Pending => 1,
@@ -43,7 +43,7 @@ fn status_rank(status: TodoStatus) -> u8 {
 }
 
 /// Numeric suffix of an id for stable ordering (`task-12` → 12).
-fn id_order(id: &str) -> u64 {
+pub(crate) fn id_order(id: &str) -> u64 {
     id.chars()
         .rev()
         .take_while(|c| c.is_ascii_digit())
@@ -55,7 +55,7 @@ fn id_order(id: &str) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn glyph(mode: GlyphMode, status: TodoStatus) -> (&'static str, &'static str) {
+pub(crate) fn glyph(mode: GlyphMode, status: TodoStatus) -> (&'static str, &'static str) {
     match status {
         TodoStatus::Completed => (mode.ok(), "todo-glyph-done"),
         TodoStatus::InProgress => (mode.running(), "todo-glyph-active"),

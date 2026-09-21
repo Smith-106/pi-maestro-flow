@@ -29,7 +29,11 @@
 use blitz_dom::{DocumentMutator, NodeId};
 
 use crate::components::dom::{div, qual, span_text};
-use crate::state::{Message, MsgKind, TrayEntry, TrayKind, TrayState, TrayStatus, TrayTab};
+use crate::components::glyphs::GlyphMode;
+use crate::components::todo;
+use crate::state::{
+    Message, MsgKind, TodoItem, TodoStatus, TrayEntry, TrayKind, TrayState, TrayStatus, TrayTab,
+};
 
 /// Milliseconds per app tick (33ms frame tick).
 const TICK_MS: u64 = 33;
@@ -56,13 +60,15 @@ fn duration_secs(e: &TrayEntry, now: u64) -> u64 {
 
 /// Render the tray panel under `parent` (rebuilt each sync).
 /// `now` is the current `AppState.tick` for live durations; `messages`
-/// feeds the preview's output tail.
+/// feeds the preview's output tail; `todos` backs the Todos tab.
 pub fn render(
     m: &mut DocumentMutator<'_>,
     parent: NodeId,
     tray: &TrayState,
     now: u64,
     messages: &[Message],
+    todos: &[TodoItem],
+    mode: GlyphMode,
 ) {
     let panel = div(m, parent, "tray-panel");
 
@@ -73,14 +79,19 @@ pub fn render(
         .iter()
         .filter(|e| e.kind == TrayKind::Shell)
         .count();
-    for tab in [TrayTab::Subagents, TrayTab::Cloud, TrayTab::Shells] {
+    for tab in [TrayTab::Subagents, TrayTab::Cloud, TrayTab::Shells, TrayTab::Todos] {
         let cls = if tab == tray.tab {
             "tray-tab active"
         } else {
             "tray-tab"
         };
         let t = div(m, tabs, cls);
-        span_text(m, t, "", &tab.label(shells));
+        span_text(m, t, "", &tab.label(shells, todos.len()));
+    }
+
+    if tray.tab == TrayTab::Todos {
+        render_todos(m, panel, tray, todos, mode);
+        return;
     }
 
     let visible = tray.visible();
@@ -95,6 +106,7 @@ pub fn render(
                 "Run /handoff to launch an agent on its own machine.",
             ),
             TrayTab::Shells => ("No shells yet.", "Ctrl+B runs a command in the background."),
+            TrayTab::Todos => unreachable!(),
         };
         let e = div(m, panel, "tray-empty");
         span_text(m, e, "", line);
@@ -174,9 +186,17 @@ pub fn render(
                 span_text(m, r, "", &text);
             }
         }
-        // Output tail: per-agent rows show the agent's own last
+        // Output tail: per-agent rows show the agent's own output —
+        // the rolling `outputTail` window when present, else the last
         // message; call-level rows tail the shared tool card.
-        if !e.last_message.is_empty() {
+        if !e.output_tail.is_empty() {
+            let l = div(m, pv, "tray-preview-label");
+            span_text(m, l, "", "Output");
+            for line in e.output_tail.iter().rev().take(PREVIEW_LINES).collect::<Vec<_>>().into_iter().rev() {
+                let r = div(m, pv, "tray-preview-line");
+                span_text(m, r, "", line);
+            }
+        } else if !e.last_message.is_empty() {
             let l = div(m, pv, "tray-preview-label");
             span_text(m, l, "", "Output");
             let r = div(m, pv, "tray-preview-line");
@@ -204,15 +224,91 @@ pub fn render(
             }
         }
         let hint = div(m, pv, "tray-preview-hint");
+        let steer = if e.steer_target.is_some() {
+            " · s steer · v watch"
+        } else {
+            ""
+        };
         span_text(
             m,
             hint,
             "",
-            if e.foregrounded {
-                "enter view · x kill · f background"
+            &format!(
+                "{}{steer}",
+                if e.foregrounded {
+                    "enter view · x kill · f background"
+                } else {
+                    "enter view · x kill · f foreground"
+                },
+            ),
+        );
+    }
+}
+
+fn todo_label(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Pending => "Pending",
+        TodoStatus::InProgress => "In progress",
+        TodoStatus::Blocked => "Blocked",
+        TodoStatus::Completed => "Completed",
+    }
+}
+
+/// Todos tab — cockpit `TodoOverlay` list parity: every item (the strip
+/// truncates at 6), status-ordered, with a preview of the selection.
+fn render_todos(
+    m: &mut DocumentMutator<'_>,
+    panel: NodeId,
+    tray: &TrayState,
+    todos: &[TodoItem],
+    mode: GlyphMode,
+) {
+    if todos.is_empty() {
+        let e = div(m, panel, "tray-empty");
+        span_text(m, e, "", "No todos yet.");
+        let s = div(m, panel, "tray-empty-sub");
+        span_text(m, s, "", "Todos appear when the todo tool updates the list.");
+        return;
+    }
+
+    // Same ordering as the strip: status rank, then numeric id suffix.
+    let mut ordered: Vec<&TodoItem> = todos.iter().collect();
+    ordered.sort_by(|a, b| {
+        todo::status_rank(a.status)
+            .cmp(&todo::status_rank(b.status))
+            .then(todo::id_order(&a.id).cmp(&todo::id_order(&b.id)))
+            .then(a.id.cmp(&b.id))
+    });
+
+    let split = div(m, panel, "tray-split");
+    let list = div(m, split, "tray-list");
+    for (row, it) in ordered.iter().enumerate() {
+        let item = div(
+            m,
+            list,
+            if row == tray.cursor {
+                "tray-item selected"
             } else {
-                "enter view · x kill · f foreground"
+                "tray-item"
             },
         );
+        m.set_attribute(item, qual("data-hit-tray"), &row.to_string());
+        let (g, class) = todo::glyph(mode, it.status);
+        let st = div(m, item, "tray-status");
+        span_text(m, st, class, g);
+        let name = div(m, item, "tray-name");
+        span_text(m, name, "", &format!(" {}", it.subject));
+        let meta = div(m, item, "tray-meta");
+        span_text(m, meta, "", &format!("  {}", todo_label(it.status)));
+    }
+
+    if let Some(it) = ordered.get(tray.cursor) {
+        let pv = div(m, split, "tray-preview");
+        let t = div(m, pv, "tray-preview-title");
+        span_text(m, t, "", &it.subject);
+        let meta = div(m, pv, "tray-preview-meta");
+        span_text(m, meta, "", &format!("{} · {}", it.id, todo_label(it.status)));
+        let hint = div(m, pv, "tray-preview-hint");
+        span_text(m, hint, "", "↑↓ select · esc close");
     }
 }

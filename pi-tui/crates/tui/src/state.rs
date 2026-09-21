@@ -1003,6 +1003,12 @@ pub struct TrayEntry {
     /// Agent's latest message tail (progress `lastMessage`) — the
     /// per-agent output shown in the tray preview.
     pub last_message: String,
+    /// `/teammate-send` target (`correlationId`) when the row is backed
+    /// by a teammate progress snapshot — set on call-level rows too.
+    pub steer_target: Option<String>,
+    /// Rolling output-log tail (progress `outputTail`) — a short window of
+    /// the agent's recent output, rendered in the tray preview.
+    pub output_tail: Vec<String>,
 }
 
 /// Tray tab an entry belongs to.
@@ -1021,12 +1027,14 @@ pub enum TrayStatus {
     Cancelled,
 }
 
-/// The three tray tabs (RECON §12.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The four tray tabs (RECON §12.2 + Todos — cockpit TodoOverlay parity).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrayTab {
+    #[default]
     Subagents,
     Cloud,
     Shells,
+    Todos,
 }
 
 impl TrayTab {
@@ -1034,23 +1042,26 @@ impl TrayTab {
         match self {
             Self::Subagents => Self::Cloud,
             Self::Cloud => Self::Shells,
-            Self::Shells => Self::Subagents,
+            Self::Shells => Self::Todos,
+            Self::Todos => Self::Subagents,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Subagents => Self::Shells,
+            Self::Subagents => Self::Todos,
             Self::Cloud => Self::Subagents,
             Self::Shells => Self::Cloud,
+            Self::Todos => Self::Shells,
         }
     }
 
-    pub fn label(self, shells: usize) -> String {
+    pub fn label(self, shells: usize, todos: usize) -> String {
         match self {
             Self::Subagents => "Subagents".to_string(),
             Self::Cloud => "Cloud agents".to_string(),
             Self::Shells => format!("Shells ({shells})"),
+            Self::Todos => format!("Todos ({todos})"),
         }
     }
 }
@@ -1068,14 +1079,9 @@ pub struct TrayState {
     pub entries: Vec<TrayEntry>,
 }
 
-impl Default for TrayTab {
-    fn default() -> Self {
-        TrayTab::Subagents
-    }
-}
-
 impl TrayState {
-    /// Entry indexes visible under the active tab.
+    /// Entry indexes visible under the active tab (the Todos tab is
+    /// backed by `state.todos`, not entries — it yields no indexes).
     pub fn visible(&self) -> Vec<usize> {
         self.entries
             .iter()
@@ -1084,13 +1090,27 @@ impl TrayState {
                 TrayTab::Subagents => e.kind == TrayKind::Subagent,
                 TrayTab::Cloud => false,
                 TrayTab::Shells => e.kind == TrayKind::Shell,
+                TrayTab::Todos => false,
             })
             .map(|(i, _)| i)
             .collect()
     }
 
-    /// The selected entry index (into `entries`).
+    /// Rows under the active tab — `todos` is `state.todos.len()`.
+    pub fn rows(&self, todos: usize) -> usize {
+        match self.tab {
+            TrayTab::Todos => todos,
+            _ => self.visible().len(),
+        }
+    }
+
+    /// The selected entry index (into `entries`). None on the Todos
+    /// tab — todo rows have no `TrayEntry`, so entry actions (view /
+    /// kill / foreground) are no-ops there.
     pub fn selected(&self) -> Option<usize> {
+        if self.tab == TrayTab::Todos {
+            return None;
+        }
         self.visible().get(self.cursor).copied()
     }
 
@@ -1098,10 +1118,9 @@ impl TrayState {
         self.cursor = self.cursor.saturating_sub(1);
     }
 
-    pub fn move_down(&mut self) {
-        let n = self.visible().len();
-        if n > 0 {
-            self.cursor = (self.cursor + 1).min(n - 1);
+    pub fn move_down(&mut self, rows: usize) {
+        if rows > 0 {
+            self.cursor = (self.cursor + 1).min(rows - 1);
         }
     }
 
@@ -1597,7 +1616,7 @@ impl AppState {
         }
         // Re-read .git/HEAD every ~5s — branch switches mid-session show up
         // without a get_state round-trip.
-        if self.tick % 150 == 0 {
+        if self.tick.is_multiple_of(150) {
             let branch = detect_git_branch();
             if branch != self.status.git_branch {
                 self.status.git_branch = branch;
@@ -1790,7 +1809,9 @@ impl AppState {
                             foregrounded: !background,
                             call_id: tool_call_id.clone(),
                             agent_key: None,
+                            steer_target: None,
                             last_message: String::new(),
+                            output_tail: Vec::new(),
                         });
                     }
                     None => {
@@ -1963,6 +1984,9 @@ impl AppState {
                     self.status.output_tokens = usage.output as u64;
                     self.status.context_tokens = usage.total_tokens as u64;
                     self.status.cost += usage.cost.total;
+                }
+                if let AgentMessage::Unknown(v) = message {
+                    return self.apply_custom_message_end(v);
                 }
                 false
             }
@@ -2348,12 +2372,14 @@ impl AppState {
         }
     }
 
-    /// Rebuild `todos` from a `get_entries` response: the newest
-    /// `custom` entry whose `customType` is `todo-state` holds the
-    /// authoritative task map (the todo tool rewrites it whole on
-    /// every mutation). Returns whether the strip content changed.
-    /// This path does NOT touch `session_points` — it is the
-    /// background-hydration twin of the `/resume` `get_entries` arm.
+    /// Rebuild `todos` and settled teammate rows from a `get_entries`
+    /// response: the newest `custom` entry whose `customType` is
+    /// `todo-state` holds the authoritative task map (the todo tool
+    /// rewrites it whole on every mutation), and `custom_message` entries
+    /// of type `teammate-complete` carry the settled agents' results.
+    /// Returns whether anything changed. This path does NOT touch
+    /// `session_points` — it is the background-hydration twin of the
+    /// `/resume` `get_entries` arm.
     pub fn hydrate_todos(&mut self, resp: &RpcResponse) -> bool {
         let Some(entries) = resp
             .data
@@ -2363,13 +2389,18 @@ impl AppState {
         else {
             return false;
         };
+        let mut changed = self.hydrate_teammate_rows(entries);
+        changed |= self.hydrate_todo_entries(entries);
+        changed
+    }
+
+    fn hydrate_todo_entries(&mut self, entries: &[serde_json::Value]) -> bool {
         let data = entries
             .iter()
-            .filter(|e| {
+            .rfind(|e| {
                 e.get("type").and_then(|v| v.as_str()) == Some("custom")
                     && e.get("customType").and_then(|v| v.as_str()) == Some("todo-state")
             })
-            .last()
             .map(|e| e.get("data").unwrap_or(e));
         let mut todos = Vec::new();
         if let Some(tasks) = data
@@ -2400,6 +2431,91 @@ impl AppState {
         }
         self.todos = todos;
         true
+    }
+
+    /// Rebuild settled teammate tray rows from `custom_message` /
+    /// `teammate-complete` entries — attach or resume after the run shows
+    /// the agents that finished and their outputs. Rows that are still
+    /// `Running` belong to the live event stream and win; already-settled
+    /// rows are refreshed so a steered agent's latest completion lands.
+    fn hydrate_teammate_rows(&mut self, entries: &[serde_json::Value]) -> bool {
+        let mut changed = false;
+        for e in entries {
+            if e.get("type").and_then(|v| v.as_str()) != Some("custom_message")
+                || e.get("customType").and_then(|v| v.as_str()) != Some("teammate-complete")
+            {
+                continue;
+            }
+            let Some(results) = e.pointer("/details/results").and_then(|r| r.as_array()) else {
+                continue;
+            };
+            for r in results {
+                let Some(cid) = r.get("correlationId").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                let status = match r.get("completionOutcome").and_then(|o| o.as_str()) {
+                    Some("failed") => TrayStatus::Failed,
+                    Some("terminated") => TrayStatus::Cancelled,
+                    _ => TrayStatus::Done,
+                };
+                let output = r
+                    .get("output")
+                    .and_then(|o| o.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        r.get("structuredOutput")
+                            .and_then(|s| serde_json::to_string_pretty(s).ok())
+                    });
+                let idx = self.tray.entries.iter().position(|x| {
+                    (x.steer_target.as_deref() == Some(cid)
+                        || x.agent_key.as_deref() == Some(cid))
+                        && x.status != TrayStatus::Running
+                });
+                if let Some(i) = idx {
+                    let entry = &mut self.tray.entries[i];
+                    entry.status = status;
+                    if let Some(out) = &output {
+                        if let Some(last) =
+                            out.lines().map(str::trim).rfind(|l| !l.is_empty())
+                        {
+                            entry.last_message = last.to_string();
+                        }
+                    }
+                    changed = true;
+                    continue;
+                }
+                let last_message = output
+                    .as_deref()
+                    .and_then(|out| out.lines().map(str::trim).rfind(|l| !l.is_empty()))
+                    .unwrap_or("")
+                    .to_string();
+                self.tray.entries.push(TrayEntry {
+                    kind: TrayKind::Subagent,
+                    title: progress_row_title(r),
+                    tool: "teammate".into(),
+                    model: String::new(),
+                    color_idx: self.tray.entries.len() % 10,
+                    status,
+                    tools: 0,
+                    recent_tools: Vec::new(),
+                    start_tick: self.tick,
+                    end_tick: Some(self.tick),
+                    // No backing card — hydrated rows are history.
+                    msg_idx: usize::MAX,
+                    foregrounded: false,
+                    call_id: String::new(),
+                    agent_key: Some(cid.to_string()),
+                    last_message,
+                    steer_target: Some(cid.to_string()),
+                    output_tail: Vec::new(),
+                });
+                changed = true;
+            }
+            // Rows exist now — fold the completion's final progress
+            // snapshot in for `outputTail`/status/lastMessage.
+            changed |= self.apply_teammate_progress(e.pointer("/details/progress"));
+        }
+        changed
     }
 
     /// Reduce one command `RpcResponse` into state. Returns the side
@@ -2982,12 +3098,103 @@ impl AppState {
                         call_id: call_id.to_string(),
                         agent_key: Some(key),
                         last_message: String::new(),
+                        steer_target: None,
+                        output_tail: Vec::new(),
                     });
                     self.tray.entries.len() - 1
                 }
             };
             apply_progress_row(&mut self.tray.entries[i], p, self.tick);
         }
+    }
+
+    /// `role:"custom"` extension messages (teammate-complete, stalls, monitor
+    /// notices) are user-facing when `display` isn't false — pi TUI renders
+    /// them; map to `MsgKind::Custom` and settle matching tray rows.
+    fn apply_custom_message_end(&mut self, v: &serde_json::Value) -> bool {
+        if v.get("role").and_then(|r| r.as_str()) != Some("custom") {
+            return false;
+        }
+        let mut changed = false;
+        if v.get("customType").and_then(|t| t.as_str()) == Some("teammate-complete") {
+            changed |= self.apply_teammate_progress(v.pointer("/details/progress"));
+            changed |= self.settle_teammate_rows(v.pointer("/details/results"));
+        }
+        let monitoring_only = v
+            .pointer("/details/monitoringOnly")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if !monitoring_only && v.get("display") != Some(&serde_json::Value::Bool(false)) {
+            if let Some(text) = custom_message_text(v) {
+                self.push(Message::new(MsgKind::Custom, text));
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Fold a completion's `details.progress[]` into matching tray rows —
+    /// carries the final `outputTail`/`lastMessage`/status per agent.
+    fn apply_teammate_progress(&mut self, progress: Option<&serde_json::Value>) -> bool {
+        let Some(progress) = progress.and_then(|p| p.as_array()) else {
+            return false;
+        };
+        let mut changed = false;
+        for p in progress {
+            let Some(cid) = p.get("correlationId").and_then(|c| c.as_str()) else {
+                continue;
+            };
+            for e in self.tray.entries.iter_mut() {
+                if e.steer_target.as_deref() != Some(cid) && e.agent_key.as_deref() != Some(cid) {
+                    continue;
+                }
+                apply_progress_row(e, p, self.tick);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// `teammate-complete` carries `details.results[]` with the settled
+    /// agents' final output — close their tray rows and store the output so
+    /// the preview/`v` view shows the real result, not the dispatch ack.
+    fn settle_teammate_rows(&mut self, results: Option<&serde_json::Value>) -> bool {
+        let Some(results) = results.and_then(|r| r.as_array()) else {
+            return false;
+        };
+        let mut changed = false;
+        for r in results {
+            let Some(cid) = r.get("correlationId").and_then(|c| c.as_str()) else {
+                continue;
+            };
+            let status = match r.get("completionOutcome").and_then(|o| o.as_str()) {
+                Some("failed") => TrayStatus::Failed,
+                Some("terminated") => TrayStatus::Cancelled,
+                _ => TrayStatus::Done,
+            };
+            let output = r
+                .get("output")
+                .and_then(|o| o.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    r.get("structuredOutput")
+                        .and_then(|s| serde_json::to_string_pretty(s).ok())
+                });
+            for e in self.tray.entries.iter_mut() {
+                if e.steer_target.as_deref() != Some(cid) && e.agent_key.as_deref() != Some(cid) {
+                    continue;
+                }
+                e.status = status;
+                e.end_tick = Some(self.tick);
+                if let Some(out) = &output {
+                    if let Some(last) = out.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+                        e.last_message = last.to_string();
+                    }
+                }
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Toggle `expanded` on the collapsible message whose bubble node id
@@ -3055,12 +3262,32 @@ fn agent_progress_status(s: &str) -> TrayStatus {
     }
 }
 
+/// Text of a `role:"custom"` session message: `content` arrives as a plain
+/// string or pi's content-block array.
+fn custom_message_text(v: &serde_json::Value) -> Option<String> {
+    match v.get("content") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(serde_json::Value::Array(blocks)) => {
+            let text = blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
 /// Fold one progress snapshot into a tray row: title, counters, recent
 /// tools, lifecycle status (end tick stamped once on terminal states).
 fn apply_progress_row(e: &mut TrayEntry, p: &serde_json::Value, tick: u64) {
     let title = progress_row_title(p);
     if title != "agent" {
         e.title = title;
+    }
+    if let Some(id) = p.get("correlationId").and_then(|x| x.as_str()) {
+        e.steer_target = Some(id.to_string());
     }
     if let Some(t) = p.get("toolCount").and_then(|x| x.as_u64()) {
         e.tools = t as u32;
@@ -3072,6 +3299,12 @@ fn apply_progress_row(e: &mut TrayEntry, p: &serde_json::Value, tick: u64) {
         if let Some(last) = msg.lines().map(str::trim).rfind(|l| !l.is_empty()) {
             e.last_message = last.to_string();
         }
+    }
+    if let Some(tail) = p.get("outputTail").and_then(|x| x.as_array()) {
+        e.output_tail = tail
+            .iter()
+            .filter_map(|l| l.as_str().map(str::to_string))
+            .collect();
     }
     if let Some(tools) = p.get("recentTools").and_then(|x| x.as_array()) {
         let recent: Vec<(String, String)> = tools
@@ -3689,6 +3922,8 @@ mod tests {
             call_id: String::new(),
             agent_key: None,
             last_message: String::new(),
+            steer_target: None,
+            output_tail: Vec::new(),
         };
         tray.entries.push(entry("tail -f log", TrayKind::Shell, TrayStatus::Running));
         tray.entries.push(entry("ssh host uptime", TrayKind::Shell, TrayStatus::Running));

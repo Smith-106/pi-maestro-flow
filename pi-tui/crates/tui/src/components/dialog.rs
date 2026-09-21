@@ -112,6 +112,7 @@ pub fn signature(state: &AppState) -> u64 {
             e.end_tick.is_some().hash(&mut s);
             e.foregrounded.hash(&mut s);
             e.last_message.hash(&mut s);
+            e.output_tail.hash(&mut s);
             // Preview shows the tool output tail — length is enough
             // (output is append-only).
             state
@@ -120,6 +121,8 @@ pub fn signature(state: &AppState) -> u64 {
                 .map(|m| m.tool_output.as_ref().map_or(0, String::len))
                 .hash(&mut s);
         }
+        // Todos tab reads `state.todos` — repaint when it changes.
+        crate::components::todo::signature(state).hash(&mut s);
     }
     for (_key, lines) in &state.widgets {
         lines.hash(&mut s);
@@ -181,7 +184,15 @@ pub fn sync(
         }
     }
     if state.tray.open {
-        tray::render(m, area, &state.tray, state.tick, &state.messages);
+        tray::render(
+            m,
+            area,
+            &state.tray,
+            state.tick,
+            &state.messages,
+            &state.todos,
+            mode,
+        );
     }
 
     crate::components::dom::drop_children(m, widget_area);

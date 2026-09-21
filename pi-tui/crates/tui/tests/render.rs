@@ -6,9 +6,9 @@ use blitz_dom::{BaseDocument, DocumentConfig};
 use blitz_traits::shell::Viewport;
 use pi_fluent_tui::app;
 use pi_fluent_tui::components::{input_box, message_list, status_line};
-use pi_fluent_tui::state::{AppState, MsgKind};
+use pi_fluent_tui::state::{AppState, MsgKind, TrayStatus};
 use pi_fluent_tui::theme::{self, ThemeKind};
-use pi_rpc::{AgentEvent, AssistantMessageEvent, RpcEvent};
+use pi_rpc::{AgentEvent, AgentMessage, AssistantMessageEvent, RpcEvent, RpcResponse};
 use scrollback::{paint_document, PaintContext, Surface};
 
 const W: u16 = 60;
@@ -2056,4 +2056,297 @@ fn agent_end_on_error_notifies_failure() {
     });
     assert_eq!(f.state.term_notify.as_deref(), Some("pi: agent failed"));
     assert!(!f.state.streaming);
+}
+
+#[test]
+fn tray_todos_tab_lists_all_items() {
+    // Cockpit TodoOverlay parity: the strip truncates at 6 rows; the
+    // tray tab lists everything with a status label and preview.
+    use pi_fluent_tui::state::{TodoItem, TodoStatus, TrayTab};
+    let mut f = Fixture::at(100, 30);
+    let item = |id: &str, subject: &str, status| TodoItem {
+        id: id.into(),
+        subject: subject.into(),
+        status,
+    };
+    f.state.todos = vec![
+        item("task-1", "first", TodoStatus::Completed),
+        item("task-2", "second", TodoStatus::Completed),
+        item("task-3", "third", TodoStatus::Completed),
+        item("task-4", "fourth", TodoStatus::Completed),
+        item("task-5", "fifth", TodoStatus::Completed),
+        item("task-6", "sixth", TodoStatus::Completed),
+        item("task-7", "seventh", TodoStatus::Pending),
+        item("task-8", "running task", TodoStatus::InProgress),
+    ];
+    f.state.tray.open = true;
+    f.state.tray.set_tab(TrayTab::Todos);
+    let text = f.frame();
+    assert!(text.contains("Todos (8)"), "tab label:\n{text}");
+    // Beyond the strip's 6-row cap.
+    assert!(text.contains("seventh"), "row past strip cap:\n{text}");
+    // Status rank: in-progress row first.
+    let run = text.find("running task").unwrap();
+    let pend = text.find("seventh").unwrap();
+    let done = text.find("first").unwrap();
+    assert!(run < pend && pend < done, "status order:\n{text}");
+    // Preview shows the selected (first-ranked) item.
+    assert!(text.contains("task-8 · In progress"), "preview:\n{text}");
+
+    // Cursor navigation bounds to the todo count, not tray entries.
+    f.state.tray.move_down(f.state.todos.len());
+    let text = f.frame();
+    assert!(text.contains("task-7 · Pending"), "moved preview:\n{text}");
+
+    // Entry actions are inert on the Todos tab.
+    assert_eq!(f.state.tray.selected(), None);
+
+    // Empty state.
+    f.state.todos.clear();
+    let text = f.frame();
+    assert!(text.contains("Todos (0)"), "empty label:\n{text}");
+    assert!(text.contains("No todos yet."), "empty state:\n{text}");
+}
+
+#[test]
+fn teammate_rows_carry_steer_target() {
+    // `s` in the tray prefills `/teammate-send <correlationId>` — the
+    // target is the progress snapshot's correlationId, on both the
+    // folded single-task row and multi-task per-agent rows.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({"tasks": [
+            {"name": "a", "prompt": "x", "agent": "explore"},
+            {"name": "b", "prompt": "y", "agent": "code"}
+        ]}),
+    });
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({
+            "content": [{"type": "text", "text": "…"}],
+            "details": {"progress": [
+                {"agent": "explore", "name": "a", "correlationId": "ca", "status": "running"},
+                {"agent": "code", "name": "b", "correlationId": "cb", "status": "running"}
+            ]}
+        }),
+    });
+    let a = f.state.tray.entries.iter().find(|e| e.title == "a").unwrap();
+    assert_eq!(a.steer_target.as_deref(), Some("ca"));
+    let b = f.state.tray.entries.iter().find(|e| e.title == "b").unwrap();
+    assert_eq!(b.steer_target.as_deref(), Some("cb"));
+}
+
+#[test]
+fn teammate_complete_settles_rows_and_renders_summary() {
+    // `teammate-complete` custom messages settle the matching tray rows
+    // (by correlationId) and surface the completion summary as a Custom
+    // message — background dispatches otherwise ended silently.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({"tasks": [
+            {"name": "a", "prompt": "x", "agent": "explore"},
+            {"name": "b", "prompt": "y", "agent": "code"}
+        ]}),
+    });
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({
+            "content": [{"type": "text", "text": "…"}],
+            "details": {"progress": [
+                {"agent": "explore", "name": "a", "correlationId": "ca", "status": "running"},
+                {"agent": "code", "name": "b", "correlationId": "cb", "status": "running"}
+            ]}
+        }),
+    });
+    f.event(AgentEvent::MessageEnd {
+        message: AgentMessage::Unknown(serde_json::json!({
+            "role": "custom",
+            "customType": "teammate-complete",
+            "content": "task a found the bug; task b failed",
+            "display": true,
+            "details": {"mode": "graph", "results": [
+                {"correlationId": "ca", "agent": "explore", "name": "a",
+                 "output": "the bug is in parser.rs"},
+                {"correlationId": "cb", "agent": "code", "name": "b",
+                 "completionOutcome": "failed", "output": "out of tokens"}
+            ]}
+        })),
+    });
+    let a = f.state.tray.entries.iter().find(|e| e.title == "a").unwrap();
+    assert_eq!(a.status, TrayStatus::Done);
+    assert_eq!(a.last_message, "the bug is in parser.rs");
+    let b = f.state.tray.entries.iter().find(|e| e.title == "b").unwrap();
+    assert_eq!(b.status, TrayStatus::Failed);
+    assert!(f
+        .state
+        .messages
+        .iter()
+        .any(|m| m.kind == MsgKind::Custom && m.text.contains("task a found the bug")));
+}
+
+#[test]
+fn monitoring_only_custom_messages_are_dropped() {
+    // The background-status heartbeat is display:true on old pi versions —
+    // `monitoringOnly` marks it as not user-facing; it must not spam the
+    // message list.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::MessageEnd {
+        message: AgentMessage::Unknown(serde_json::json!({
+            "role": "custom",
+            "customType": "background-status-heartbeat",
+            "content": "[background-status-monitor] Active background work: 1 teammate(s).",
+            "display": true,
+            "details": {"monitoringOnly": true, "completion": false}
+        })),
+    });
+    assert!(!f.state.messages.iter().any(|m| m.kind == MsgKind::Custom));
+}
+
+#[test]
+fn teammate_output_tail_fills_tray_preview() {
+    // `details.progress[].outputTail` is a rolling window of the agent's
+    // output log — it lands on the tray row and the preview shows its
+    // last lines instead of the single `lastMessage` tail.
+    let mut f = Fixture::at(100, 26);
+    f.event(AgentEvent::AgentStart);
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({"tasks": [
+            {"name": "a", "prompt": "x", "agent": "explore"},
+            {"name": "b", "prompt": "y", "agent": "code"}
+        ]}),
+    });
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "tm1".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({
+            "content": [{"type": "text", "text": "…"}],
+            "details": {"progress": [
+                {"agent": "explore", "name": "a", "correlationId": "ca", "status": "running",
+                 "lastMessage": "checking the parser",
+                 "outputTail": ["@a#ca │ read src/parser.rs", "@a#ca │ checking the parser"]},
+                {"agent": "code", "name": "b", "correlationId": "cb", "status": "running"}
+            ]}
+        }),
+    });
+    let a = f.state.tray.entries.iter().find(|e| e.title == "a").unwrap();
+    assert_eq!(a.output_tail.len(), 2);
+    assert_eq!(a.output_tail[1], "@a#ca │ checking the parser");
+    // Open the tray, select row "a", and confirm the preview paints the
+    // output tail lines.
+    f.state.tray.open = true;
+    f.state.tray.cursor = 1;
+    let text = f.frame();
+    assert!(text.contains("checking the parser"), "preview tail missing: {text}");
+    assert!(text.contains("read src/parser.rs"), "preview tail missing: {text}");
+}
+
+#[test]
+fn get_entries_hydrates_teammate_history_rows() {
+    // `custom_message`/`teammate-complete` entries persist in the session —
+    // a fresh attach or /resume rebuilds settled tray rows with the
+    // agents' final output, without clobbering live Running rows.
+    let mut f = Fixture::new();
+    let resp = RpcResponse {
+        id: None,
+        kind: "response".into(),
+        command: "todo_entries".into(),
+        success: true,
+        data: Some(serde_json::json!({
+        "entries": [
+            {"type": "custom", "customType": "todo-state", "data": {"tasks": {}}},
+            {"type": "custom_message", "customType": "teammate-complete",
+             "content": "done", "display": true,
+             "details": {"mode": "graph", "results": [
+                {"correlationId": "c1", "agent": "explore", "name": "a",
+                 "output": "found the fix\napplied parser patch"},
+                {"correlationId": "c2", "agent": "code", "name": "b",
+                 "completionOutcome": "failed", "output": "out of tokens"}
+             ],
+             "progress": [
+                {"agent": "explore", "name": "a", "correlationId": "c1", "status": "completed",
+                 "outputTail": ["@a#c1 │ applied parser patch"]}
+             ]}}
+        ]
+        })),
+        error: None,
+    };
+    assert!(f.state.hydrate_todos(&resp));
+    let a = f.state.tray.entries.iter().find(|e| e.title == "a").unwrap();
+    assert_eq!(a.status, TrayStatus::Done);
+    assert_eq!(a.last_message, "applied parser patch");
+    assert_eq!(a.output_tail, vec!["@a#c1 │ applied parser patch".to_string()]);
+    assert_eq!(a.steer_target.as_deref(), Some("c1"));
+    let b = f.state.tray.entries.iter().find(|e| e.title == "b").unwrap();
+    assert_eq!(b.status, TrayStatus::Failed);
+    // A live row with the same cid keeps Running — the event stream wins.
+    f.event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tm9".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({"task": "x", "background": true}),
+    });
+    f.event(AgentEvent::ToolExecutionUpdate {
+        tool_call_id: "tm9".into(),
+        tool_name: "teammate".into(),
+        args: serde_json::json!({}),
+        partial_result: serde_json::json!({
+            "content": [{"type": "text", "text": "…"}],
+            "details": {"progress": [
+                {"agent": "code", "name": "c", "correlationId": "c9", "status": "running"}
+            ]}
+        }),
+    });
+    assert!(f.state.hydrate_todos(&resp));
+    let c = f.state.tray.entries.iter().find(|e| e.title == "c").unwrap();
+    assert_eq!(c.status, TrayStatus::Running);
+}
+
+#[test]
+fn tray_cancel_command_targets_teammate() {
+    use pi_fluent_tui::app::tray_cancel_command;
+    use pi_fluent_tui::state::TrayKind;
+    use pi_rpc::RpcCommand;
+
+    // Teammate row with a correlationId → per-agent abort, never the
+    // session-wide Abort.
+    let (cmd, note) =
+        tray_cancel_command(TrayKind::Subagent, Some("c1".into()), true).unwrap();
+    match cmd {
+        RpcCommand::Prompt {
+            message,
+            images,
+            streaming_behavior,
+        } => {
+            assert_eq!(message, "/teammate-abort c1");
+            assert!(images.is_none());
+            // Extension commands must not carry queue/steer semantics.
+            assert!(streaming_behavior.is_none());
+        }
+        other => panic!("expected Prompt, got {other:?}"),
+    }
+    assert!(note.contains("c1"));
+
+    // Shell rows abort their own process regardless of streaming state.
+    let (cmd, _) = tray_cancel_command(TrayKind::Shell, None, false).unwrap();
+    assert_eq!(cmd, RpcCommand::AbortBash);
+
+    // Target-less subagent while streaming → session abort fallback.
+    let (cmd, note) = tray_cancel_command(TrayKind::Subagent, None, true).unwrap();
+    assert_eq!(cmd, RpcCommand::Abort);
+    assert!(note.contains("whole run"));
+
+    // Target-less subagent while idle → nothing to abort.
+    assert!(tray_cancel_command(TrayKind::Subagent, None, false).is_none());
 }

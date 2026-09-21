@@ -157,6 +157,36 @@ fn streaming_input_command(
     }
 }
 
+/// Command that cancels a running tray entry, plus an optional user note.
+/// Shells abort their own process; teammate rows carry a `steer_target`
+/// (correlationId) and route `/teammate-abort <target>` so only that agent
+/// is terminated — extension commands execute via `prompt` even mid-stream.
+/// Subagent rows without a target fall back to the session-wide abort.
+pub fn tray_cancel_command(
+    kind: crate::state::TrayKind,
+    steer_target: Option<String>,
+    streaming: bool,
+) -> Option<(RpcCommand, String)> {
+    match kind {
+        crate::state::TrayKind::Shell => Some((RpcCommand::AbortBash, String::new())),
+        crate::state::TrayKind::Subagent => match steer_target {
+            Some(target) => Some((
+                RpcCommand::Prompt {
+                    message: format!("/teammate-abort {target}"),
+                    images: None,
+                    streaming_behavior: None,
+                },
+                format!("abort → {target}"),
+            )),
+            None if streaming => Some((
+                RpcCommand::Abort,
+                "abort sent (cancels the whole run)".into(),
+            )),
+            None => None,
+        },
+    }
+}
+
 impl App {
     /// Build the app: document, DOM skeleton, renderer, RPC handle.
     pub fn new(rpc: PiRpc, theme_kind: ThemeKind) -> Self {
@@ -763,7 +793,7 @@ impl App {
                     // Tray row click: move the cursor to that row.
                     "tray" => {
                         if let Some(row) = hit.payload.as_deref().and_then(|p| p.parse().ok()) {
-                            if row < self.state.tray.visible().len() {
+                            if row < self.state.tray.rows(self.state.todos.len()) {
                                 self.state.tray.cursor = row;
                                 self.state.dom_dirty = true;
                             }
@@ -1475,7 +1505,10 @@ impl App {
                 self.state.tray.set_tab(t);
             }
             KeyCode::Up => self.state.tray.move_up(),
-            KeyCode::Down => self.state.tray.move_down(),
+            KeyCode::Down => {
+                let rows = self.state.tray.rows(self.state.todos.len());
+                self.state.tray.move_down(rows);
+            }
             // view: expand the entry's tool card and scroll to it.
             KeyCode::Enter => {
                 if let Some(ei) = self.state.tray.selected() {
@@ -1490,22 +1523,27 @@ impl App {
                     self.scroll_to_message(msg_idx);
                 }
             }
-            // kill: shells get `abort_bash`; subagents share the run,
-            // so abort is session-scoped (no per-subagent primitive).
+            // kill: shells get `abort_bash`; teammate rows carry a
+            // `steer_target` and get the per-agent `/teammate-abort`;
+            // other subagents share the run, so abort is session-scoped.
             KeyCode::Char('x') | KeyCode::Char('k') => {
                 if let Some(ei) = self.state.tray.selected() {
-                    let e = &mut self.state.tray.entries[ei];
-                    if e.status == crate::state::TrayStatus::Running {
-                        e.status = crate::state::TrayStatus::Cancelled;
-                        match e.kind {
-                            crate::state::TrayKind::Shell => {
-                                self.send_cmd(RpcCommand::AbortBash);
-                            }
-                            crate::state::TrayKind::Subagent => {
-                                if self.state.streaming {
-                                    self.send_cmd(RpcCommand::Abort);
-                                    self.state.push_system("abort sent (cancels the whole run)");
-                                }
+                    let (kind, target) = {
+                        let e = &mut self.state.tray.entries[ei];
+                        if e.status == crate::state::TrayStatus::Running {
+                            e.status = crate::state::TrayStatus::Cancelled;
+                            (Some(e.kind), e.steer_target.clone())
+                        } else {
+                            (None, None)
+                        }
+                    };
+                    if let Some(kind) = kind {
+                        if let Some((cmd, note)) =
+                            tray_cancel_command(kind, target, self.state.streaming)
+                        {
+                            self.send_cmd(cmd);
+                            if !note.is_empty() {
+                                self.state.push_system(note);
                             }
                         }
                     }
@@ -1523,12 +1561,39 @@ impl App {
                     });
                 }
             }
-            // view: close the tray and jump to the entry's output.
+            // steer: prefill `/teammate-send <correlationId> ` so the
+            // user can type a message for that agent (cockpit overlay
+            // steer parity — the command routes it as a follow-up).
+            KeyCode::Char('s') => {
+                if let Some(ei) = self.state.tray.selected() {
+                    if let Some(target) = self.state.tray.entries[ei].steer_target.clone() {
+                        let text = format!("/teammate-send {target} ");
+                        self.state.input.cursor = text.len();
+                        self.state.input.text = text;
+                        self.state.tray.open = false;
+                    }
+                }
+            }
+            // view: teammate rows query live output via `/teammate-watch`
+            // (their msg_idx is the shared dispatch card — or dangling for
+            // hydrated history rows); other rows jump to their card.
             KeyCode::Char('v') => {
                 if let Some(ei) = self.state.tray.selected() {
-                    let msg_idx = self.state.tray.entries[ei].msg_idx;
+                    let (msg_idx, target) = {
+                        let e = &self.state.tray.entries[ei];
+                        (e.msg_idx, e.steer_target.clone())
+                    };
                     self.state.tray.open = false;
-                    self.scroll_to_message(msg_idx);
+                    if let Some(target) = target {
+                        self.send_cmd(RpcCommand::Prompt {
+                            message: format!("/teammate-watch {target}"),
+                            images: None,
+                            streaming_behavior: None,
+                        });
+                        self.state.push_system(format!("watch → {target}"));
+                    } else {
+                        self.scroll_to_message(msg_idx);
+                    }
                 } else {
                     self.state.tray.open = false;
                 }
