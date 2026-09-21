@@ -198,6 +198,10 @@ Perform A_CLASSIFY and A_DECOMPOSE in memory, display the proposed chain, bounda
 
 </state_machine>
 
+<task_tracking>
+~/.maestro/workflows/task-tracking.md
+</task_tracking>
+
 <success_criteria>
 - Public flags are `-y`, `-c`, `--amend`, `--dry-run`.
 - `--dry-run` emits a chain preview and performs no Session/Run mutation or executor dispatch.

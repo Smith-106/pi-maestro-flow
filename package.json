@@ -5,11 +5,6 @@
   ],
   "name": "pi-maestro-flow",
   "version": "1.0.0",
-  "pi": {
-    "skills": [
-      "./.pi/skills"
-    ]
-  },
   "description": "<div align=\"center\">",
   "main": "index.js",
   "directories": {
