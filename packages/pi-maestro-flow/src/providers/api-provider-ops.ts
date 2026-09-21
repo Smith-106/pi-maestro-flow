@@ -35,7 +35,16 @@ import {
   type ApiModelFormChoice,
   type ApiModelFormField,
   type ApiModelFormValues,
+  type ApiModelHeadlessOptions,
 } from "../tui/api-model-editor.ts";
+import {
+  extractHeadlessArgs,
+  hasHeadlessFields,
+  headlessField,
+  parseHeadlessBoolean,
+  splitCommandArgs,
+} from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import {
   AGENT_HEADER_PRESETS,
   customAgentHeaders,
@@ -874,7 +883,15 @@ export async function configureProviderConnection(
   displayName: string,
   modelsPath: string,
   defaultsPath: string,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
+  if (!supportsCustomOverlay(ctx) && !hasHeadlessFields(headless?.fields)) {
+    ctx.ui.notify(
+      "Provider 连接配置在 RPC/无头模式下需要字段参数，如 /api-manager provider <id> --base-url=<url> --api-key=<key> --enabled=on",
+      "warning",
+    );
+    return;
+  }
   const preset = findPreset(providerId);
   const current = await loadApiProviderSettings(providerId, modelsPath, null);
   const currentEnabled = await isProviderEnabled(providerId, modelsPath);
@@ -1003,6 +1020,7 @@ export async function configureProviderConnection(
       }
       return errors;
     },
+    headless: headless?.fields,
   });
   if (!result) return;
 
@@ -1021,7 +1039,7 @@ export async function configureProviderConnection(
   const authHeaderValue = connectionFormText(result.values, "authHeader");
   const authHeader = authHeaderValue === "auto" ? undefined : authHeaderValue === "true";
 
-  const confirmed = await ctx.ui.confirm(
+  const confirmed = headless?.assumeYes === true || await ctx.ui.confirm(
     opsText("conn.confirm", { name: nextName }),
     [
       opsText("conn.preview.provider", { value: providerId }),
@@ -1636,6 +1654,12 @@ export interface ParsedManagerArgs {
   stats?: StatsManagerArgs;
   key?: KeyManagerArgs;
   thinking?: ThinkingManagerArgs;
+  /** `--name=value` 字段参数（kebab→camel 归一后的键）；headless 表单提交用。 */
+  fields?: Record<string, string>;
+  /** `--yes`：跳过保存前确认。 */
+  assumeYes?: boolean;
+  /** 提取 `--` 参数后的位置参数（保留原始大小写）。 */
+  positionals?: string[];
 }
 
 export interface ThinkingManagerArgs {
@@ -1657,7 +1681,19 @@ export interface StatsManagerArgs {
 }
 
 export function parseManagerArgs(args: string): ParsedManagerArgs {
-  const values = args.trim().split(/\s+/).filter(Boolean);
+  const { positionals, fields } = extractHeadlessArgs(splitCommandArgs(args));
+  const parsed = parseManagerPositionalArgs(positionals);
+  const { yes, ...rest } = fields;
+  const assumeYes = yes !== undefined ? (parseHeadlessBoolean(yes) ?? true) : undefined;
+  return {
+    ...parsed,
+    positionals,
+    ...(Object.keys(rest).length > 0 ? { fields: rest } : {}),
+    ...(assumeYes !== undefined ? { assumeYes } : {}),
+  };
+}
+
+function parseManagerPositionalArgs(values: string[]): ParsedManagerArgs {
   const normalized = values.map((value) => value.toLowerCase());
   if (values.length === 0) return {};
   if (normalized[0] === "cache" || normalized[0] === "prompt-cache" || normalized[0] === "promptcache") {
@@ -1747,7 +1783,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | thinking [show|save [off|minimal|low|medium|high|xhigh|max]|clear] | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | key [status|switch <id>|policy <sticky|round-robin|weighted|failover>|add|remove <id>] | switch-key <id> | show|set|delete|enable|disable|logout|filter|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
+    `用法：/api-manager list | thinking [show|save [off|minimal|low|medium|high|xhigh|max]|clear] | retry [show|on [1-${API_RETRY_MAX_RETRIES_LIMIT}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | key [status|switch <id>|policy <sticky|round-robin|weighted|failover>|add [--id=<keyId> --key=<secret> --weight=<n>]|remove <id>] | switch-key <id> | show|set|delete|enable|disable|logout|filter|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]\n配置表单支持无头字段参数：/api-manager set <provider> [--model=<id>] --base-url=<url> --api-key=<key> --context-window=<n> --max-tokens=<n> [--reasoning=on|off] [--thinking=<level>] [--multimodal=on|off] [--yes]；自定义 Provider 另支持 --api/--name/--header-preset/--headers/--auth-header/--thinking-format/--developer-role/--reasoning-effort/--max-tokens-field；provider <id> 连接级编辑同样接受这些字段。`,
   );
 }
 
@@ -1877,6 +1913,7 @@ export async function configureNewModel(
   modelsPath: string,
   defaultsPath: string,
   settingsPath: string,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
   const options: Array<{ label: string; target: ChannelTarget }> = [];
   for (const preset of PROVIDERS) {
@@ -1905,7 +1942,10 @@ export async function configureNewModel(
   const target = options.find((entry) => entry.label === choice)?.target;
   if (!target && choice !== customInputLabel) return;
   if (choice === customInputLabel) {
-    const idInput = await ctx.ui.input("Provider ID", "");
+    const providedId = headless?.fields
+      ? headlessField(headless.fields, "provider", "providerId", "id")
+      : undefined;
+    const idInput = providedId ?? await ctx.ui.input("Provider ID", "");
     if (idInput === undefined) return;
     const providerId = normalizeChannelId(idInput);
     const preset = findPreset(providerId);
@@ -1918,6 +1958,7 @@ export async function configureNewModel(
         modelsPath,
         defaultsPath,
         settingsPath,
+        headless,
       );
     } else {
       await configureCustomModelTarget(
@@ -1928,6 +1969,7 @@ export async function configureNewModel(
         modelsPath,
         defaultsPath,
         settingsPath,
+        headless,
       );
     }
     return;
@@ -1941,6 +1983,7 @@ export async function configureNewModel(
       modelsPath,
       defaultsPath,
       settingsPath,
+      headless,
     );
     return;
   }
@@ -1952,6 +1995,7 @@ export async function configureNewModel(
     modelsPath,
     defaultsPath,
     settingsPath,
+    headless,
   );
 }
 
@@ -1963,9 +2007,10 @@ export async function dispatchGlobalModelPick(
   modelsPath: string,
   defaultsPath: string,
   settingsPath: string,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
   if (pick.kind === "new-model") {
-    await configureNewModel(pi, ctx, modelsPath, defaultsPath, settingsPath);
+    await configureNewModel(pi, ctx, modelsPath, defaultsPath, settingsPath, headless);
     return;
   }
   const displayName = await channelDisplayName(pick.providerId, modelsPath);
@@ -1989,9 +2034,9 @@ export async function dispatchGlobalModelPick(
   const preset = findPreset(pick.providerId);
   const target: ConfigureModelTarget = { modelId: pick.modelId, adding: false };
   if (preset) {
-    await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath, settingsPath);
+    await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath, settingsPath, headless);
   } else {
-    await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath, settingsPath);
+    await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath, settingsPath, headless);
   }
 }
 
@@ -2166,6 +2211,7 @@ export async function manageProviderKeys(
   args: { subAction?: "status" | "switch" | "add" | "remove" | "policy"; keyId?: string; policy?: ApiKeyPolicy } | undefined,
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  fields?: Record<string, string>,
 ): Promise<void> {
   if (!await isProviderConfigured(providerId, modelsPath)) {
     ctx.ui.notify(`${displayName} 尚未配置，无法管理 key。`, "warning");
@@ -2237,7 +2283,8 @@ export async function manageProviderKeys(
   };
 
   const doAdd = async (): Promise<void> => {
-    const idInput = await ctx.ui.input(opsText("key.idPrompt"), "");
+    // --id/--key/--weight 字段直接提供时跳过逐项 input（RPC 与 headless 提交）。
+    const idInput = headlessField(fields ?? {}, "id", "keyId") ?? await ctx.ui.input(opsText("key.idPrompt"), "");
     if (idInput === undefined) return;
     const id = idInput.trim();
     if (!id) {
@@ -2248,14 +2295,14 @@ export async function manageProviderKeys(
       ctx.ui.notify(`Key id ${id} already exists`, "warning");
       return;
     }
-    const keyInput = await ctx.ui.input(opsText("key.keyPrompt"), "");
+    const keyInput = headlessField(fields ?? {}, "key", "apiKey", "secret") ?? await ctx.ui.input(opsText("key.keyPrompt"), "");
     if (keyInput === undefined) return;
     const key = keyInput.trim();
     if (!key) {
       ctx.ui.notify("API key is required", "warning");
       return;
     }
-    const weightInput = await ctx.ui.input(opsText("key.weightPrompt"), "1");
+    const weightInput = headlessField(fields ?? {}, "weight") ?? await ctx.ui.input(opsText("key.weightPrompt"), "1");
     if (weightInput === undefined) return;
     const weight = Number(weightInput.trim());
     const newEntry: ApiKeyEntry = {
@@ -2341,7 +2388,8 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "cache-agent" || value === "agent-cache") return "cache-agent";
   if (value === "vision") return "vision";
   if (value === "nextsuggest" || value === "next-suggest" || value === "suggest") return "nextsuggest";
-  if (value === "enhance" || value === "prompt-enhance") return "enhance";
+  if (value === "enhance") return "enhance";
+  if (value === "prompt-enhance" || value === "optimize" || value === "prompt-optimize") return "optimize";
   if (value === "price" || value === "pricing" || value === "cost") return "price";
   if (value === "stats" || value === "usage" || value === "statistics") return "stats";
   if (value === "reset") return "reset";

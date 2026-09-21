@@ -26,6 +26,22 @@ import {
 } from "./overlay-spec.ts";
 import { type OverlayTheme, renderChrome, renderChromeMarked, frameToAnsi } from "./overlay-render.ts";
 
+/**
+ * Whether `ctx.ui.custom` actually mounts a component. In rpc/print/json modes
+ * the function exists but resolves undefined without ever running the factory,
+ * so `typeof ctx.ui.custom === "function"` is not a valid capability check —
+ * gate on ctx.mode instead (same rule openOverlay uses for its degrade path).
+ * An undefined mode is treated as TUI for backward compatibility with hosts
+ * and test doubles that predate the mode field.
+ */
+export function supportsCustomOverlay(
+	ctx: { ui: { custom?: unknown }; mode?: string; hasUI?: boolean },
+): boolean {
+	if (ctx.hasUI === false) return false;
+	if (ctx.mode !== undefined && ctx.mode !== "tui") return false;
+	return typeof ctx.ui.custom === "function";
+}
+
 /** Last-resort row budget when the terminal height is unavailable. */
 export const FALLBACK_ROWS = 24;
 

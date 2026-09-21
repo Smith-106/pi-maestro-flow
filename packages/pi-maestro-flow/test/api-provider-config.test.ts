@@ -2342,10 +2342,10 @@ test("/api-manager thinking saves, shows, clears and shortcut binds current mode
     },
   };
 
-  assert.deepEqual(parseManagerArgs("thinking"), { action: "thinking", thinking: { subAction: "show" } });
-  assert.deepEqual(parseManagerArgs("thinking high"), { action: "thinking", thinking: { subAction: "save", level: "high" } });
-  assert.deepEqual(parseManagerArgs("thinking save low"), { action: "thinking", thinking: { subAction: "save", level: "low" } });
-  assert.deepEqual(parseManagerArgs("thinking clear"), { action: "thinking", thinking: { subAction: "clear" } });
+  assert.deepEqual(parseManagerArgs("thinking"), { action: "thinking", thinking: { subAction: "show" }, positionals: ["thinking"] });
+  assert.deepEqual(parseManagerArgs("thinking high"), { action: "thinking", thinking: { subAction: "save", level: "high" }, positionals: ["thinking", "high"] });
+  assert.deepEqual(parseManagerArgs("thinking save low"), { action: "thinking", thinking: { subAction: "save", level: "low" }, positionals: ["thinking", "save", "low"] });
+  assert.deepEqual(parseManagerArgs("thinking clear"), { action: "thinking", thinking: { subAction: "clear" }, positionals: ["thinking", "clear"] });
 
   await harness.commands.get("api-manager").handler("thinking high", ctx);
   assert.equal(harness.current, "high");

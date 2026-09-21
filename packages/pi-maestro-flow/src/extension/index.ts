@@ -50,7 +50,7 @@ import {
   TodoToolParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
-import { resolveGlyphs, setQuietMode } from "pi-maestro-settings-core/ui";
+import { resolveGlyphs, setQuietMode, supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { isTodoDurationChartEnabled, setTodoDurationChartEnabled } from "../todo-chart-state.ts";
 import { toolCallLine, toolResultCard, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
@@ -64,6 +64,7 @@ import { registerApiProviderConfigs } from "../providers/api-provider-config.ts"
 import { registerDevinProvider } from "../providers/devin-provider.ts";
 import { registerNextSuggest } from "../next-suggest/index.ts";
 import { registerPromptEnhance } from "../prompt-enhance/index.ts";
+import { registerPromptOptimize } from "../prompt-optimize/index.ts";
 import { registerExploreConfigManager } from "../providers/explore-config-manager.ts";
 import { registerModelFailover } from "../providers/model-failover.ts";
 import { showModelFailoverOverlay } from "../tui/model-failover-settings.ts";
@@ -1675,6 +1676,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     );
   }
 
+  // Prompt optimize: on-demand prompt optimization (/optimize or Alt+Shift+O)
+  // — classifier routes the draft (translate/format/polish) and the model
+  // emits an always-English optimized prompt; settings live in the API
+  // manager (api-manager.json optimize section).
+  try {
+    registerPromptOptimize(pi, {
+      defaultsPath: join(getAgentDir(), "api-manager.json"),
+    });
+  } catch (error) {
+    console.error(
+      `[maestro] Prompt-optimize registration warning: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   const planModelSelection = registerPlanModelSelection(pi);
   try {
     registerModelFailover(pi);
@@ -2788,7 +2803,14 @@ When NOT to use:
     lastRunStates = nextStates;
   }
 
+  const requireCustomOverlay = (ctx: ExtensionContext, surface: string): boolean => {
+    if (supportsCustomOverlay(ctx)) return true;
+    ctx.ui.notify(`${surface} requires an interactive TUI; this mode does not support overlays.`, "warning");
+    return false;
+  };
+
   async function openGatewayOverlay(ctx: ExtensionContext, initialPage: "home" | "config" | "tunnel" = "home"): Promise<void> {
+    if (!requireCustomOverlay(ctx, "Gateway panel")) return;
     await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
       const overlay = new GatewayOverlay({
         cwd: ctx.cwd,
@@ -2847,6 +2869,7 @@ When NOT to use:
   }
 
   async function openSessionOverlay(ctx: ExtensionContext): Promise<void> {
+    if (!requireCustomOverlay(ctx, "Session panel")) return;
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
     if (!view || !workflowCoordinator) {
       ctx.ui.notify("No active canonical Workflow Session.", "info");
@@ -2951,6 +2974,7 @@ When NOT to use:
   }
 
   async function openTodoOverlay(ctx: ExtensionContext): Promise<void> {
+    if (!requireCustomOverlay(ctx, "Todo panel")) return;
     const tasks = getVisibleTasks().filter((task) => !task.origin && task.status !== "deleted");
     if (tasks.length === 0) {
       ctx.ui.notify("No local or teammate Todo tasks to display.", "info");
@@ -2988,6 +3012,7 @@ When NOT to use:
   }
 
   async function openGoalOverlay(ctx: ExtensionContext): Promise<void> {
+    if (!requireCustomOverlay(ctx, "Goal panel")) return;
     await ctx.ui.custom<void>((tui, theme, _keybindings, done) =>
       new GoalOverlay({
         getEntries: () => getGoalPanelEntries(),
@@ -3016,6 +3041,7 @@ When NOT to use:
   }
 
   async function openKnowledgeOverlay(ctx: ExtensionContext, sessionIdArg?: string): Promise<void> {
+    if (!requireCustomOverlay(ctx, "Knowledge panel")) return;
     const adapter = new KnowledgeCliAdapter(ctx.cwd);
     const sessionId = sessionIdArg?.trim()
       || workflowSnapshotForUi()?.session?.sessionId
@@ -4284,6 +4310,8 @@ When NOT to use:
       "api.cache": () => openApiManager("cache", "Prompt cache policy"),
       "api.nextsuggest": () => openApiManager("nextsuggest", "Next-step suggestion settings"),
       "api.enhance": () => openApiManager("enhance", "Prompt enhance settings"),
+      "api.prompt-enhance": () => openApiManager("prompt-enhance", "Prompt enhance (optimize) settings"),
+      "api.optimize": () => openApiManager("optimize", "Prompt optimize settings"),
       "api.list": () => openApiManager("list", "API provider overview"),
       "api.filter": () => openApiManager("filter", "Teammate model filter"),
     },

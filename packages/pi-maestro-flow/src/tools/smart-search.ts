@@ -5,7 +5,19 @@ import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { showSmartSearchConfigOverlay } from "../tui/smart-search-config.ts";
+import { showSmartSearchConfigOverlay, WebAccessConfigSync } from "../tui/smart-search-config.ts";
+import {
+  ALL_CONFIG_KEYS,
+  displaySmartSearchConfigValue,
+  SmartSearchConfigStore,
+} from "./smart-search-config.ts";
+import {
+  extractHeadlessArgs,
+  hasHeadlessFields,
+  parseHeadlessBoolean,
+  splitCommandArgs,
+} from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { getTuiLocale } from "../tui/locale.ts";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { nativeSearch } from "./web-access/search-router.ts";
@@ -383,9 +395,23 @@ export function registerSmartSearch(
   pi.registerCommand("smart-search", {
     description: smartSearchUiText("description", undefined, options.locale),
     async handler(args, ctx) {
-      const action = args.trim().toLowerCase();
+      const { positionals, fields } = extractHeadlessArgs(splitCommandArgs(args));
+      const action = positionals[0]?.toLowerCase() ?? "";
+      // headless 配置面：/smart-search list|get <key>|set --K=V ...|unset <key>|sync
+      if (action === "list" || action === "get" || action === "show" || action === "set"
+        || action === "unset" || action === "clear" || action === "sync" || hasHeadlessFields(fields)) {
+        await runSmartSearchHeadless(ctx, action, positionals.slice(1), fields);
+        return;
+      }
       if (action && action !== "config") {
         ctx.ui.notify(smartSearchUiText("usage", undefined, options.locale), "warning");
+        return;
+      }
+      if (!supportsCustomOverlay(ctx)) {
+        ctx.ui.notify(
+          "Smart Search 配置面板需要 TUI overlay。Headless：/smart-search list|get <KEY>|set --XAI_API_KEY=... --EXA_API_KEY=...|unset <KEY>|sync",
+          "warning",
+        );
         return;
       }
       try {
@@ -395,6 +421,96 @@ export function registerSmartSearch(
       }
     },
   });
+}
+
+/** 将 --field（camel/kebab/原样）解析为 ALL_CONFIG_KEYS 中的大写配置键。 */
+function resolveSmartSearchConfigKey(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  if ((ALL_CONFIG_KEYS as readonly string[]).includes(raw)) return raw;
+  const squashed = raw.replace(/[-_]/g, "").toUpperCase();
+  return ALL_CONFIG_KEYS.find((key) => key.replace(/_/g, "") === squashed);
+}
+
+async function runSmartSearchHeadless(
+  ctx: Parameters<Parameters<ExtensionAPI["registerCommand"]>[1]["handler"]>[1],
+  action: string,
+  rest: string[],
+  fields: Record<string, string>,
+): Promise<void> {
+  const store = new SmartSearchConfigStore();
+  const usage = "用法：/smart-search [list|get <KEY>|set --KEY=value ...|unset <KEY> [--KEY ...]|sync]（KEY 为 SMART_SEARCH/WEB_ACCESS 配置项，如 XAI_API_KEY）";
+  if (action === "list" || action === "show" || action === "get") {
+    const config = await store.load();
+    const key = resolveSmartSearchConfigKey(rest[0] ?? fields.key);
+    if (action === "get" || key) {
+      if (!key) {
+        ctx.ui.notify(usage, "warning");
+        return;
+      }
+      ctx.ui.notify(`${key} = ${displaySmartSearchConfigValue(key, config[key])}`, "info");
+      return;
+    }
+    const lines = ALL_CONFIG_KEYS
+      .filter((entry) => config[entry] !== undefined)
+      .map((entry) => `${entry} = ${displaySmartSearchConfigValue(entry, config[entry])}`);
+    ctx.ui.notify(lines.length > 0 ? lines.join("\n") : "Smart Search 尚未配置任何项。", "info");
+    return;
+  }
+  if (action === "unset" || action === "clear") {
+    const keys = rest.length > 0 ? rest : Object.keys(fields);
+    const patch: Record<string, unknown> = {};
+    for (const raw of keys) {
+      const key = resolveSmartSearchConfigKey(raw);
+      if (!key) {
+        ctx.ui.notify(`未知配置项：${raw}`, "warning");
+        return;
+      }
+      patch[key] = undefined;
+    }
+    if (Object.keys(patch).length === 0) {
+      ctx.ui.notify(usage, "warning");
+      return;
+    }
+    await store.save(patch);
+    ctx.ui.notify(`已清除：${Object.keys(patch).join(", ")}`, "info");
+    return;
+  }
+  if (action === "sync") {
+    const config = await store.load();
+    new WebAccessConfigSync().pushToWebConfig(config);
+    ctx.ui.notify("已同步 Smart Search → web-search.json", "info");
+    return;
+  }
+  // set / 仅 --field 参数；也接受 `set KEY value` 位置形式。
+  const patch: Record<string, unknown> = {};
+  if (action === "set" && rest.length > 0) {
+    const key = resolveSmartSearchConfigKey(rest[0]);
+    if (!key) {
+      ctx.ui.notify(`未知配置项：${rest[0]}。${usage}`, "warning");
+      return;
+    }
+    patch[key] = rest.slice(1).join(" ");
+  }
+  let sync = false;
+  for (const [name, value] of Object.entries(fields)) {
+    if (name === "sync") {
+      sync = parseHeadlessBoolean(value) ?? true;
+      continue;
+    }
+    const key = resolveSmartSearchConfigKey(name);
+    if (!key) {
+      ctx.ui.notify(`未知配置项：--${name}。${usage}`, "warning");
+      return;
+    }
+    patch[key] = value;
+  }
+  if (Object.keys(patch).length === 0) {
+    ctx.ui.notify(usage, "warning");
+    return;
+  }
+  const next = await store.save(patch);
+  if (sync) new WebAccessConfigSync().pushToWebConfig(next);
+  ctx.ui.notify(`已保存：${Object.keys(patch).join(", ")}${sync ? "（已同步 web-search.json）" : ""}`, "info");
 }
 
 async function executeNativeFetch(

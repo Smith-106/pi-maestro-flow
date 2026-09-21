@@ -34,6 +34,7 @@ import type {
   SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { serializeTranscriptTail } from "../advisor/runtime.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { SelfEvolveOverlay, type SelfEvolveOverlayView } from "../tui/self-evolve-overlay.ts";
 import {
   buildEvidenceFromFileOps,
@@ -2026,6 +2027,13 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
 
       if (cmd === "panel" || cmd === "") {
+        if (!supportsCustomOverlay(ctx)) {
+          ctx.ui.notify(
+            "Self-evolve panel requires an interactive TUI. Use /self-evolve status|config|review|deposits for headless operations.",
+            "warning",
+          );
+          return;
+        }
         const panelView = await buildPanelView(ctx);
         await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
           const overlay = new SelfEvolveOverlay({

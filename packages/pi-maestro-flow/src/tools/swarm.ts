@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { loadLatestTeamSwarmProjection, type TeamSwarmProjection } from "../swarm/projection.ts";
 import { SwarmOverlay } from "../tui/swarm-overlay.ts";
 
@@ -24,7 +25,10 @@ export function registerSwarmDisplay(pi: ExtensionAPI, options: SwarmDisplayOpti
       ctx.ui.notify("No team-swarm JSON state found. Start with /skill:team-swarm <objective>.", "info");
       return { action: "handled" } as const;
     }
-    if (action === "inspect") await openSwarmOverlay(ctx, snapshot);
+    if (action === "inspect") {
+      if (supportsCustomOverlay(ctx)) await openSwarmOverlay(ctx, snapshot);
+      else ctx.ui.notify("/swarm inspect requires an interactive TUI; use /swarm status for a text summary.", "warning");
+    }
     else if (!action || action === "status") ctx.ui.notify(formatSwarmMonitorStatus(snapshot), "info");
     else ctx.ui.notify("Native /swarm controller was removed. Use /skill:team-swarm; only hidden /swarm status|inspect remain read-only.", "warning");
     return { action: "handled" } as const;

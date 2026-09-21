@@ -20,6 +20,8 @@ import {
   type ApiModelFormChoice,
   type ApiModelFormValues,
 } from "../tui/api-model-editor.ts";
+import { extractHeadlessArgs, hasHeadlessFields, headlessField, splitCommandArgs } from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { sanitizeSingleLineInput } from "../tui/input-text.ts";
 
 export type ExploreApiFormat = "openai" | "anthropic" | "openai-responses";
@@ -115,7 +117,9 @@ async function showExploreConfigManager(
   configPath: string,
   legacyPath: string,
 ): Promise<void> {
-  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const { positionals: tokens, fields } = extractHeadlessArgs(splitCommandArgs(args));
+  // `endpoint` 是路由参数（选目标），不是表单字段——剥掉避免 unknown-field 报错。
+  const { endpoint: _endpointField, ...formFields } = fields;
   let action = actionFromArg(tokens[0]);
   let endpointName: string | undefined = tokens[1];
 
@@ -132,8 +136,8 @@ async function showExploreConfigManager(
     notifyExploreUsage(ctx);
     return;
   }
-  if (!ctx.hasUI && action !== "list" && action !== "show") {
-    ctx.ui.notify(`Explore ${action} 需要交互式 TUI。`, "warning");
+  if (!ctx.hasUI && !hasHeadlessFields(formFields) && action !== "list" && action !== "show") {
+    ctx.ui.notify(`Explore ${action} 需要交互式 TUI 或 --field=value 参数。`, "warning");
     return;
   }
   if (!ctx.hasUI && action === "show" && !endpointName) {
@@ -146,12 +150,17 @@ async function showExploreConfigManager(
     return;
   }
   if (action === "defaults") {
-    await configureDefaults(ctx, configPath, legacyPath);
+    await configureDefaults(ctx, configPath, legacyPath, formFields);
     return;
   }
 
   const state = await loadExploreConfigState(configPath, legacyPath);
   const endpoints = endpointMap(state.root);
+  // --endpoint=<name> 也可作为 endpoint 名（headless 提交时用）。
+  if (!endpointName) {
+    const fieldName = headlessField(fields, "endpoint")?.trim();
+    if (fieldName) endpointName = fieldName;
+  }
   if (!endpointName && action !== "add") {
     endpointName = await chooseEndpoint(ctx, endpoints, action);
   }
@@ -179,7 +188,7 @@ async function showExploreConfigManager(
     ctx.ui.notify(`Endpoint ${displayText(endpointName)} 不存在。`, "warning");
     return;
   }
-  await configureEndpoint(ctx, endpointName, endpoints, configPath, legacyPath, action === "add");
+  await configureEndpoint(ctx, endpointName, endpoints, configPath, legacyPath, action === "add", formFields);
 }
 
 async function chooseAction(ctx: ExtensionCommandContext): Promise<ExploreManagerAction | undefined> {
@@ -272,13 +281,14 @@ async function configureEndpoint(
   configPath: string,
   legacyPath: string,
   adding: boolean,
+  fields?: Record<string, string>,
 ): Promise<void> {
   const storageName = adding ? normalizeEndpointName(endpointName) : endpointName;
   const current = isRecord(endpoints.get(endpointName)) ? endpoints.get(endpointName) as Record<string, unknown> : {};
   const initialFormat = stringValue(current.format) || "openai";
   let values: ApiModelFormValues | undefined;
 
-  if (ctx.hasUI && typeof ctx.ui.custom === "function") {
+  if (supportsCustomOverlay(ctx) || hasHeadlessFields(fields)) {
     const result = await showApiModelEditor(ctx, {
       title: `${adding ? "新增" : "修改"} Explore endpoint`,
       fields: [
@@ -294,6 +304,7 @@ async function configureEndpoint(
         { id: "extraBody", label: "Extra body JSON", kind: "secret", value: isRecord(current.extraBody) ? JSON.stringify(current.extraBody) : "" },
       ],
       validate: validateEndpointForm,
+      headless: fields,
     });
     values = result?.values;
   } else {
@@ -416,10 +427,11 @@ async function configureDefaults(
   ctx: ExtensionCommandContext,
   configPath: string,
   legacyPath: string,
+  fields?: Record<string, string>,
 ): Promise<void> {
   const state = await loadExploreConfigState(configPath, legacyPath);
   let values: ApiModelFormValues | undefined;
-  if (ctx.hasUI && typeof ctx.ui.custom === "function") {
+  if (supportsCustomOverlay(ctx) || hasHeadlessFields(fields)) {
     const result = await showApiModelEditor(ctx, {
       title: "Maestro Explore 运行默认值",
       fields: [
@@ -428,6 +440,7 @@ async function configureDefaults(
         { id: "treeDepth", label: "Tree depth", kind: "number", value: optionalIntegerValue(state.root.treeDepth) },
       ],
       validate: validateDefaultsForm,
+      headless: fields,
     });
     values = result?.values;
   } else {
@@ -739,7 +752,10 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 function notifyExploreUsage(ctx: ExtensionCommandContext): void {
-  ctx.ui.notify("用法：/explore-manager [list|add|edit|show|delete|defaults] [endpoint]", "warning");
+  ctx.ui.notify(
+    "用法：/explore-manager [list|add|edit|show|delete|defaults] [endpoint] [--field=value ...]（headless：/explore-manager edit <name> --base-url=... --api-key=... --model=...）",
+    "warning",
+  );
 }
 
 function actionFromArg(value: string | undefined): ExploreManagerAction | undefined {

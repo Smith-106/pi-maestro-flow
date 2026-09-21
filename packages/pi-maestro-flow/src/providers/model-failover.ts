@@ -3,10 +3,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import { getTuiLocale } from "../tui/locale.ts";
+import {
+  extractHeadlessArgs,
+  hasHeadlessFields,
+  headlessField,
+  parseHeadlessBoolean,
+  splitCommandArgs,
+} from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { writeFileDurableSync } from "../settings/durable-write.ts";
 import { appendModelFailoverSettlement, listModelFailoverEvents } from "./model-failover-events.ts";
@@ -417,6 +425,118 @@ export function formatModelHealth(breaker: ModelCircuitBreaker): string {
   }).join("\n");
 }
 
+/** Headless 变更子命令（不走 overlay 的配置写入路径）。 */
+const FAILOVER_HEADLESS_ACTIONS = new Set(["enable", "disable", "set", "unset", "default", "clear"]);
+
+function failoverUsage(ctx: ExtensionCommandContext): void {
+  ctx.ui.notify(
+    "用法：/model-failover [status|enable|disable|set <model> <f1> [f2...]|unset <model>|default <f1> [f2...]|clear [model|default]] [--enabled=on|off] [--fallbacks=<json>] [--default-fallbacks=a/b,c/d]",
+    "warning",
+  );
+}
+
+/**
+ * 应用 headless failover 配置变更。positionals/fields 二选一或合并；
+ * 返回是否已写入。所有校验失败走 notify，不抛异常打断调用方。
+ */
+function applyHeadlessFailoverConfig(
+  ctx: ExtensionCommandContext,
+  homeDir: string | undefined,
+  positionals: string[],
+  fields: Record<string, string>,
+): boolean {
+  const sub = positionals[0]?.toLowerCase() ?? "";
+  const current = loadModelFailoverConfig(ctx.cwd, homeDir);
+  const next: ModelFailoverConfig = {
+    enabled: current.enabled,
+    fallbackModels: { ...current.fallbackModels },
+    defaultFallbackModels: [...current.defaultFallbackModels],
+  };
+  const isModelRef = (value: string): boolean => value.includes("/");
+  const normalizeChain = (model: string, candidates: string[]): string[] => [
+    ...new Set(candidates.map((candidate) => candidate.trim()).filter((candidate) => isModelRef(candidate) && candidate !== model)),
+  ];
+
+  if (sub === "enable") next.enabled = true;
+  else if (sub === "disable") next.enabled = false;
+  else if (sub === "set") {
+    const model = positionals[1] ?? "";
+    const chain = normalizeChain(model, positionals.slice(2));
+    if (!isModelRef(model) || chain.length === 0) {
+      failoverUsage(ctx);
+      return false;
+    }
+    next.fallbackModels[model] = chain;
+  } else if (sub === "unset") {
+    const model = positionals[1] ?? "";
+    if (!isModelRef(model)) {
+      failoverUsage(ctx);
+      return false;
+    }
+    delete next.fallbackModels[model];
+  } else if (sub === "default") {
+    const chain = normalizeChain("", positionals.slice(1));
+    if (chain.length === 0) {
+      failoverUsage(ctx);
+      return false;
+    }
+    next.defaultFallbackModels = chain;
+  } else if (sub === "clear") {
+    const target = positionals[1]?.toLowerCase();
+    if (target === "default" || target === "defaults" || !target) next.defaultFallbackModels = [];
+    else delete next.fallbackModels[positionals[1]!];
+  } else if (sub && !hasHeadlessFields(fields)) {
+    failoverUsage(ctx);
+    return false;
+  }
+
+  const enabledField = headlessField(fields, "enabled");
+  if (enabledField !== undefined) {
+    const parsed = parseHeadlessBoolean(enabledField);
+    if (parsed === undefined) {
+      ctx.ui.notify("--enabled expects on/off/true/false", "warning");
+      return false;
+    }
+    next.enabled = parsed;
+  }
+  const fallbacksField = headlessField(fields, "fallbacks", "fallbackModels");
+  if (fallbacksField !== undefined) {
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(fallbacksField);
+    } catch {
+      ctx.ui.notify("--fallbacks expects a JSON object like {\"openai/gpt-5\":[\"anthropic/claude\"]}", "warning");
+      return false;
+    }
+    if (!isRecord(parsedJson)) {
+      ctx.ui.notify("--fallbacks expects a JSON object", "warning");
+      return false;
+    }
+    for (const [model, raw] of Object.entries(parsedJson)) {
+      if (!isModelRef(model) || !Array.isArray(raw)) {
+        ctx.ui.notify(`--fallbacks: invalid entry for ${model}`, "warning");
+        return false;
+      }
+      const chain = normalizeChain(model, raw.filter((item): item is string => typeof item === "string"));
+      if (chain.length > 0) next.fallbackModels[model] = chain;
+      else delete next.fallbackModels[model];
+    }
+  }
+  const defaultField = headlessField(fields, "defaultFallbacks", "defaultFallbackModels", "default");
+  if (defaultField !== undefined) {
+    next.defaultFallbackModels = normalizeChain("", defaultField.split(","));
+  }
+
+  try {
+    saveProjectModelFailoverConfig(ctx.cwd, next);
+  } catch (error) {
+    ctx.ui.notify(`Model failover 配置保存失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    return false;
+  }
+  ctx.ui.notify("Model failover 配置已保存。", "info");
+  return true;
+}
+
 export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOptions = {}): void {
   if (typeof (pi as { registerTool?: unknown }).registerTool === "function") registerVisionDelegation(pi);
   const breaker = options.breaker ?? sharedModelCircuitBreaker;
@@ -478,7 +598,8 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   pi.registerCommand("model-failover", {
     description: failoverUiText("description", options.locale),
     handler: async (args, ctx) => {
-      const sub = args.trim().toLowerCase();
+      const { positionals, fields } = extractHeadlessArgs(splitCommandArgs(args));
+      const sub = positionals[0]?.toLowerCase() ?? "";
       if (sub === "status" || sub === "health") {
         config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
         const status = config.enabled ? "automatic failover enabled" : "automatic failover disabled";
@@ -493,8 +614,17 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}\n\nSettlements (recent ${events.length}):\n${eventLines}`, "info");
         return;
       }
-      if (!ctx.hasUI) {
-        ctx.ui.notify(failoverUiText("needTui", options.locale), "warning");
+      // 无头变更：子命令或 --field=value 字段，在同一个进程内写配置并刷新内存态。
+      if (FAILOVER_HEADLESS_ACTIONS.has(sub) || hasHeadlessFields(fields)) {
+        if (!applyHeadlessFailoverConfig(ctx, options.homeDir, positionals, fields)) return;
+        config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+        return;
+      }
+      if (!supportsCustomOverlay(ctx)) {
+        ctx.ui.notify(
+          `${failoverUiText("needTui", options.locale)} Headless: /model-failover enable|disable|set <model> <f1> [f2...]|unset <model>|default <f1> [f2...]|clear [model|default]|--enabled=on|--fallbacks=<json>|--default-fallbacks=a/b,c/d`,
+          "warning",
+        );
         return;
       }
       const { showModelFailoverOverlay } = await import("../tui/model-failover-settings.ts");

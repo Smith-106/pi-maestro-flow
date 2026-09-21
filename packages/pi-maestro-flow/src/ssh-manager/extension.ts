@@ -54,6 +54,14 @@ import {
   type OpenSshImportCandidate,
 } from "./openssh-config.ts";
 import { pinUntrustedHostsFromKnownHosts } from "./known-hosts.ts";
+import {
+  extractHeadlessArgs,
+  headlessField,
+  parseHeadlessBoolean,
+  parseHeadlessList,
+  splitCommandArgs,
+} from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { SshStatusMonitor, type SshHostOperationalStatus } from "./status-monitor.ts";
 import {
   TeammateRemoteChannelBroker,
@@ -630,27 +638,29 @@ Use action=targets to list provider-owned target ids, then pass targetId on a co
     description: "Open the independent encrypted SSH server manager TUI.",
     async handler(args, ctx) {
       activeContext = ctx;
-      const management = /^(pair|unpair)\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(args.trim());
-      if (args.trim() && !management) {
-        ctx.ui.notify("Usage: /ssh, /ssh pair <targetId>, or /ssh unpair <targetId>.", "warning");
+      const { positionals, fields } = extractHeadlessArgs(splitCommandArgs(args));
+      const sub = positionals[0]?.toLowerCase() ?? "";
+      if (sub && sub !== "open") {
+        const bindings: ManagerBindings = {
+          selectedIds: () => selectedHostsForDisplay().map((host) => host.id),
+          replace: (host) => replaceSelection([host], ctx),
+          toggle: (host) => selected.has(host.id)
+            ? removeSelectionIds([host.id], ctx)
+            : attachHost(host, ctx),
+          remove: (hostIds) => removeSelectionIds(hostIds, ctx, false),
+          clear: () => clearSelection(ctx),
+          invalidate: invalidateGatewayHost,
+          invalidateAll: invalidateAllGatewayHosts,
+        };
+        await runSshHeadless(ctx, store, executor, monitor, bindings, sub, positionals.slice(1), fields);
         return;
       }
-      if (management) {
-        if (!await ensureUnlocked(ctx, store)) return;
-        const hostId = management[2]!;
-        try {
-          await gatewayPool.invalidateHost(hostId);
-          if (management[1] === "pair") {
-            const receipt = await pairSshGateway(store, executor, hostId);
-            ctx.ui.notify(`Secure Gateway pairing saved for target ${receipt.hostId}; expiry is recorded in the encrypted store.`, "info");
-          } else {
-            const removed = await unpairSshGateway(store, executor, hostId);
-            ctx.ui.notify(removed ? "Secure Gateway pairing removed; stdio fallback is active." : "No Gateway pairing was stored for that target.", "info");
-          }
-          removeSelectionIds([hostId], ctx, false);
-        } catch (error) {
-          ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
-        }
+      if (args.trim()) {
+        ctx.ui.notify(SSH_HEADLESS_USAGE, "warning");
+        return;
+      }
+      if (!supportsCustomOverlay(ctx)) {
+        ctx.ui.notify(`SSH manager 面板需要 TUI overlay。${SSH_HEADLESS_USAGE}`, "warning");
         return;
       }
       await runManager(ctx, store, executor, monitor, discoverOpenSsh, {
@@ -1007,10 +1017,23 @@ async function runManager(
   }
 }
 
-async function ensureUnlocked(ctx: ExtensionContext, store: EncryptedSshStore): Promise<boolean> {
+async function ensureUnlocked(ctx: ExtensionContext, store: EncryptedSshStore, passwordOverride?: string): Promise<boolean> {
   if (!store.locked) return true;
   const exists = await pathExists(store.path);
   if (!exists) {
+    if (passwordOverride !== undefined) {
+      if (passwordOverride.length < 8) {
+        ctx.ui.notify("Master password must contain at least 8 characters.", "warning");
+        return false;
+      }
+      try {
+        await store.create(passwordOverride);
+        return true;
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        return false;
+      }
+    }
     while (true) {
       const password = await showSecretInput(ctx, "Create SSH manager", "New master password (minimum 8 characters)");
       if (password === undefined) return false;
@@ -1033,7 +1056,7 @@ async function ensureUnlocked(ctx: ExtensionContext, store: EncryptedSshStore): 
       }
     }
   }
-  const password = await showSecretInput(ctx, "Unlock SSH manager", "Master password");
+  const password = passwordOverride ?? await showSecretInput(ctx, "Unlock SSH manager", "Master password");
   if (password === undefined) return false;
   try {
     await store.unlock(password);
@@ -1447,6 +1470,8 @@ function showSecretInput(
   title: string,
   prompt: string,
 ): Promise<string | undefined> {
+  // RPC/headless 模式没有 custom overlay：退回普通 input（明文可见，但功能可用）。
+  if (!supportsCustomOverlay(ctx)) return ctx.ui.input(title, prompt);
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => new MaskedSecretInput({
     title,
     prompt,
@@ -1590,5 +1615,294 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
+  }
+}
+
+const SSH_HEADLESS_USAGE =
+  "用法：/ssh [list|add --label=.. --host=.. --user=.. --auth=agent|password|identity|key ...|edit <id|label> --field=..|delete <id|label> [--yes]|monitor <id|label> on|off|trust <id|label>|reset <id|label> [--yes]|import-key --path=.. --label=.. [--passphrase=..]|pair <id>|unpair <id>|attach <id|label>|detach <id|label>|detach-all|select <id|label>]（可加 --master-password=..）";
+
+function sshHostFromHeadless(
+  fields: Record<string, string>,
+  hosts: readonly SshHost[],
+  keys: readonly SshKey[],
+  current: SshHost | undefined,
+): { host: SshHost } | { error: string } {
+  const field = (...names: string[]) => headlessField(fields, ...names);
+  const label = (field("label", "name") ?? current?.label ?? "").trim();
+  const hostname = (field("host", "hostname") ?? current?.host ?? "").trim();
+  const user = (field("user", "username") ?? current?.user ?? "").trim();
+  const portRaw = field("port");
+  const port = portRaw !== undefined ? Number(portRaw.trim()) : current?.port ?? 22;
+  if (!Number.isSafeInteger(port) || port <= 0) return { error: "--port must be a positive integer" };
+  const shell = (field("shell") ?? current?.shell ?? "bash").toLowerCase();
+  if (shell !== "bash" && shell !== "powershell") return { error: "--shell expects bash|powershell" };
+  const hostKeyRaw = field("hostKey", "host-key");
+  const hostKey = hostKeyRaw === undefined
+    ? current?.hostKey ?? null
+    : normalizeSshHostKeyFingerprint(hostKeyRaw) || null;
+
+  const authKind = field("auth", "authType", "auth-type")?.toLowerCase();
+  let auth: SshAuth | undefined;
+  if (authKind === undefined) {
+    auth = current?.auth;
+  } else if (authKind === "agent") {
+    auth = { kind: "agent" };
+  } else if (authKind === "password") {
+    const password = field("password");
+    const existing = current?.auth.kind === "password" ? current.auth.password : undefined;
+    if (!password && !existing) return { error: "--auth=password requires --password=<secret>" };
+    auth = { kind: "password", password: password || existing! };
+  } else if (authKind === "identity") {
+    const path = field("identity", "identityPath", "identity-path");
+    const existing = current?.auth.kind === "identity" ? current.auth : undefined;
+    const finalPath = path ?? existing?.path;
+    if (!finalPath) return { error: "--auth=identity requires --identity=<path>" };
+    const passphrase = field("passphrase") ?? existing?.passphrase;
+    auth = { kind: "identity", path: finalPath, ...(passphrase ? { passphrase } : {}) };
+  } else if (authKind === "key") {
+    const ref = field("key", "keyId", "key-id", "managedKey", "managed-key");
+    const key = ref ? keys.find((candidate) => candidate.id === ref || candidate.label === ref) : undefined;
+    if (!key) return { error: "--auth=key requires --key=<managed key id|label>" };
+    auth = { kind: "key", keyId: key.id };
+  } else {
+    return { error: "--auth expects agent|password|identity|key" };
+  }
+  if (!auth) return { error: "add 需要 --auth=agent|password|identity|key（edit 时缺省沿用现有 auth）" };
+
+  const tagsRaw = field("tags");
+  const tags = tagsRaw !== undefined ? parseHeadlessList(tagsRaw) : current?.tags ?? [];
+  const jumpRaw = field("jumpHost", "jump-host", "jumpHostId", "jump-host-id");
+  let jumpHostId: string | null | undefined;
+  if (jumpRaw === undefined) jumpHostId = current?.jumpHostId ?? null;
+  else if (["none", "null", "-", ""].includes(jumpRaw.toLowerCase())) jumpHostId = null;
+  else jumpHostId = hosts.find((candidate) => candidate.id === jumpRaw || candidate.label === jumpRaw)?.id;
+  if (jumpHostId === undefined) return { error: `Jump host not found: ${jumpRaw}` };
+  if (current && jumpHostId === current.id) return { error: "A host cannot be its own jump host" };
+  const monitorRaw = field("monitor", "monitorEnabled", "monitor-enabled");
+  const monitorEnabled = monitorRaw === undefined
+    ? current?.monitorEnabled ?? false
+    : parseHeadlessBoolean(monitorRaw);
+  if (monitorEnabled === undefined) return { error: "--monitor expects on|off" };
+
+  try {
+    return {
+      host: validateSshHost({
+        id: current?.id ?? createSshHostId(),
+        label,
+        host: hostname,
+        user,
+        port,
+        shell,
+        hostKey,
+        auth,
+        tags,
+        jumpHostId,
+        monitorEnabled,
+      }),
+    };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function findSshHost(hosts: readonly SshHost[], ref: string | undefined): SshHost | undefined {
+  if (!ref) return undefined;
+  return hosts.find((host) => host.id === ref || host.label === ref)
+    ?? hosts.find((host) => host.label.toLowerCase() === ref.toLowerCase());
+}
+
+/** /ssh 的 headless 路径：所有配置写都经过同一个 EncryptedSshStore。 */
+async function runSshHeadless(
+  ctx: ExtensionContext,
+  store: EncryptedSshStore,
+  executor: SshExecutor,
+  monitor: SshStatusMonitor,
+  bindings: ManagerBindings,
+  sub: string,
+  rest: string[],
+  fields: Record<string, string>,
+): Promise<void> {
+  const masterPassword = headlessField(fields, "masterPassword", "master-password");
+  const assumeYes = parseHeadlessBoolean(headlessField(fields, "yes") ?? "") === true;
+  const targetRef = rest[0] ?? headlessField(fields, "id", "target", "host-id");
+  const findTarget = () => {
+    const host = findSshHost(store.getHosts(), targetRef);
+    if (!host) ctx.ui.notify(`SSH host not found: ${targetRef ?? "(missing)"}`, "warning");
+    return host;
+  };
+  const tryOp = async (fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (error) {
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    }
+  };
+
+  switch (sub) {
+    case "pair":
+    case "unpair": {
+      const hostId = targetRef ?? "";
+      if (!SSH_HOST_ID_PATTERN.test(hostId)) {
+        ctx.ui.notify(`Usage: /ssh ${sub} <targetId>`, "warning");
+        return;
+      }
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      await tryOp(async () => {
+        await bindings.invalidate(hostId);
+        if (sub === "pair") {
+          const receipt = await pairSshGateway(store, executor, hostId);
+          ctx.ui.notify(`Secure Gateway pairing saved for target ${receipt.hostId}; expiry is recorded in the encrypted store.`, "info");
+        } else {
+          const removed = await unpairSshGateway(store, executor, hostId);
+          ctx.ui.notify(removed ? "Secure Gateway pairing removed; stdio fallback is active." : "No Gateway pairing was stored for that target.", "info");
+        }
+        bindings.remove([hostId]);
+      });
+      return;
+    }
+    case "list":
+    case "ls": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const hosts = store.getHosts();
+      const keys = store.getKeys();
+      const lines = [
+        ...hosts.map((host) =>
+          `${host.id}  ${host.label}  ${host.user}@${formatSshAddress(host.host, host.port)}  auth=${host.auth.kind}${host.hostKey ? " trusted" : ""}${host.monitorEnabled ? " monitor" : ""}`),
+        ...keys.map((key) => `key:${key.id}  ${key.label}  ${key.publicKeyFingerprint}`),
+      ];
+      ctx.ui.notify(lines.length > 0 ? lines.join("\n") : "SSH manager 为空。", "info");
+      return;
+    }
+    case "add":
+    case "edit": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const current = sub === "edit" ? findTarget() : undefined;
+      if (sub === "edit" && !current) return;
+      const built = sshHostFromHeadless(fields, store.getHosts(), store.getKeys(), current);
+      if ("error" in built) {
+        ctx.ui.notify(`${built.error}\n${SSH_HEADLESS_USAGE}`, "warning");
+        return;
+      }
+      await tryOp(async () => {
+        if (current) {
+          const affected = new Set([...store.getReverseDependencyClosure(current.id), ...store.getReverseDependencyClosure(built.host.id)]);
+          await invalidateHostIds(affected, bindings);
+          await unpairGatewayHostIds(affected, store, executor);
+          await store.updateHost(current.id, built.host);
+          ctx.ui.notify(`Updated ${built.host.label}; affected selections and sessions were cleared`, "info");
+        } else {
+          await store.addHost(built.host);
+          ctx.ui.notify(`Added ${built.host.label}`, "info");
+        }
+        monitor.reconcile();
+      });
+      return;
+    }
+    case "delete":
+    case "remove": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const host = findTarget();
+      if (!host) return;
+      const confirmed = assumeYes || await ctx.ui.confirm(`Delete ${host.label}?`, "Referenced jump hosts cannot be deleted.");
+      if (!confirmed) return;
+      await tryOp(async () => {
+        const affected = store.getReverseDependencyClosure(host.id);
+        await invalidateHostIds(affected, bindings);
+        await unpairGatewayHostIds(affected, store, executor);
+        await store.deleteHost(host.id);
+        monitor.reconcile();
+        ctx.ui.notify(`Deleted ${host.label}`, "info");
+      });
+      return;
+    }
+    case "monitor": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const host = findTarget();
+      if (!host) return;
+      const raw = rest[1] ?? headlessField(fields, "enabled", "monitor");
+      const enabled = raw !== undefined ? parseHeadlessBoolean(raw) : undefined;
+      if (enabled === undefined) {
+        ctx.ui.notify("Usage: /ssh monitor <id|label> on|off", "warning");
+        return;
+      }
+      await tryOp(async () => {
+        await store.updateHost(host.id, { ...host, monitorEnabled: enabled });
+        monitor.reconcile();
+        ctx.ui.notify(`Monitoring ${enabled ? "enabled" : "disabled"}: ${host.label}`, "info");
+      });
+      return;
+    }
+    case "trust":
+    case "test": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const host = findTarget();
+      if (!host) return;
+      await tryOp(async () => {
+        const message = await testAndTrustSshHost(ctx, store, executor, host);
+        if (message.startsWith("Connection succeeded")) {
+          await invalidateHostIds(store.getReverseDependencyClosure(host.id), bindings);
+          monitor.reconcile();
+        }
+        ctx.ui.notify(message, "info");
+      });
+      return;
+    }
+    case "reset": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const host = findTarget();
+      if (!host) return;
+      const confirmed = assumeYes || (await ctx.ui.confirm(`Reset trust for ${host.label}?`, "The saved host identity will be removed and monitoring disabled.")
+        && await ctx.ui.confirm("Confirm trust reset", "A future Test will establish trust again."));
+      if (!confirmed) return;
+      await tryOp(async () => {
+        const affected = store.getReverseDependencyClosure(host.id);
+        await invalidateHostIds(affected, bindings);
+        await unpairGatewayHostIds(affected, store, executor);
+        await store.updateHost(host.id, { ...host, hostKey: null, monitorEnabled: false });
+        monitor.reconcile();
+        ctx.ui.notify(`Trust reset for ${host.label}`, "info");
+      });
+      return;
+    }
+    case "import-key": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const path = headlessField(fields, "path", "file") ?? rest[0];
+      const label = headlessField(fields, "label", "name") ?? rest[1];
+      if (!path || !label) {
+        ctx.ui.notify("Usage: /ssh import-key --path=<private-key-file> --label=<name> [--passphrase=..]", "warning");
+        return;
+      }
+      await tryOp(async () => {
+        const key = await importManagedSshKey(path, label.trim(), headlessField(fields, "passphrase") || undefined);
+        await store.addKey(key);
+        monitor.reconcile();
+        ctx.ui.notify(`Imported key ${key.label}`, "info");
+      });
+      return;
+    }
+    case "attach":
+    case "select": {
+      if (!await ensureUnlocked(ctx, store, masterPassword)) return;
+      const host = findTarget();
+      if (!host) return;
+      bindings.replace(host);
+      ctx.ui.notify(`SSH server selected exclusively: ${host.label}.`, "info");
+      return;
+    }
+    case "detach": {
+      const host = findTarget();
+      if (!host) return;
+      bindings.remove([host.id]);
+      ctx.ui.notify(`Detached ${host.label}`, "info");
+      return;
+    }
+    case "detach-all":
+    case "clear": {
+      bindings.clear();
+      ctx.ui.notify("SSH selection cleared.", "info");
+      return;
+    }
+    default:
+      ctx.ui.notify(SSH_HEADLESS_USAGE, "warning");
   }
 }

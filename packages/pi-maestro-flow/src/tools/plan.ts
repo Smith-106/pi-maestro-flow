@@ -57,7 +57,7 @@ type PlanExecutionMode = PlanExecutionContextMode;
 export type PlanHandoffStatus = "none" | "todo-required" | "ready";
 export type PlanContext = Pick<
   ExtensionContext,
-  "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact" | "model" | "modelRegistry" | "isProjectTrusted"
+  "cwd" | "hasUI" | "ui" | "mode" | "isIdle" | "sessionManager" | "compact" | "model" | "modelRegistry" | "isProjectTrusted"
 > & Partial<Pick<ExtensionContext, "abort" | "getContextUsage" | "signal">>;
 
 interface PlanReviewOutcome {

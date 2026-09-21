@@ -19,7 +19,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import { makeBorderFrame, resolveGlyphs } from "pi-maestro-settings-core/ui";
+import { makeBorderFrame, resolveGlyphs, supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 
 const FRAME_GLYPHS = resolveGlyphs("nerd");
 const FRAME_UTILS = {
@@ -114,12 +114,12 @@ function resolveReviewModelFallback(ctx: Pick<ExtensionContext, "model" | "ui">)
  * highlighted option, Esc cancels. Returns the resolved model or undefined.
  */
 export async function pickReviewModel(
-  ctx: Pick<ExtensionContext, "hasUI" | "ui" | "model">,
+  ctx: Pick<ExtensionContext, "hasUI" | "ui" | "model" | "mode">,
   models: string[],
   signal?: AbortSignal,
 ): Promise<ReviewModelChoice | undefined> {
   if (signal?.aborted) return undefined;
-  if (!ctx.hasUI) return resolveReviewModelFallback(ctx);
+  if (!supportsCustomOverlay(ctx)) return resolveReviewModelFallback(ctx);
   const sessionKey = modelKey(ctx.model);
   const items = [
     {

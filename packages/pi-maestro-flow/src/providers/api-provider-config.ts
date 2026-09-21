@@ -33,16 +33,24 @@ import {
   type EnhanceContextDepth,
 } from "../prompt-enhance/config.ts";
 import {
+  DEFAULT_OPTIMIZE_CONFIG,
+  loadOptimizeConfig,
+  saveOptimizeConfig,
+} from "../prompt-optimize/config.ts";
+import {
   EFFORT_STATUS_KEY,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
 import { readCompactionSettings } from "../compaction/compaction-settings.ts";
 import { deriveCompactionThreshold, type CompactionThresholdReason } from "../compaction/compaction-threshold.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import {
   showApiModelEditor,
   type ApiModelFormChoice,
   type ApiModelFormValues,
+  type ApiModelHeadlessOptions,
 } from "../tui/api-model-editor.ts";
+import { hasHeadlessFields, headlessField } from "../tui/headless-args.ts";
 import { showVisionDelegationManager } from "./vision-assist.ts";
 import {
   fetchOpenRouterPricing,
@@ -466,7 +474,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "key" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "switch-key" | "thinking" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "key" | "list" | "logout" | "nextsuggest" | "optimize" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "switch-key" | "thinking" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -1349,6 +1357,197 @@ export async function manageEnhanceSettings(
   }
 }
 
+/**
+ * Prompt-optimize settings panel inside the API manager.
+ *
+ * The feature switch, optimize/translate models, thinking level, length cap,
+ * context depth, git/file/knowledge toggles are independent from the session
+ * model and persisted in the api-manager.json `optimize` section.
+ */
+export async function manageOptimizeSettings(
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+  modelsPath: string,
+): Promise<void> {
+  if (!ctx.hasUI) {
+    const current = await loadOptimizeConfig(defaultsPath);
+    ctx.ui.notify(
+      `提示词优化：${current.enabled ? "已启用" : "已停用"} · 模型：${current.modelRef} · 翻译模型：${current.translateModelRef} · 思考：${current.thinking} · 上下文：${current.contextDepth} · 长度上限：${current.maxChars}`,
+      "info",
+    );
+    return;
+  }
+
+  let config = await loadOptimizeConfig(defaultsPath);
+  const modelLabel = (value: string): string => value === "session" ? "跟随会话模型" : value;
+  const translateLabel = (value: string): string =>
+    value === "same" ? "同优化模型" : value === "session" ? "跟随会话模型" : value;
+  const pickModel = async (current: string, title: string, extra: readonly string[]): Promise<string | undefined> => {
+    const models = await buildGlobalModelOptions("configure", modelsPath, defaultsPath);
+    const labels = [
+      ...extra,
+      `跟随会话模型${current === "session" ? "（当前）" : ""}`,
+      ...models.map((entry) => `${entry.label}${entry.pick.kind === "model" && current === `${entry.pick.providerId}/${entry.pick.modelId}` ? "（当前）" : ""}`),
+    ];
+    const pick = await ctx.ui.select(title, labels);
+    if (pick === undefined) return undefined;
+    const extraHit = extra.find((label) => label === pick);
+    if (extraHit) return extraHit.replace(/（当前）$/, "");
+    if (pick === `跟随会话模型${current === "session" ? "（当前）" : ""}`) return "session";
+    const entry = models.find((item) => `${item.label}${item.pick.kind === "model" && current === `${item.pick.providerId}/${item.pick.modelId}` ? "（当前）" : ""}` === pick);
+    if (entry && entry.pick.kind === "model") return `${entry.pick.providerId}/${entry.pick.modelId}`;
+    return undefined;
+  };
+  const options = () => [
+    `${config.enabled ? "✓" : "○"} 启用提示词优化（当前：${config.enabled ? "开" : "关"}）`,
+    `优化模型：${modelLabel(config.modelRef)}（点击选择）`,
+    `翻译模型：${translateLabel(config.translateModelRef)}（点击选择）`,
+    `思考级别：${config.thinking}（点击调整）`,
+    `优化结果长度上限：${config.maxChars} 字符（点击修改）`,
+    `上下文深度：${config.contextDepth}（none/session/codebase，点击切换）`,
+    `git log：${config.includeGit ? "✓" : "○"}（点击切换）`,
+    `提及文件上限：${config.maxFiles}（点击修改）`,
+    `Maestro 知识库搜索：${config.knowledgeSearch ? "✓" : "○"}（点击切换）`,
+    `知识库命中条数：${config.knowledgeTopN}（点击修改）`,
+    "重置为默认设置",
+  ];
+
+  for (;;) {
+    const choice = await ctx.ui.select("提示词优化设置（/api-manager prompt-enhance）", options());
+    if (choice === undefined) return;
+
+    if (choice.startsWith("✓") || choice.startsWith("○")) {
+      config.enabled = !config.enabled;
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify(`提示词优化已${config.enabled ? "启用" : "停用"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("优化模型")) {
+      const next = await pickModel(config.modelRef, "选择优化生成模型（独立于会话模型）", []);
+      if (next !== undefined) {
+        config.modelRef = next;
+        await saveOptimizeConfig(config, defaultsPath);
+        ctx.ui.notify(`优化模型已设为：${modelLabel(config.modelRef)}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("翻译模型")) {
+      const next = await pickModel(
+        config.translateModelRef,
+        "选择翻译路由模型（same 跟随优化模型）",
+        [`同优化模型${config.translateModelRef === "same" ? "（当前）" : ""}`],
+      );
+      if (next !== undefined) {
+        config.translateModelRef = next;
+        await saveOptimizeConfig(config, defaultsPath);
+        ctx.ui.notify(`翻译模型已设为：${translateLabel(config.translateModelRef)}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("思考级别")) {
+      const levels = ENHANCE_THINKING_LEVELS.map((level) =>
+        `${level}${level === config.thinking ? "（当前）" : ""}`,
+      );
+      const pick = await ctx.ui.select("选择优化思考级别（default 跟随会话）", levels);
+      if (pick === undefined) continue;
+      const level = ENHANCE_THINKING_LEVELS.find((value) => `${value}${value === config.thinking ? "（当前）" : ""}` === pick);
+      if (level) {
+        config.thinking = level;
+        await saveOptimizeConfig(config, defaultsPath);
+        ctx.ui.notify(`优化思考级别已设为：${level}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("优化结果长度上限")) {
+      const input = await ctx.ui.input(
+        "优化结果长度上限（字符，50–8000）",
+        String(config.maxChars),
+      );
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 50 || parsed > 8000) {
+        ctx.ui.notify("长度上限必须是 50–8000 之间的数字。", "warning");
+        continue;
+      }
+      config.maxChars = parsed;
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify(`优化结果长度上限已设为：${parsed} 字符。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("上下文深度")) {
+      const depths = ENHANCE_CONTEXT_DEPTHS.map((d) => `${d}${d === config.contextDepth ? "（当前）" : ""}`);
+      const pick = await ctx.ui.select("选择上下文深度（none=仅改写 / session=会话 / codebase=会话+代码库+知识库）", depths);
+      if (pick === undefined) continue;
+      const d = ENHANCE_CONTEXT_DEPTHS.find((value) => `${value}${value === config.contextDepth ? "（当前）" : ""}` === pick);
+      if (d) {
+        config.contextDepth = d;
+        await saveOptimizeConfig(config, defaultsPath);
+        ctx.ui.notify(`上下文深度已设为：${d}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("git log")) {
+      config.includeGit = !config.includeGit;
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify(`git log 已${config.includeGit ? "开启" : "关闭"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("提及文件上限")) {
+      const input = await ctx.ui.input("提及文件上限（0–10）", String(config.maxFiles));
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 0 || parsed > 10) {
+        ctx.ui.notify("提及文件上限必须是 0–10 之间的数字。", "warning");
+        continue;
+      }
+      config.maxFiles = parsed;
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify(`提及文件上限已设为：${parsed}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("Maestro 知识库搜索")) {
+      config.knowledgeSearch = !config.knowledgeSearch;
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify(`Maestro 知识库搜索已${config.knowledgeSearch ? "开启" : "关闭"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("知识库命中条数")) {
+      const input = await ctx.ui.input("知识库命中条数（1–20）", String(config.knowledgeTopN));
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 1 || parsed > 20) {
+        ctx.ui.notify("知识库命中条数必须是 1–20 之间的数字。", "warning");
+        continue;
+      }
+      config.knowledgeTopN = parsed;
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify(`知识库命中条数已设为：${parsed}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("重置")) {
+      const confirmed = await ctx.ui.confirm(
+        "确认重置提示词优化设置为默认值？",
+        `将恢复为：${DEFAULT_OPTIMIZE_CONFIG.enabled ? "启用" : "停用"} · ${DEFAULT_OPTIMIZE_CONFIG.contextDepth} 上下文 · 长度上限 ${DEFAULT_OPTIMIZE_CONFIG.maxChars}`,
+      );
+      if (!confirmed) continue;
+      config = { ...DEFAULT_OPTIMIZE_CONFIG };
+      await saveOptimizeConfig(config, defaultsPath);
+      ctx.ui.notify("提示词优化设置已重置为默认。", "info");
+      continue;
+    }
+  }
+}
+
 export async function manageAgentCacheRetention(
   ctx: ExtensionCommandContext,
   settingsPath: string,
@@ -1700,6 +1899,12 @@ async function showApiProviderManager(
     ctx.ui.notify(t("manager.needTui"), "warning");
     return;
   }
+  // --field=value 参数（headless 提交）与 --yes（跳过保存确认）；RPC 模式下
+  // ctx.ui.custom 不可用，字段参数让表单不经 overlay 直接解析。
+  const headless: ApiModelHeadlessOptions | undefined =
+    hasHeadlessFields(parsed.fields) || parsed.assumeYes !== undefined
+      ? { fields: parsed.fields ?? {}, assumeYes: parsed.assumeYes }
+      : undefined;
   const action = parsed.action ?? await chooseAction(ctx, settingsPath, dirname(modelsPath));
   if (!action) return;
   if (action === "thinking") {
@@ -1719,7 +1924,7 @@ async function showApiProviderManager(
     return;
   }
   if (action === "provider") {
-    if (!ctx.hasUI) {
+    if (!ctx.hasUI && !hasHeadlessFields(headless?.fields)) {
       ctx.ui.notify(t("manager.actionNeedTui", { action }), "warning");
       return;
     }
@@ -1727,7 +1932,7 @@ async function showApiProviderManager(
     if (!target) return;
     const ref = await resolveChannelRef(target, ctx, modelsPath);
     if (!ref) return;
-    await configureProviderConnection(pi, ctx, ref.id, ref.name, modelsPath, defaultsPath);
+    await configureProviderConnection(pi, ctx, ref.id, ref.name, modelsPath, defaultsPath, headless);
     return;
   }
   if (action === "retry") {
@@ -1750,6 +1955,10 @@ async function showApiProviderManager(
     await manageEnhanceSettings(ctx, defaultsPath, modelsPath);
     return;
   }
+  if (action === "optimize") {
+    await manageOptimizeSettings(ctx, defaultsPath, modelsPath);
+    return;
+  }
   if (action === "export" || action === "import") {
     const fallbackPath = defaultApiManagerExportPath(modelsPath);
     const promptKey = action === "export" ? "manager.exportPathPrompt" : "manager.importPathPrompt";
@@ -1767,7 +1976,7 @@ async function showApiProviderManager(
   if (action === "price") {
     // A literal provider id in models.json (e.g. the native "openai" channel)
     // wins over preset aliases, so native channels are addressable by id too.
-    const rawTarget = args.trim().split(/\s+/).filter(Boolean)[1];
+    const rawTarget = parsed.positionals?.[1];
     const literal = rawTarget && providerIdsInModels(modelsPath).includes(rawTarget)
       ? rawTarget
       : undefined;
@@ -1823,7 +2032,7 @@ async function showApiProviderManager(
     const keyArgs = action === "switch-key"
       ? { subAction: "switch" as const, keyId: parsed.key?.keyId }
       : parsed.key;
-    await manageProviderKeys(pi, ref.id, ref.name, keyArgs, ctx, modelsPath);
+    await manageProviderKeys(pi, ref.id, ref.name, keyArgs, ctx, modelsPath, parsed.fields);
     return;
   }
   if (action === "enable" || action === "disable" || action === "toggle") {
@@ -1841,13 +2050,13 @@ async function showApiProviderManager(
     return;
   }
   if (action === "configure") {
-    if (!ctx.hasUI) {
+    if (!ctx.hasUI && !hasHeadlessFields(headless?.fields)) {
       ctx.ui.notify(t("manager.configureNeedTui"), "warning");
       return;
     }
     if (parsed.target) {
       if (parsed.target.kind === "preset") {
-        await configureProvider(pi, parsed.target.preset, ctx, modelsPath, defaultsPath, settingsPath);
+        await configureProvider(pi, parsed.target.preset, ctx, modelsPath, defaultsPath, settingsPath, headless);
       } else {
         const requireNew = parsed.target.id === "";
         await configureCustomChannel(
@@ -1858,13 +2067,14 @@ async function showApiProviderManager(
           settingsPath,
           parsed.target.id || undefined,
           requireNew,
+          headless,
         );
       }
       return;
     }
     const pick = await chooseModelGlobally(ctx, "configure", modelsPath, defaultsPath);
     if (!pick) return;
-    await dispatchGlobalModelPick(pi, pick, "configure", ctx, modelsPath, defaultsPath, settingsPath);
+    await dispatchGlobalModelPick(pi, pick, "configure", ctx, modelsPath, defaultsPath, settingsPath, headless);
     return;
   }
   if (action === "show" || action === "delete") {
@@ -1930,10 +2140,21 @@ async function configureProvider(
   modelsPath: string,
   defaultsPath: string,
   settingsPath: string,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
-  const target = await chooseModelToConfigure(provider.id, provider.name, ctx, modelsPath);
+  // --model <id> 直接指定目标模型，跳过选择器（headless 提交与 RPC 均可用）。
+  const modelArg = headless?.fields ? headlessField(headless.fields, "model", "modelId")?.trim() : undefined;
+  let target: ConfigureModelTarget | undefined;
+  if (modelArg !== undefined) {
+    const existing = await configuredModelIds(provider.id, modelsPath);
+    target = modelArg && existing.includes(modelArg)
+      ? { modelId: modelArg, adding: false }
+      : { modelId: null, adding: true };
+  } else {
+    target = await chooseModelToConfigure(provider.id, provider.name, ctx, modelsPath);
+  }
   if (!target) return;
-  await configurePresetModelTarget(pi, provider, target, ctx, modelsPath, defaultsPath, settingsPath);
+  await configurePresetModelTarget(pi, provider, target, ctx, modelsPath, defaultsPath, settingsPath, headless);
 }
 
 export async function configurePresetModelTarget(
@@ -1944,8 +2165,9 @@ export async function configurePresetModelTarget(
   modelsPath: string,
   defaultsPath: string,
   settingsPath = join(dirname(modelsPath), "settings.json"),
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
-  if (supportsApiModelForm(ctx)) {
+  if (supportsApiModelForm(ctx) || hasHeadlessFields(headless?.fields)) {
     await configurePresetModelWithForm(
       pi,
       provider,
@@ -1954,6 +2176,7 @@ export async function configurePresetModelTarget(
       defaultsPath,
       settingsPath,
       target.adding ? null : target.modelId,
+      headless,
     );
     return;
   }
@@ -2120,8 +2343,13 @@ async function configureCustomChannel(
   settingsPath: string,
   initialId?: string,
   requireNew = false,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
-  const idInput = await ctx.ui.input("Provider ID", initialId ?? "");
+  // --provider/--id 直接给出 Provider ID 时跳过 input 提示。
+  const providedId = headless?.fields
+    ? headlessField(headless.fields, "provider", "providerId", "id")
+    : undefined;
+  const idInput = providedId ?? await ctx.ui.input("Provider ID", initialId ?? "");
   if (idInput === undefined) return;
   const providerId = normalizeChannelId(idInput);
   if (requireNew && (findPreset(providerId) || await isProviderConfigured(providerId, modelsPath))) {
@@ -2130,7 +2358,7 @@ async function configureCustomChannel(
   }
   const preset = findPreset(providerId);
   if (preset) {
-    await configureProvider(pi, preset, ctx, modelsPath, defaultsPath, settingsPath);
+    await configureProvider(pi, preset, ctx, modelsPath, defaultsPath, settingsPath, headless);
     return;
   }
   if (requireNew) {
@@ -2142,12 +2370,22 @@ async function configureCustomChannel(
       modelsPath,
       defaultsPath,
       settingsPath,
+      headless,
     );
     return;
   }
-  const target = await chooseModelToConfigure(providerId, await channelDisplayName(providerId, modelsPath), ctx, modelsPath);
+  const modelArg = headless?.fields ? headlessField(headless.fields, "model", "modelId")?.trim() : undefined;
+  let target: ConfigureModelTarget | undefined;
+  if (modelArg !== undefined) {
+    const existing = await configuredModelIds(providerId, modelsPath);
+    target = modelArg && existing.includes(modelArg)
+      ? { modelId: modelArg, adding: false }
+      : { modelId: null, adding: true };
+  } else {
+    target = await chooseModelToConfigure(providerId, await channelDisplayName(providerId, modelsPath), ctx, modelsPath);
+  }
   if (!target) return;
-  await configureCustomModelTarget(pi, providerId, target, ctx, modelsPath, defaultsPath, settingsPath);
+  await configureCustomModelTarget(pi, providerId, target, ctx, modelsPath, defaultsPath, settingsPath, headless);
 }
 
 export async function configureCustomModelTarget(
@@ -2158,8 +2396,9 @@ export async function configureCustomModelTarget(
   modelsPath: string,
   defaultsPath: string,
   settingsPath = join(dirname(modelsPath), "settings.json"),
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
-  if (supportsApiModelForm(ctx)) {
+  if (supportsApiModelForm(ctx) || hasHeadlessFields(headless?.fields)) {
     await configureCustomModelWithForm(
       pi,
       providerId,
@@ -2168,6 +2407,7 @@ export async function configureCustomModelTarget(
       defaultsPath,
       settingsPath,
       target.adding ? null : target.modelId,
+      headless,
     );
     return;
   }
@@ -2571,6 +2811,7 @@ async function configurePresetModelWithForm(
   defaultsPath: string,
   settingsPath: string,
   modelId: string | null,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
   const adding = modelId === null;
   const current = await loadApiProviderSettings(provider.id, modelsPath, modelId);
@@ -2635,6 +2876,7 @@ async function configurePresetModelWithForm(
     ),
     discoverModels: (values) => discoverFormModelIds(values, provider.id, current, modelsPath),
     resolveModelSpecs: resolveFormModelSpec,
+    headless: headless?.fields,
   });
   if (!result) return;
 
@@ -2648,7 +2890,7 @@ async function configurePresetModelWithForm(
   const maxTokens = positiveInteger(formText(result.values, "maxTokens"), t("form.label.maxTokens"));
   validateModelWindow(contextWindow, maxTokens);
   const apiKey = required(formText(result.values, "apiKey"), "API key");
-  const confirmed = await ctx.ui.confirm(
+  const confirmed = headless?.assumeYes === true || await ctx.ui.confirm(
     t("form.confirm.preset", { name: provider.name }),
     modelSavePreview({
       providerId: targetProviderId,
@@ -2733,6 +2975,7 @@ async function configureCustomModelWithForm(
   defaultsPath: string,
   settingsPath: string,
   modelId: string | null,
+  headless?: ApiModelHeadlessOptions,
 ): Promise<void> {
   const adding = modelId === null;
   const current = await loadApiProviderSettings(providerId, modelsPath, modelId);
@@ -2887,6 +3130,7 @@ async function configureCustomModelWithForm(
     },
     discoverModels: (values) => discoverFormModelIds(values, providerId, current, modelsPath),
     resolveModelSpecs: resolveFormModelSpec,
+    headless: headless?.fields,
   });
   if (!result) return;
 
@@ -2911,7 +3155,7 @@ async function configureCustomModelWithForm(
   setOptionalCompatString(nextCompat, "maxTokensField", formText(result.values, "maxTokensField"));
   const authHeaderValue = formText(result.values, "authHeader");
   const authHeader = authHeaderValue === "auto" ? undefined : authHeaderValue === "true";
-  const confirmed = await ctx.ui.confirm(
+  const confirmed = headless?.assumeYes === true || await ctx.ui.confirm(
     t("form.confirm.provider", { name: nextDisplayName }),
     [
       modelSavePreview({
@@ -3057,7 +3301,8 @@ function triStateChoices(): ApiModelFormChoice[] {
 }
 
 function supportsApiModelForm(ctx: ExtensionCommandContext): boolean {
-  return typeof (ctx.ui as { custom?: unknown }).custom === "function";
+  // RPC 模式下 ctx.ui.custom 存在但直接 resolve undefined —— 不能按函数存在性判断。
+  return supportsCustomOverlay(ctx);
 }
 
 function thinkingFormChoices(_api: string, maxThinking: boolean): ApiModelFormChoice[] {

@@ -91,7 +91,7 @@ export interface RefinePanelResult {
 
 type PlanRefineContext = Pick<
   ExtensionContext,
-  "cwd" | "hasUI" | "ui" | "model" | "modelRegistry" | "isProjectTrusted"
+  "cwd" | "hasUI" | "ui" | "mode" | "model" | "modelRegistry" | "isProjectTrusted"
 >;
 
 const REFINE_ROLE_ORDER: RefineRole[] = ["reviewer", "decomposer", "optimizer", "brainstormer"];

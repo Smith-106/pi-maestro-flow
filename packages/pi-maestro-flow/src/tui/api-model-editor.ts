@@ -24,6 +24,7 @@ import {
   sanitizeSingleLineInput,
   type DecodedInputToken,
 } from "./input-text.ts";
+import { hasHeadlessFields, parseHeadlessBoolean } from "./headless-args.ts";
 
 export type ApiModelFormFieldKind = "readonly" | "text" | "number" | "secret" | "toggle" | "choice" | "section";
 
@@ -47,6 +48,95 @@ export type ApiModelFormValues = Record<string, string | boolean>;
 
 export interface ApiModelEditorResult {
   values: ApiModelFormValues;
+}
+
+/**
+ * Headless submission for hosts without the overlay (RPC mode) or scripted
+ * calls: `--field=value` assignments keyed by field id after kebab→camel
+ * normalization (`--base-url` → `baseUrl`). `assumeYes` lets callers skip the
+ * post-submit save confirmation.
+ */
+export interface ApiModelHeadlessOptions {
+  fields?: Record<string, string>;
+  assumeYes?: boolean;
+}
+
+export interface HeadlessFormResolution {
+  values?: ApiModelFormValues;
+  errors: string[];
+}
+
+function canonicalFieldName(name: string): string {
+  return name.replace(/[-_]+([A-Za-z0-9])/g, (_match, char: string) => char.toUpperCase()).toLowerCase();
+}
+
+function matchFormField(
+  fields: readonly ApiModelFormField[],
+  name: string,
+): { field?: ApiModelFormField; error?: string } {
+  const editable = fields.filter((field) => field.kind !== "section" && field.kind !== "readonly");
+  const wanted = canonicalFieldName(name);
+  const exact = editable.find((field) => canonicalFieldName(field.id) === wanted);
+  if (exact) return { field: exact };
+  const suffixed = editable.filter((field) => canonicalFieldName(field.id) === `${wanted}id`);
+  if (suffixed.length === 1) return { field: suffixed[0] };
+  const suffix = editable.filter((field) => canonicalFieldName(field.id).endsWith(wanted));
+  if (suffix.length === 1) return { field: suffix[0] };
+  if (suffix.length > 1 || suffixed.length > 1) {
+    return { error: `field "${name}" is ambiguous (${[...suffixed, ...suffix].map((field) => field.id).join(", ")})` };
+  }
+  const available = editable.map((field) => field.id).join(", ");
+  return { error: `unknown field "${name}" (available: ${available})` };
+}
+
+function assignHeadlessValue(field: ApiModelFormField, raw: string): string | boolean {
+  if (field.kind === "toggle") {
+    const parsed = parseHeadlessBoolean(raw);
+    if (parsed === undefined) throw new Error(`field "${field.id}" expects on|off|true|false, got "${raw}"`);
+    return parsed;
+  }
+  if (field.kind === "choice") {
+    const choice = field.choices?.find((entry) =>
+      entry.value.toLowerCase() === raw.toLowerCase() || entry.label === raw);
+    if (!choice) {
+      const options = (field.choices ?? []).map((entry) => entry.value).join("|");
+      throw new Error(`field "${field.id}" expects ${options || "a known choice"}, got "${raw}"`);
+    }
+    return choice.value;
+  }
+  return raw;
+}
+
+/**
+ * Resolve `--field` assignments against a form definition without mounting the
+ * overlay: starts from the fields' current values (so untouched fields keep
+ * their saved state) and applies each assignment kind-aware. Validation stays
+ * with the caller's `validate` callback so headless submits share the form's
+ * own rules.
+ */
+export function resolveHeadlessFormValues(
+  fields: readonly ApiModelFormField[],
+  assignments: Record<string, string>,
+): HeadlessFormResolution {
+  const values: ApiModelFormValues = Object.fromEntries(
+    fields
+      .filter((field) => field.kind !== "section")
+      .map((field) => [field.id, field.value]),
+  );
+  const errors: string[] = [];
+  for (const [name, raw] of Object.entries(assignments)) {
+    const { field, error } = matchFormField(fields, name);
+    if (!field) {
+      errors.push(error!);
+      continue;
+    }
+    try {
+      values[field.id] = assignHeadlessValue(field, raw);
+    } catch (cause) {
+      errors.push(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  return errors.length > 0 ? { errors } : { values, errors };
 }
 
 interface ApiModelEditorTheme extends FrameTheme {}
@@ -545,14 +635,36 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   }
 }
 
+export interface ShowApiModelEditorOptions extends Omit<ApiModelEditorOverlayParams, "theme" | "requestRender" | "done"> {
+  /**
+   * `--field=value` assignments collected from the command line. When non-empty
+   * the form resolves without mounting the overlay — this is the headless path
+   * used by RPC-mode hosts (ctx.ui.custom is a no-op there) and by scripted
+   * submits from alternate frontends.
+   */
+  headless?: Record<string, string>;
+}
+
 export function showApiModelEditor(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
-  options: Omit<ApiModelEditorOverlayParams, "theme" | "requestRender" | "done">,
+  options: ShowApiModelEditorOptions,
 ): Promise<ApiModelEditorResult | undefined> {
+  const { headless, ...overlayOptions } = options;
+  if (hasHeadlessFields(headless)) {
+    const resolved = resolveHeadlessFormValues(overlayOptions.fields, headless!);
+    const errors = resolved.errors.length > 0
+      ? resolved.errors
+      : (overlayOptions.validate?.(resolved.values!) ?? []);
+    if (errors.length > 0) {
+      ctx.ui.notify(`${overlayOptions.title}: ${errors.join("；")}`, "error");
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve({ values: resolved.values! });
+  }
   if (!ctx.hasUI) return Promise.resolve(undefined);
   return ctx.ui.custom<ApiModelEditorResult | undefined>((tui, theme, _keybindings, done) =>
     new ApiModelEditorOverlay({
-      ...options,
+      ...overlayOptions,
       theme,
       requestRender: () => tui.requestRender(),
       done,

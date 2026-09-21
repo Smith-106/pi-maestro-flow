@@ -23,7 +23,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { Key, Text, decodeKittyPrintable, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { makeOverlayFrame, resolveGlyphs, type IconGlyphs } from "pi-maestro-settings-core/ui";
+import { makeOverlayFrame, resolveGlyphs, supportsCustomOverlay, type IconGlyphs } from "pi-maestro-settings-core/ui";
 
 const ATTACH_GLYPHS: IconGlyphs = resolveGlyphs("nerd");
 import { loadTranscript, scanWorkspaceSessionDirs, groupTranscriptTurns, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
@@ -4276,7 +4276,7 @@ export default function registerTeammateExtension(
       } catch {
         askBeforeDispatch = false;
       }
-      if (askBeforeDispatch && ctx.hasUI && typeof ctx.ui?.custom === "function") {
+      if (askBeforeDispatch && supportsCustomOverlay(ctx)) {
         const remoteLocations = (() => {
           try {
             const config = loadRemoteConfigState(baseCwd);
@@ -10354,6 +10354,16 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     async handler(args, ctx) {
       const reference = args.trim();
       if (!reference) {
+        if (!supportsCustomOverlay(ctx)) {
+          const profiles = listModelRoutingProfiles(ctx.cwd)
+            .map((profile) => `${profile.id}${profile.active ? " (active)" : ""}`)
+            .join(", ");
+          ctx.ui.notify(
+            `teammate-models requires an interactive TUI. Activate a template headlessly with /teammate-models <id>. Available: ${profiles || "none"}`,
+            "warning",
+          );
+          return;
+        }
         preemptCockpitResize();
         await showTeammateControlCenter(ctx);
         tool.description = buildTeammateToolDescription(ctx.cwd);
@@ -10497,6 +10507,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           return;
         }
       } else {
+        if (!supportsCustomOverlay(ctx)) {
+          ctx.ui.notify("Usage: /teammate-send <target> <message>", "warning");
+          return;
+        }
         preemptCockpitResize();
         const result = await showSessionSendOverlay(ctx, {
           getSessions: () => sessionSelectionRows().filter((row) => row.bindable === true),

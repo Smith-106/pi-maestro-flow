@@ -6,6 +6,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import {
   type CodexHookEvent,
   type LoadedCodexHooks,
@@ -385,6 +386,12 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   };
 
   const runHookInterface = async (ctx: ExtensionContext, startInInstaller: boolean): Promise<void> => {
+    if (!supportsCustomOverlay(ctx)) {
+      const loaded = state.loaded;
+      if (loaded?.exists && loaded.hash) await fallbackHookReview(ctx, loaded);
+      else ctx.ui.notify(t("notice.installNeedsTui"), "error");
+      return;
+    }
     let installMode = startInInstaller;
     while (true) {
       if (installMode || !state.loaded?.exists || !state.loaded.hash) {
@@ -435,7 +442,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
         }
         return;
       }
-      if (ctx.hasUI) {
+      if (supportsCustomOverlay(ctx)) {
         try {
           await runHookInterface(ctx, action === "install" || !loaded?.exists || !loaded.hash);
           return;

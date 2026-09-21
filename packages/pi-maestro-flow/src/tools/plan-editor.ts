@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import {
   Editor,
   Key,
@@ -8,7 +9,7 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 
-export type PlanEditorContext = Pick<ExtensionContext, "hasUI" | "ui">;
+export type PlanEditorContext = Pick<ExtensionContext, "hasUI" | "ui" | "mode">;
 
 export interface PlanEditorOptions {
   markdown: string;
@@ -33,7 +34,7 @@ export async function openPlanEditor(
   ctx: PlanEditorContext,
   options: PlanEditorOptions,
 ): Promise<PlanEditorResult> {
-  if (!ctx.hasUI || options.signal?.aborted) {
+  if (!supportsCustomOverlay(ctx) || options.signal?.aborted) {
     return { action: "cancelled", markdown: options.markdown, revision: options.revision };
   }
 

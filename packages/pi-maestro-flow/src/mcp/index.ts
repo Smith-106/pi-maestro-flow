@@ -3,7 +3,9 @@ import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { getTuiLocale } from "../tui/locale.ts";
 import type { McpExtensionState } from "./state.ts";
 import { Type } from "typebox";
-import { showStatus, showTools, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpManager, openMcpPanel, openMcpSetup } from "./commands.ts";
+import { showStatus, showTools, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpManager, openMcpPanel, openMcpSetup, runMcpHeadless } from "./commands.ts";
+import { extractHeadlessArgs, splitCommandArgs } from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { loadMcpConfig } from "./config.ts";
 import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDirectToolServers, resolveDirectTools } from "./direct-tools.ts";
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
@@ -406,7 +408,7 @@ export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions 
         return;
       }
 
-      const parts = args?.trim()?.split(/\s+/) ?? [];
+      const { positionals: parts, fields } = extractHeadlessArgs(splitCommandArgs(args ?? ""));
       const subcommand = parts[0] ?? "";
       const targetServer = parts[1];
       const rest = parts.slice(1).join(" ");
@@ -418,7 +420,27 @@ export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions 
         case "tools":
           await showTools(state, ctx);
           break;
+        // headless 配置变更：写文件 + 提示 reload。
+        case "list":
+        case "add":
+        case "set":
+        case "edit":
+        case "delete":
+        case "remove":
+        case "enable":
+        case "disable": {
+          const outcome = await runMcpHeadless(state, pi, ctx, earlyConfigPath, subcommand, parts.slice(1), fields, options.locale);
+          if (outcome.configChanged) {
+            await ctx.reload();
+            return;
+          }
+          break;
+        }
         case "direct": {
+          if (!supportsCustomOverlay(ctx)) {
+            ctx.ui.notify("/mcp direct 面板需要 TUI overlay。Headless：/mcp edit <name> --direct-tools=on|off|a,b --exclude-tools=a,b", "warning");
+            return;
+          }
           const result = await openMcpPanel(state, pi, ctx, earlyConfigPath, options.locale);
           if (result?.configChanged) {
             await ctx.reload();
@@ -427,6 +449,10 @@ export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions 
           break;
         }
         case "setup": {
+          if (!supportsCustomOverlay(ctx)) {
+            ctx.ui.notify("/mcp setup 面板需要 TUI overlay。Headless：/mcp add --name=.. --command=..|--url=.. [--scope=user|project]", "warning");
+            return;
+          }
           const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup", options.locale);
           if (result?.configChanged) {
             await ctx.reload();
@@ -435,16 +461,13 @@ export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions 
           break;
         }
         case "manage":
-        case "manager": {
-          const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
-          if (result.configChanged) {
-            await ctx.reload();
-            return;
-          }
-          break;
-        }
+        case "manager":
         case "config":
         case "配置": {
+          if (!supportsCustomOverlay(ctx)) {
+            ctx.ui.notify("MCP manager 面板需要 TUI overlay。Headless：/mcp list|add|edit|delete|enable|disable（--field=value）", "warning");
+            return;
+          }
           const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
           if (result.configChanged) {
             await ctx.reload();
@@ -455,7 +478,8 @@ export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions 
         case "auth":
         case "login": {
           const serverName = targetServer;
-          if (!serverName && !ctx.hasUI) {
+          if (!serverName && !supportsCustomOverlay(ctx)) {
+            ctx.ui.notify("用法：/mcp auth <server>", "warning");
             return;
           }
           if (!serverName) {
@@ -477,7 +501,7 @@ export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions 
         case "status":
         case "":
         default:
-          if (ctx.hasUI) {
+          if (supportsCustomOverlay(ctx)) {
             const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
             if (result?.configChanged) {
               await ctx.reload();

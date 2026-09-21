@@ -287,7 +287,7 @@ export function parseMcpJsonServers(value: string): RecognizedMcpServer[] {
   return candidates;
 }
 
-function validateMcpServerEntry(value: unknown): ServerEntry {
+export function validateMcpServerEntry(value: unknown): ServerEntry {
   if (!isRecord(value)) throw new Error("Each MCP server must be a JSON object");
   const entry = value as ServerEntry;
   if (typeof entry.command !== "string" && typeof entry.url !== "string") {

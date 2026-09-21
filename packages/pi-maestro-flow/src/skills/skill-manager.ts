@@ -13,6 +13,13 @@ import {
   type SkillManagerAction,
   type SkillManagerUiState,
 } from "./skill-manager-tui.ts";
+import {
+  extractHeadlessArgs,
+  headlessField,
+  parseHeadlessBoolean,
+  splitCommandArgs,
+} from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 
 export interface SkillManagerResult {
   configChanged: boolean;
@@ -115,10 +122,20 @@ function t(locale: SupportedSettingsLocale, key: CatalogKey, vars?: Readonly<Rec
 export function registerSkillManager(pi: ExtensionAPI): void {
   pi.registerCommand("skills", {
     description: t(getTuiLocale(), "command.description"),
-    async handler(_args, ctx) {
+    async handler(args, ctx) {
       const locale = getTuiLocale();
-      if (!ctx.hasUI) {
-        ctx.ui.notify(t(locale, "notify.noTui"), "error");
+      const { positionals, fields } = extractHeadlessArgs(splitCommandArgs(args));
+      const sub = positionals[0]?.toLowerCase() ?? "";
+      if (sub && sub !== "open") {
+        const changed = await runSkillManagerHeadless(ctx, new SkillManagerStore(ctx.cwd), sub, positionals.slice(1), fields, locale);
+        if (changed) await ctx.reload();
+        return;
+      }
+      if (!supportsCustomOverlay(ctx)) {
+        ctx.ui.notify(
+          `${t(locale, "notify.noTui")} Headless: /skills list|create-group <name>|delete-group <name> [--yes]|install <name>|assign <skill> [group]|enable <name> [--group]|disable <name> [--group]|allow-invocation <name> [--group]|forbid-invocation <name> [--group]`,
+          "error",
+        );
         return;
       }
       const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd), locale);
@@ -296,6 +313,182 @@ export async function runSkillManager(
   }
 
   return { configChanged };
+}
+
+const SKILL_HEADLESS_USAGE =
+  "用法：/skills list|create-group <name>|delete-group <name> [--yes]|install <name>|assign <skill> [group]|enable <name> [--group]|disable <name> [--group]|allow-invocation <name> [--group]|forbid-invocation <name> [--group]";
+
+/**
+ * /skills 的 headless 变更路径：不走 overlay，直接调用 store 的确定性写入。
+ * 返回是否有配置变更（调用方据此决定是否 ctx.reload()）。
+ */
+async function runSkillManagerHeadless(
+  ctx: ExtensionContext,
+  store: SkillManagerStore,
+  sub: string,
+  rest: string[],
+  fields: Record<string, string>,
+  locale: SupportedSettingsLocale,
+): Promise<boolean> {
+  const nameArg = rest[0] ?? headlessField(fields, "name", "skill");
+  const groupOnly = parseHeadlessBoolean(headlessField(fields, "group") ?? "") === true;
+  const assumeYes = parseHeadlessBoolean(headlessField(fields, "yes") ?? "") === true;
+  const findSkill = (snapshot: Awaited<ReturnType<SkillManagerStore["load"]>>, name: string) =>
+    snapshot.skills.find((skill) => skill.name === name || skill.filePath === name);
+  const findGroup = (snapshot: Awaited<ReturnType<SkillManagerStore["load"]>>, name: string) =>
+    snapshot.groups.find((group) => group.name === name);
+
+  switch (sub) {
+    case "list":
+    case "ls": {
+      const [snapshot, optional] = await Promise.all([store.load(), store.loadOptionalSkills()]);
+      const lines = [
+        ...snapshot.groups.map((group) => `[group${group.custom ? " custom" : ""}] ${group.name} (${group.skills.length})`),
+        ...snapshot.skills.map((skill) =>
+          `${skill.enabled ? "on " : "off"} ${skill.name}${skill.disableModelInvocation ? " [no-model-invocation]" : ""}`),
+        ...optional.filter((entry) => !entry.installed).map((entry) => `optional ${entry.name}`),
+      ];
+      ctx.ui.notify(lines.length > 0 ? lines.join("\n") : t(locale, "notice.noSkills"), "info");
+      return false;
+    }
+    case "create-group": {
+      if (!nameArg) {
+        ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+        return false;
+      }
+      try {
+        await store.createGroup(nameArg);
+        ctx.ui.notify(t(locale, "notice.createOk", { name: nameArg.trim() }), "info");
+        return true;
+      } catch (error) {
+        ctx.ui.notify(t(locale, "notice.createFailed", { message: errorMessage(error) }), "warning");
+        return false;
+      }
+    }
+    case "delete-group": {
+      if (!nameArg) {
+        ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+        return false;
+      }
+      const snapshot = await store.load();
+      const group = findGroup(snapshot, nameArg);
+      if (!group?.custom) {
+        ctx.ui.notify(t(locale, "notice.deleteForbidden"), "warning");
+        return false;
+      }
+      const confirmed = assumeYes || await ctx.ui.confirm(
+        t(locale, "confirm.title", { name: group.name }),
+        t(locale, "confirm.detail"),
+      );
+      if (!confirmed) {
+        ctx.ui.notify(t(locale, "notice.deleteCancelled"), "info");
+        return false;
+      }
+      try {
+        await store.deleteGroup(group.name);
+        ctx.ui.notify(t(locale, "notice.deleteOk", { name: group.name }), "info");
+        return true;
+      } catch (error) {
+        ctx.ui.notify(t(locale, "notice.deleteFailed", { message: errorMessage(error) }), "warning");
+        return false;
+      }
+    }
+    case "install": {
+      if (!nameArg) {
+        ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+        return false;
+      }
+      try {
+        await store.installOptionalSkill(nameArg);
+        ctx.ui.notify(t(locale, "notice.installOk", { name: nameArg }), "info");
+        return true;
+      } catch (error) {
+        ctx.ui.notify(t(locale, "notice.installFailed", { message: errorMessage(error) }), "warning");
+        return false;
+      }
+    }
+    case "assign": {
+      if (!nameArg) {
+        ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+        return false;
+      }
+      const snapshot = await store.load();
+      const skill = findSkill(snapshot, nameArg);
+      if (!skill) {
+        ctx.ui.notify(`Skill "${nameArg}" 不存在`, "warning");
+        return false;
+      }
+      const groupArg = rest[1] ?? headlessField(fields, "group", "to");
+      const target = groupArg && !["default", "none", "-"].includes(groupArg.toLowerCase()) ? groupArg : undefined;
+      try {
+        await store.assignSkillToGroup(skill.name, target);
+        ctx.ui.notify(t(locale, "notice.moveOk", { name: skill.name, target: target ?? t(locale, "defaultGroup") }), "info");
+        return true;
+      } catch (error) {
+        ctx.ui.notify(t(locale, "notice.moveFailed", { message: errorMessage(error) }), "warning");
+        return false;
+      }
+    }
+    case "enable":
+    case "disable": {
+      if (!nameArg) {
+        ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+        return false;
+      }
+      const want = sub === "enable";
+      const snapshot = await store.load();
+      const skill = groupOnly ? undefined : findSkill(snapshot, nameArg);
+      try {
+        if (skill) {
+          await store.setEnabled(skill, want);
+          ctx.ui.notify(t(locale, want ? "notice.toggledOn" : "notice.toggledOff", { name: skill.name }), "info");
+          return true;
+        }
+        const group = findGroup(snapshot, nameArg);
+        if (!group) {
+          ctx.ui.notify(`Skill/分组 "${nameArg}" 不存在`, "warning");
+          return false;
+        }
+        await store.setGroupEnabled(group, want);
+        ctx.ui.notify(t(locale, "notice.toggleGroupOk", { name: group.name }), "info");
+        return true;
+      } catch (error) {
+        ctx.ui.notify(t(locale, "notice.updateFailed", { message: errorMessage(error) }), "warning");
+        return false;
+      }
+    }
+    case "allow-invocation":
+    case "forbid-invocation": {
+      if (!nameArg) {
+        ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+        return false;
+      }
+      const disable = sub === "forbid-invocation";
+      const snapshot = await store.load();
+      const skill = groupOnly ? undefined : findSkill(snapshot, nameArg);
+      try {
+        if (skill) {
+          await store.setModelInvocation(skill, disable);
+          ctx.ui.notify(t(locale, disable ? "notice.invocationManual" : "notice.invocationAllowed", { name: skill.name }), "info");
+          return true;
+        }
+        const group = findGroup(snapshot, nameArg);
+        if (!group) {
+          ctx.ui.notify(`Skill/分组 "${nameArg}" 不存在`, "warning");
+          return false;
+        }
+        await store.setGroupModelInvocation(group, disable);
+        ctx.ui.notify(t(locale, "notice.toggleGroupInvocationOk", { name: group.name }), "info");
+        return true;
+      } catch (error) {
+        ctx.ui.notify(t(locale, "notice.updateFailed", { message: errorMessage(error) }), "warning");
+        return false;
+      }
+    }
+    default:
+      ctx.ui.notify(SKILL_HEADLESS_USAGE, "warning");
+      return false;
+  }
 }
 
 export function applySkillModelInvocationConfig(

@@ -162,7 +162,11 @@ export class SkillManagerStore {
   }
 
   async toggleGroupEnabled(group: ManagedSkillGroup): Promise<SkillManagerSnapshot> {
-    const enabled = !group.skills.every((skill) => skill.enabled);
+    return this.setGroupEnabled(group, !group.skills.every((skill) => skill.enabled));
+  }
+
+  /** 确定性设置分组启用状态（headless/命令行路径使用，避免 toggle 的歧义）。 */
+  async setGroupEnabled(group: ManagedSkillGroup, enabled: boolean): Promise<SkillManagerSnapshot> {
     for (const skill of group.skills) {
       if (skill.readOnly || skill.enabled === enabled) continue;
       if (skill.origin === "package") this.togglePackageResource(skill, enabled);
@@ -172,8 +176,17 @@ export class SkillManagerStore {
     return this.load();
   }
 
+  async setEnabled(skill: ManagedSkill, enabled: boolean): Promise<SkillManagerSnapshot> {
+    if (skill.enabled === enabled) return this.load();
+    return this.toggleEnabled(skill);
+  }
+
   async toggleGroupModelInvocation(group: ManagedSkillGroup): Promise<SkillManagerSnapshot> {
-    const disabled = !group.skills.every((skill) => skill.disableModelInvocation);
+    return this.setGroupModelInvocation(group, !group.skills.every((skill) => skill.disableModelInvocation));
+  }
+
+  /** 确定性设置分组的模型调用开关。 */
+  async setGroupModelInvocation(group: ManagedSkillGroup, disabled: boolean): Promise<SkillManagerSnapshot> {
     await this.updateProjectConfig((root) => {
       const skills = isRecord(root.skills) ? { ...root.skills } : {};
       for (const skill of group.skills) {
@@ -184,6 +197,11 @@ export class SkillManagerStore {
       return { ...root, skills };
     });
     return this.load();
+  }
+
+  async setModelInvocation(skill: ManagedSkill, disableModelInvocation: boolean): Promise<SkillManagerSnapshot> {
+    if (skill.disableModelInvocation === disableModelInvocation) return this.load();
+    return this.toggleModelInvocation(skill);
   }
 
   async createGroup(name: string): Promise<SkillManagerSnapshot> {

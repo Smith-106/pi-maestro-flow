@@ -76,7 +76,9 @@ test("Smart Search registration exposes the tool and /smart-search config comman
   assert.ok(commands.has("smart-search"));
   await commands.get("smart-search")!.handler("config", {
     cwd: "D:/workspace",
-    ui: { notify() {} },
+    hasUI: true,
+    mode: "tui",
+    ui: { notify() {}, custom() { return Promise.resolve(undefined); } },
   } as never);
   assert.deepEqual(opened, ["D:/workspace"]);
 });

@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { getTuiLocale } from "../tui/locale.ts";
 import { MaestroHookInstallerStore } from "./installer-store.ts";
 import { sanitizeHookDisplayText } from "./review.ts";
@@ -71,6 +72,10 @@ export async function runMaestroHookInstaller(
   explicitLocale?: SupportedSettingsLocale,
 ): Promise<MaestroHookInstallerResult> {
   const locale = getTuiLocale(explicitLocale);
+  if (!supportsCustomOverlay(ctx)) {
+    ctx.ui.notify("Hook installer requires an interactive TUI; this mode does not support overlays.", "warning");
+    return { changed: false };
+  }
   const t = (key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string => translate(locale, key, vars);
   let snapshot = await store.load();
   let uiState: Partial<MaestroHookInstallerUiState> = {

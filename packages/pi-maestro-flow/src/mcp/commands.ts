@@ -21,8 +21,22 @@ import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
 import { getAuthForUrl } from "./mcp-auth.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { openPath } from "./utils.ts";
-import { McpManagerStore } from "./mcp-manager-store.ts";
-import { runMcpManager } from "./mcp-manager-flow.ts";
+import { McpManagerStore, type McpConfigScope } from "./mcp-manager-store.ts";
+import {
+  normalizeHttpUrl,
+  parseStringArray,
+  parseStringRecord,
+  runMcpManager,
+  validateMcpServerEntry,
+} from "./mcp-manager-flow.ts";
+import {
+  extractHeadlessArgs,
+  headlessField,
+  parseHeadlessBoolean,
+  parseHeadlessList,
+  splitCommandArgs,
+} from "../tui/headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 
 const COMMAND_CATALOGS = {
   en: {
@@ -508,4 +522,206 @@ export async function openMcpAuthPanel(
   });
 
   return { configChanged: false };
+}
+
+const MCP_HEADLESS_USAGE =
+  "用法：/mcp [status|list|add|edit <name>|delete <name> [--yes]|enable <name>|disable <name>|reconnect [name]|auth <name>|logout <name>|tools]；add/edit 字段：--name=.. --scope=user|project --command=..|--url=.. --args=<json> --env=<json> --headers=<json> --auth=oauth|bearer|none --bearer-token=.. --lifecycle=lazy|keep-alive|eager --idle-timeout=<min> --request-timeout-ms=<ms> --expose-resources=on|off --direct-tools=on|off|a,b --exclude-tools=a,b --enabled=on|off --debug=on|off --cwd=..";
+
+/** 将 --field=value 合并进 ServerEntry；edit 时基于 existing 合并，缺省字段保持原值。 */
+function mcpServerEntryFromHeadless(
+  fields: Record<string, string>,
+  existing: ServerEntry | undefined,
+): { entry: ServerEntry } | { error: string } {
+  const entry: ServerEntry = { ...(existing ?? {}) };
+  try {
+    const command = headlessField(fields, "command", "cmd");
+    if (command !== undefined) {
+      entry.command = command;
+      delete entry.url;
+    }
+    const url = headlessField(fields, "url", "endpoint");
+    if (url !== undefined) {
+      entry.url = normalizeHttpUrl(url);
+      delete entry.command;
+    }
+    const args = headlessField(fields, "args");
+    if (args !== undefined) entry.args = parseStringArray(args, "--args");
+    const env = headlessField(fields, "env");
+    if (env !== undefined) entry.env = parseStringRecord(env, "--env");
+    const headers = headlessField(fields, "headers");
+    if (headers !== undefined) entry.headers = parseStringRecord(headers, "--headers");
+    const cwd = headlessField(fields, "cwd", "workdir");
+    if (cwd !== undefined) entry.cwd = cwd;
+    const auth = headlessField(fields, "auth");
+    if (auth !== undefined) {
+      const normalized = auth.trim().toLowerCase();
+      if (normalized === "oauth" || normalized === "bearer") entry.auth = normalized;
+      else if (["none", "off", "false", "disabled"].includes(normalized)) entry.auth = false;
+      else return { error: "--auth expects oauth|bearer|none" };
+    }
+    const bearerToken = headlessField(fields, "bearerToken", "bearer-token", "token");
+    if (bearerToken !== undefined) entry.bearerToken = bearerToken;
+    const bearerTokenEnv = headlessField(fields, "bearerTokenEnv", "bearer-token-env");
+    if (bearerTokenEnv !== undefined) entry.bearerTokenEnv = bearerTokenEnv;
+    const lifecycle = headlessField(fields, "lifecycle");
+    if (lifecycle !== undefined) {
+      const normalized = lifecycle.trim().toLowerCase();
+      if (normalized !== "lazy" && normalized !== "keep-alive" && normalized !== "eager") {
+        return { error: "--lifecycle expects lazy|keep-alive|eager" };
+      }
+      entry.lifecycle = normalized;
+    }
+    const idleTimeout = headlessField(fields, "idleTimeout", "idle-timeout");
+    if (idleTimeout !== undefined) {
+      const value = Number(idleTimeout.trim());
+      if (!Number.isFinite(value) || value <= 0) return { error: "--idle-timeout must be a positive number (minutes)" };
+      entry.idleTimeout = value;
+    }
+    const requestTimeoutMs = headlessField(fields, "requestTimeoutMs", "request-timeout-ms", "timeoutMs", "timeout-ms");
+    if (requestTimeoutMs !== undefined) {
+      const value = Number(requestTimeoutMs.trim());
+      if (!Number.isSafeInteger(value) || value <= 0) return { error: "--request-timeout-ms must be a positive integer" };
+      entry.requestTimeoutMs = value;
+    }
+    for (const [names, apply] of [
+      [["exposeResources", "expose-resources"], (parsed: boolean) => { entry.exposeResources = parsed; }],
+      [["debug"], (parsed: boolean) => { entry.debug = parsed; }],
+      [["enabled"], (parsed: boolean) => { entry.enabled = parsed; }],
+    ] as const) {
+      const raw = headlessField(fields, ...names);
+      if (raw === undefined) continue;
+      const parsed = parseHeadlessBoolean(raw);
+      if (parsed === undefined) return { error: `--${names[names.length - 1]} expects on|off` };
+      apply(parsed);
+    }
+    const directTools = headlessField(fields, "directTools", "direct-tools");
+    if (directTools !== undefined) {
+      const parsed = parseHeadlessBoolean(directTools);
+      entry.directTools = parsed !== undefined ? parsed : parseHeadlessList(directTools);
+    }
+    const excludeTools = headlessField(fields, "excludeTools", "exclude-tools");
+    if (excludeTools !== undefined) entry.excludeTools = parseHeadlessList(excludeTools);
+    validateMcpServerEntry(entry);
+    return { entry };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export interface McpHeadlessResult {
+  handled: boolean;
+  configChanged: boolean;
+}
+
+/**
+ * /mcp 的 headless 配置路径：所有写入经过 McpManagerStore（与 manager overlay 同一套
+ * 原子写+锁），成功后由调用方 ctx.reload() 让新配置在进程内生效。
+ */
+export async function runMcpHeadless(
+  state: McpExtensionState,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  configOverridePath: string | undefined,
+  subcommand: string,
+  rest: string[],
+  fields: Record<string, string>,
+  locale?: SupportedSettingsLocale,
+): Promise<McpHeadlessResult> {
+  const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
+  const store = new McpManagerStore(ctx.cwd, configPath);
+  const nameArg = rest[0] ?? headlessField(fields, "name", "server");
+  const assumeYes = parseHeadlessBoolean(headlessField(fields, "yes") ?? "") === true;
+  const findServer = (snapshot: Awaited<ReturnType<McpManagerStore["load"]>>, name: string | undefined) => {
+    const server = name ? snapshot.servers.find((candidate) => candidate.name === name) : undefined;
+    if (!server) ctx.ui.notify(`MCP server not found: ${name ?? "(missing)"}`, "warning");
+    return server;
+  };
+
+  try {
+    switch (subcommand) {
+      case "list": {
+        const snapshot = await store.load();
+        const lines = snapshot.servers.map((server) => {
+          const target = server.entry.command ?? server.entry.url ?? "?";
+          return `${server.entry.enabled === false ? "off" : "on "} ${server.name} [${server.scope}] ${target}`;
+        });
+        ctx.ui.notify(lines.length > 0 ? lines.join("\n") : "No MCP servers configured", "info");
+        return { handled: true, configChanged: false };
+      }
+      case "add":
+      case "set":
+      case "edit": {
+        const editing = subcommand !== "add";
+        const snapshot = await store.load();
+        const existing = editing ? findServer(snapshot, nameArg) : snapshot.servers.find((server) => server.name === nameArg);
+        if (editing && !existing) return { handled: true, configChanged: false };
+        const name = nameArg ?? existing?.name;
+        if (!name) {
+          ctx.ui.notify(MCP_HEADLESS_USAGE, "warning");
+          return { handled: true, configChanged: false };
+        }
+        const built = mcpServerEntryFromHeadless(fields, existing?.entry);
+        if ("error" in built) {
+          ctx.ui.notify(`${built.error}\n${MCP_HEADLESS_USAGE}`, "warning");
+          return { handled: true, configChanged: false };
+        }
+        const scopeRaw = headlessField(fields, "scope")?.toLowerCase();
+        if (scopeRaw !== undefined && scopeRaw !== "user" && scopeRaw !== "project") {
+          ctx.ui.notify("--scope expects user|project", "warning");
+          return { handled: true, configChanged: false };
+        }
+        const scope: McpConfigScope = scopeRaw === "project" || scopeRaw === "user"
+          ? scopeRaw
+          : existing?.scope === "project" ? "project" : "user";
+        await store.save({
+          previousName: existing && !existing.readOnly ? existing.name : undefined,
+          name,
+          entry: built.entry,
+          scope,
+          allowImportedOverride: existing?.readOnly === true || assumeYes,
+        });
+        ctx.ui.notify(`${editing ? "Updated" : "Added"} MCP server "${name}" (${scope}) · reload 后生效`, "info");
+        return { handled: true, configChanged: true };
+      }
+      case "delete":
+      case "remove": {
+        const snapshot = await store.load();
+        const server = findServer(snapshot, nameArg);
+        if (!server) return { handled: true, configChanged: false };
+        const confirmed = assumeYes || await ctx.ui.confirm(
+          `Delete MCP server "${server.name}"?`,
+          `This removes the server from the ${server.scope} configuration:\n${server.path}`,
+        );
+        if (!confirmed) return { handled: true, configChanged: false };
+        await store.delete(server);
+        ctx.ui.notify(`Deleted MCP server "${server.name}" · reload 后生效`, "info");
+        return { handled: true, configChanged: true };
+      }
+      case "enable":
+      case "disable": {
+        const snapshot = await store.load();
+        const server = findServer(snapshot, nameArg);
+        if (!server) return { handled: true, configChanged: false };
+        const want = subcommand === "enable";
+        if ((server.entry.enabled !== false) === want) {
+          ctx.ui.notify(`MCP server "${server.name}" already ${want ? "enabled" : "disabled"}`, "info");
+          return { handled: true, configChanged: false };
+        }
+        await store.save({
+          previousName: server.readOnly ? undefined : server.name,
+          name: server.name,
+          entry: { ...server.entry, enabled: want },
+          scope: server.scope === "project" ? "project" : "user",
+          allowImportedOverride: server.readOnly,
+        });
+        ctx.ui.notify(`${want ? "Enabled" : "Disabled"} MCP server "${server.name}" · reload 后生效`, "info");
+        return { handled: true, configChanged: true };
+      }
+      default:
+        return { handled: false, configChanged: false };
+    }
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+    return { handled: true, configChanged: false };
+  }
 }

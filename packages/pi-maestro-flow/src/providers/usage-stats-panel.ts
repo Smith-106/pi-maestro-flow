@@ -13,7 +13,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { makeBorderFrame, resolveGlyphs } from "pi-maestro-settings-core/ui";
+import { makeBorderFrame, resolveGlyphs, supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import { ANSI_DIM, ANSI_BOLD, ANSI_RESET, ANSI_REVERSE } from "../statusline/constants.ts";
 
 const FRAME_GLYPHS = resolveGlyphs("nerd");
@@ -368,8 +368,8 @@ export class UsageStatsOverlay implements Component {
 export async function showUsageStatsPanel(
 	ctx: ExtensionCommandContext,
 ): Promise<void> {
-	if (!ctx.hasUI || typeof ctx.ui.custom !== "function") {
-		ctx.ui.notify("/api-manager stats 需要交互式 Pi 会话。", "warning");
+	if (!supportsCustomOverlay(ctx)) {
+		ctx.ui.notify("/api-manager stats 需要交互式 TUI 会话；当前模式不支持 overlay。", "warning");
 		return;
 	}
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => new UsageStatsOverlay({

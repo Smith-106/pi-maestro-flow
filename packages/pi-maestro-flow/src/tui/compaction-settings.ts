@@ -28,13 +28,24 @@ import {
   readCompactionSettings,
   resolveEffectiveCompactionSettings,
   resolveProjectSettingsPath,
+  saveCompactionPatch,
   saveCompactionScope,
+  unsetCompactionField,
   validateCompactionPatch,
   type CompactionConfigPatch,
   type CompactionScope,
   type CompactionSettingsSnapshot,
+  type NewContextCompactionConfigPatch,
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
+import {
+  extractHeadlessArgs,
+  hasHeadlessFields,
+  headlessField,
+  parseHeadlessBoolean,
+  splitCommandArgs,
+} from "./headless-args.ts";
+import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
 import {
   deriveLinkedCompactionThreshold,
   summaryOutputTokenLimit,
@@ -1397,9 +1408,27 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 export function registerCompactionSettingsCommand(pi: ExtensionAPI): void {
   pi.registerCommand("maestro-compaction", {
     description: translateCompaction(getTuiLocale(), "command.description"),
-    async handler(_args, ctx) {
-      if (!ctx.hasUI) {
-        ctx.ui.notify(translateCompaction(getTuiLocale(), "command.needTui"), "error");
+    async handler(args, ctx) {
+      const { positionals, fields } = extractHeadlessArgs(splitCommandArgs(args));
+      const sub = positionals[0]?.toLowerCase() ?? "";
+      if (sub === "show" || sub === "status") {
+        const snapshot = readCompactionSettings(ctx.cwd);
+        ctx.ui.notify(JSON.stringify({
+          project: snapshot.scopes.project,
+          user: snapshot.scopes.user,
+          effective: resolveEffectiveCompactionSettings(snapshot.scopes.user, snapshot.scopes.project),
+        }, null, 2), "info");
+        return;
+      }
+      if (sub === "set" || sub === "unset" || sub === "clear" || hasHeadlessFields(fields)) {
+        await applyHeadlessCompactionConfig(ctx, sub, positionals.slice(1), fields);
+        return;
+      }
+      if (!supportsCustomOverlay(ctx)) {
+        ctx.ui.notify(
+          `${translateCompaction(getTuiLocale(), "command.needTui")} Headless: /maestro-compaction set [--scope=project|user] --enabled=on --reserve-tokens=N --keep-recent-tokens=N --model=p/m --payload-limit-bytes=N --soft=<json> --new-context=<json>；/maestro-compaction unset [--scope=...] <field>`,
+          "error",
+        );
         return;
       }
       const result = await showCompactionSettingsOverlay(ctx);
@@ -1408,6 +1437,125 @@ export function registerCompactionSettingsCommand(pi: ExtensionAPI): void {
       return;
     },
   });
+}
+
+/** 将 --field=value 映射为 CompactionConfigPatch；返回 patch 或错误消息。 */
+function compactionPatchFromHeadless(
+  fields: Record<string, string>,
+): { patch: CompactionConfigPatch } | { error: string } {
+  const patch: CompactionConfigPatch = {};
+  const consumed = new Set(["scope"]);
+  const intField = (raw: string, name: string): number | { error: string } => {
+    const value = Number(raw.trim());
+    if (!Number.isSafeInteger(value) || value <= 0) return { error: `--${name} must be a positive integer` };
+    return value;
+  };
+  const jsonField = (raw: string, name: string): { value: Record<string, unknown> } | { error: string } => {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { error: `--${name} expects a JSON object` };
+      return { value: parsed as Record<string, unknown> };
+    } catch {
+      return { error: `--${name} expects a JSON object` };
+    }
+  };
+  for (const [key, raw] of Object.entries(fields)) {
+    if (consumed.has(key)) continue;
+    switch (key) {
+      case "enabled": {
+        const parsed = parseHeadlessBoolean(raw);
+        if (parsed === undefined) return { error: "--enabled expects on/off/true/false" };
+        patch.enabled = parsed;
+        break;
+      }
+      case "model":
+        patch.model = raw.trim();
+        break;
+      case "reserveTokens": {
+        const value = intField(raw, "reserve-tokens");
+        if (typeof value !== "number") return value;
+        patch.reserveTokens = value;
+        break;
+      }
+      case "keepRecentTokens": {
+        const value = intField(raw, "keep-recent-tokens");
+        if (typeof value !== "number") return value;
+        patch.keepRecentTokens = value;
+        break;
+      }
+      case "payloadLimitBytes": {
+        const value = Number(raw.trim());
+        if (!Number.isFinite(value) || value <= 0) return { error: "--payload-limit-bytes must be a positive number" };
+        patch.payloadLimitBytes = value;
+        break;
+      }
+      case "soft": {
+        const value = jsonField(raw, "soft");
+        if ("error" in value) return value;
+        patch.soft = value.value as SoftCompactionConfigPatch;
+        break;
+      }
+      case "newContext": {
+        const value = jsonField(raw, "new-context");
+        if ("error" in value) return value;
+        patch.newContext = value.value as NewContextCompactionConfigPatch;
+        break;
+      }
+      default:
+        return { error: `Unknown field --${key}（允许：enabled/model/reserve-tokens/keep-recent-tokens/payload-limit-bytes/soft/new-context/scope）` };
+    }
+  }
+  return { patch };
+}
+
+async function applyHeadlessCompactionConfig(
+  ctx: ExtensionCommandContext,
+  sub: string,
+  rest: string[],
+  fields: Record<string, string>,
+): Promise<void> {
+  const scopeField = headlessField(fields, "scope")?.toLowerCase();
+  if (scopeField !== undefined && scopeField !== "project" && scopeField !== "user" && scopeField !== "global") {
+    ctx.ui.notify("--scope expects project|user", "warning");
+    return;
+  }
+  const scope: CompactionScope = scopeField === "user" || scopeField === "global" ? "user" : "project";
+  if (scope === "project") {
+    const reason = await projectWriteRestriction(ctx.cwd);
+    if (reason) {
+      ctx.ui.notify(`Project scope 不可写：${reason}（可用 --scope=user）`, "warning");
+      return;
+    }
+  }
+  if (sub === "unset" || sub === "clear") {
+    const field = (rest[0] ?? headlessField(fields, "field")) as keyof CompactionConfigPatch | undefined;
+    if (!field || !(COMPACTION_FIELDS as readonly string[]).includes(field)) {
+      ctx.ui.notify(`unset 需要字段名：${COMPACTION_FIELDS.join("|")}`, "warning");
+      return;
+    }
+    await unsetCompactionField(scope, ctx.cwd, field);
+    ctx.ui.notify(`compaction.${field} 已清除（${scope}）`, "info");
+    await ctx.reload();
+    return;
+  }
+  const built = compactionPatchFromHeadless(fields);
+  if ("error" in built) {
+    ctx.ui.notify(built.error, "warning");
+    return;
+  }
+  if (Object.keys(built.patch).length === 0) {
+    ctx.ui.notify("没有可写入的字段：/maestro-compaction set [--scope=project|user] --enabled=on --reserve-tokens=N --keep-recent-tokens=N --model=p/m --payload-limit-bytes=N --soft=<json> --new-context=<json>", "warning");
+    return;
+  }
+  const validation = validateCompactionPatch(built.patch, ctx.model?.contextWindow, ctx.model?.maxTokens);
+  if (validation.errors.length > 0) {
+    ctx.ui.notify(validation.errors.join("\n"), "error");
+    return;
+  }
+  await saveCompactionPatch(scope, ctx.cwd, built.patch);
+  const warning = validation.warnings.length > 0 ? `\n${validation.warnings.join("\n")}` : "";
+  ctx.ui.notify(`Compaction 配置已写入 ${scope} scope。${warning}`, "info");
+  await ctx.reload();
 }
 
 export async function showCompactionSettingsOverlay(
