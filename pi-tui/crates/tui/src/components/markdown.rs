@@ -369,17 +369,16 @@ impl<'a, 'd> Builder<'a, 'd> {
         let t = div(self.m, tbl, "md-tr md-border");
         span_text(self.m, t, "", &top);
         for (ri, r) in rows.iter().enumerate() {
-            let mut line = String::from("│");
-            for (i, w) in widths.iter().enumerate() {
-                let c = r.get(i).map(|s| s.as_str()).unwrap_or("");
-                line.push(' ');
-                line.push_str(&cell(c, *w));
-                line.push(' ');
-                line.push('│');
-            }
             let class = if ri == 0 { "md-tr md-th" } else { "md-tr" };
             let row = div(self.m, tbl, class);
-            span_text(self.m, row, "", &line);
+            // `│` separators get their own muted spans so they match the
+            // ┌─┐/├─┤ frame color instead of the cell text color.
+            span_text(self.m, row, "md-border", "│");
+            for (i, w) in widths.iter().enumerate() {
+                let c = r.get(i).map(|s| s.as_str()).unwrap_or("");
+                span_text(self.m, row, "", &format!(" {} ", cell(c, *w)));
+                span_text(self.m, row, "md-border", "│");
+            }
             if ri == 0 && rows.len() > 1 {
                 // Header separator: `─┼─` between columns.
                 let mut sep = String::from("├");

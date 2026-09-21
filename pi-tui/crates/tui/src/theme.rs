@@ -276,7 +276,7 @@ button:focus, input:focus, select:focus, textarea:focus {{ outline: none; backgr
     margin-top: 1px;
     margin-bottom: 1px;
 }}
-.md-tr {{ color: var(--text-secondary); }}
+.md-tr {{ display: flex; flex-direction: row; color: var(--text-secondary); }}
 .md-th {{ color: var(--text-primary); font-weight: bold; }}
 .md-sep, .md-border {{ color: var(--border-default); }}
 
