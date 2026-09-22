@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -53,8 +54,63 @@ export interface BrowserOpenOptions {
   userProfileDir?: string;
   /** Optional caller-owned namespace for physically isolated managed browser profiles. */
   isolationKey?: string;
+  /** Navigation guard: exact hosts or *.example.com wildcards; deny wins. Not a network sandbox. */
+  policy?: BrowserNavigationPolicy;
   signal?: AbortSignal;
   timeoutMs: number;
+}
+
+/** Declarative navigation guard for managed/profile/cdp channels (browser-use-pi policy.ts port). */
+export interface BrowserNavigationPolicy {
+  /** Exact hosts or "*.example.com" (apex included). When set, only matching http(s) pages may load. */
+  allow?: string[];
+  /** Deny wins over allow. */
+  deny?: string[];
+}
+
+export interface CompiledNavigationPolicy {
+  allowed(url: string): boolean;
+  /** Blocked navigations observed by the entry-level guards; drained into run output. */
+  violations: string[];
+}
+
+// Exact hostname or a single leading "*.domain" wildcard (apex included).
+export function domainMatcher(pattern: string): (host: string) => boolean {
+  if (typeof pattern !== "string" || !pattern || /[\s/@:#?]/.test(pattern))
+    throw new Error("Browser policy domains must be hostnames, optionally prefixed with *.");
+  const wildcard = pattern.startsWith("*.");
+  const name = pattern.slice(wildcard ? 2 : 0);
+  if (!name || name.includes("*"))
+    throw new Error("Browser policy supports only a leading *. domain wildcard.");
+  const domain = new URL(`https://${name}`).hostname.replace(/\.$/, "");
+  return (host) => host === domain || (wildcard && host.endsWith(`.${domain}`));
+}
+
+// Non-network schemes stay navigable under a policy (inline/test content); a
+// policy otherwise gates navigation to http(s) hosts. Not a network sandbox:
+// sub-resource requests and run-code fetches are not filtered.
+export function compileNavigationPolicy(policy: BrowserNavigationPolicy | undefined): CompiledNavigationPolicy | undefined {
+  if (!policy) return undefined;
+  if (policy.allow !== undefined && !Array.isArray(policy.allow)) throw new Error("Browser policy.allow must be an array.");
+  if (policy.deny !== undefined && !Array.isArray(policy.deny)) throw new Error("Browser policy.deny must be an array.");
+  const allow = policy.allow?.map(domainMatcher);
+  const deny = policy.deny?.map(domainMatcher) ?? [];
+  const allowed = (url: string): boolean => {
+    if (["about:blank", ""].includes(url) || /^data:|^blob:/i.test(url)) return true;
+    try {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return false;
+      const host = parsed.hostname.replace(/\.$/, "");
+      return !deny.some((match) => match(host)) && (allow === undefined || allow.some((match) => match(host)));
+    } catch {
+      return false;
+    }
+  };
+  return { allowed, violations: [] };
+}
+
+function recordPolicyViolation(policy: CompiledNavigationPolicy, kind: string, url: string): void {
+  if (policy.violations.length < 20) policy.violations.push(`[policy] blocked ${kind}: ${url}`);
 }
 
 export interface BrowserTabInfo {
@@ -110,14 +166,46 @@ export type BrowserPickCaptureCallback = (captures: BrowserCapture[]) => void;
 class BrowserOutputCollector {
   private bytes = 0;
   private failure?: Error;
+  /** Everything metered so far, capped — spilled to a file when the limit trips. */
+  private spillChunks: string[] = [];
+  private spillBytes = 0;
+  private static readonly spillCap = 1_000_000;
   constructor(private readonly maximum?: number) {}
 
+  private collectSpill(text: string): void {
+    if (!text || this.maximum === undefined || this.spillBytes >= BrowserOutputCollector.spillCap) return;
+    const budget = BrowserOutputCollector.spillCap - this.spillBytes;
+    const piece = Buffer.byteLength(text, "utf8") > budget ? text.slice(0, Math.max(1, Math.floor(budget / 4))) : text;
+    this.spillChunks.push(piece);
+    this.spillBytes += Buffer.byteLength(piece, "utf8");
+  }
+
+  // Ported from browser-use-pi worker.ts: when the output budget trips, the run
+  // still fails — but everything captured up to that point is preserved to a
+  // file and the error carries its path instead of losing the evidence.
+  private overflowError(): Error {
+    const captured = this.spillChunks.join("");
+    let suffix = "";
+    if (captured) {
+      try {
+        const file = path.join(os.tmpdir(), `pi-maestro-browser-output-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+        writeFileSync(file, captured, { flag: "wx", mode: 0o600 });
+        suffix = ` Captured output (pre-limit): ${file}`;
+      } catch {
+        suffix = " (captured output could not be written to a spill file)";
+      }
+    }
+    return new Error(`Browser output exceeds ${this.maximum} UTF-8 bytes.${suffix}`);
+  }
+
   pushDisplay(displays: BrowserRunOutput["displays"], item: BrowserRunOutput["displays"][number]): void {
+    this.collectSpill(item.type === "text" ? item.text : `[image: ${item.mimeType}]`);
     this.reserve(item);
     displays.push(item);
   }
 
   reserveScreenshot(metadata: BrowserRunOutput["screenshots"][number], imageBase64Bytes: number, silent: boolean): void {
+    this.collectSpill(`Screenshot: ${metadata.path ?? "(inline)"}`);
     this.reserve(metadata);
     if (!silent) {
       this.reserve({ type: "text", text: `Screenshot saved: ${metadata.path}` });
@@ -154,6 +242,7 @@ class BrowserOutputCollector {
     let serialized: string;
     try { serialized = JSON.stringify(value) ?? ""; }
     catch { return this.fail("Browser output is not JSON-serializable."); }
+    this.collectSpill(serialized);
     this.reserveBytes(Buffer.byteLength(serialized, "utf8"));
   }
 
@@ -161,7 +250,10 @@ class BrowserOutputCollector {
     if (this.failure) throw this.failure;
     if (this.maximum === undefined) return;
     const next = this.bytes + bytes;
-    if (next > this.maximum) this.fail(`Browser output exceeds ${this.maximum} UTF-8 bytes.`);
+    if (next > this.maximum) {
+      this.failure ??= this.overflowError();
+      throw this.failure;
+    }
     this.bytes = next;
   }
 }
@@ -254,6 +346,9 @@ interface PuppeteerEntry extends BaseEntry {
   requestScope?: RequestListenerScope;
   elementSelectors: Map<number, string>;
   cdpSession?: CDPSession;
+  /** Compiled navigation guard from open options; undefined disables guarding. */
+  policy?: CompiledNavigationPolicy;
+  policyGuardsInstalled?: boolean;
 }
 
 interface ExtensionTrackedOperation {
@@ -316,6 +411,10 @@ export function canonicalizeBrowserOpenOptions(options: BrowserOpenOptions): Can
     if (explicit === "cdp" && !options.cdpUrl) {
       throw new Error('app.channel "cdp" requires app.cdp_url.');
     }
+    if (explicit === "extension" && options.policy) {
+      throw browserChannelConflict(explicit, "app.policy", "managed");
+    }
+    compileNavigationPolicy(options.policy); // validate patterns eagerly; throws on bad input
     return { ...options, channel: explicit };
   }
 
@@ -326,6 +425,7 @@ export function canonicalizeBrowserOpenOptions(options: BrowserOpenOptions): Can
     : options.cdpUrl
       ? "cdp"
       : "managed";
+  compileNavigationPolicy(options.policy); // validate patterns eagerly; throws on bad input
   return { ...options, channel };
 }
 
@@ -696,7 +796,15 @@ export class BrowserManager implements BrowserManagerLike {
       requestScope = installRequestListenerScope(entry.page);
       entry.requestScope = requestScope;
       const tab = createTabApi(entry, cwd, displays, screenshots, signal, timeoutMs, output);
-      const runApis = observeBrowserRunApis(name, entry.page, entry.browser, tab);
+      const navGuard = entry.policy
+        ? (url: string) => {
+            if (!entry.policy!.allowed(url)) {
+              recordPolicyViolation(entry.policy!, "goto", url);
+              throw new Error(`Browser navigation blocked by domain policy: ${url}`);
+            }
+          }
+        : undefined;
+      const runApis = observeBrowserRunApis(name, entry.page, entry.browser, tab, undefined, navGuard);
       const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
       const wait = (ms: number) => abortableDelay(ms, signal);
       const display = (value: unknown) => output.pushDisplay(displays, { type: "text", text: formatDisplay(value) });
@@ -720,6 +828,12 @@ export class BrowserManager implements BrowserManagerLike {
           added.push(item);
         }
         if (added.length > 0) newTabs = added;
+      }
+      // Surface navigations the entry-level guards blocked during this run.
+      if (entry.policy?.violations.length) {
+        for (const violation of entry.policy.violations.splice(0)) {
+          output.pushDisplay(displays, { type: "text", text: violation });
+        }
       }
       output.reserve({ url: afterUrl, navigated: navigated || undefined });
       return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
@@ -974,7 +1088,17 @@ export class BrowserManager implements BrowserManagerLike {
       ? (dialog) => { void settleBrowserDialog(dialog, dialogPolicy); }
       : undefined;
     if (entry.dialogHandler) entry.page.on("dialog", entry.dialogHandler);
+    // A re-open without policy clears the guard (options-driven, like dialogs).
+    entry.policy = compileNavigationPolicy(options.policy);
+    if (entry.policy && !entry.policyGuardsInstalled) {
+      entry.policyGuardsInstalled = true;
+      installNavigationGuards(entry);
+    }
     if (options.url) {
+      if (entry.policy && !entry.policy.allowed(options.url)) {
+        recordPolicyViolation(entry.policy, "open url", options.url);
+        throw new Error(`Browser navigation blocked by domain policy: ${options.url}`);
+      }
       await raceAbort(entry.page.goto(options.url, { waitUntil: options.waitUntil ?? "load", timeout: options.timeoutMs }), options.signal, options.timeoutMs);
       entry.elementSelectors.clear();
     }
@@ -1032,6 +1156,7 @@ function validateExtensionOpenOptions(options: BrowserOpenOptions): void {
   if (options.waitUntil) unsupported.push("wait_until");
   if (options.dialogs) unsupported.push("dialogs");
   if (options.userProfileDir) unsupported.push("app.user_profile_dir");
+  if (options.policy) unsupported.push("app.policy");
   if (unsupported.length > 0) {
     throw new Error(`Browser extension channel does not support open option(s): ${unsupported.join(", ")}. Supported open selectors: app.target to borrow an existing tab, or url to create an owned tab.`);
   }
@@ -1488,6 +1613,10 @@ function createTabApi(
 ) {
   const page = entry.page;
   const deadline = () => Math.max(1, timeoutMs);
+  const ensureCdpSession = async (): Promise<CDPSession> => {
+    if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
+    return entry.cdpSession;
+  };
   const resolve = async (selectorOrId: string | number): Promise<ElementHandle<Element>> => {
     const selector = typeof selectorOrId === "number" ? entry.elementSelectors.get(selectorOrId) : selectorOrId;
     if (!selector) throw new Error(`Unknown or stale element id: ${selectorOrId}`);
@@ -1644,8 +1773,115 @@ function createTabApi(
       await handle.uploadFile(...filePaths.map((file) => path.resolve(cwd, file)));
     },
     async cdp(method: string, params?: Record<string, unknown>) {
-      if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
-      return entry.cdpSession.send(method as never, params as never) as Promise<Record<string, unknown>>;
+      const session = await ensureCdpSession();
+      return session.send(method as never, params as never) as Promise<Record<string, unknown>>;
+    },
+    // AX-tree discovery (browser-use-pi page.snapshot port): the accessibility
+    // tree is the semantic observation layer — role/name/value plus control
+    // state and a backendNodeId that feeds straight into DOM.* CDP commands and
+    // the clickNode/typeNode helpers below. Complements observe()/extract():
+    // AX sees disabled/checked/pressed state and survives CSS deception.
+    async axTree(options?: { maxNodes?: number }) {
+      const session = await ensureCdpSession();
+      const { nodes } = await session.send("Accessibility.getFullAXTree" as never) as { nodes?: Array<Record<string, unknown>> };
+      const limit = Math.max(1, Math.min(5000, Math.floor(options?.maxNodes ?? 1500)));
+      const mapped: Array<Record<string, unknown>> = [];
+      let eligible = 0;
+      for (const node of nodes ?? []) {
+        if (node.ignored === true || typeof node.backendDOMNodeId !== "number") continue;
+        eligible += 1;
+        if (mapped.length >= limit) continue;
+        const item: Record<string, unknown> = {
+          id: node.backendDOMNodeId,
+          role: String((node.role as { value?: unknown } | undefined)?.value ?? ""),
+          name: String((node.name as { value?: unknown } | undefined)?.value ?? "").replace(/\s+/g, " ").trim(),
+        };
+        const value = (node.value as { value?: unknown } | undefined)?.value;
+        if (value !== undefined) item.value = String(value);
+        for (const prop of (node.properties as Array<{ name?: string; value?: { value?: unknown } }> | undefined) ?? []) {
+          const observed = prop.value?.value;
+          if (prop.name === "checked" || prop.name === "pressed") {
+            if (observed === "mixed") item[prop.name] = "mixed";
+            else if (observed === true || observed === "true") item[prop.name] = true;
+            else if (observed === false || observed === "false") item[prop.name] = false;
+          } else if ((prop.name === "selected" || prop.name === "expanded" || prop.name === "disabled") && typeof observed === "boolean") {
+            item[prop.name] = observed;
+          }
+        }
+        mapped.push(item);
+      }
+      const title = await raceAbort(page.title(), signal, Math.min(1_000, deadline())).catch(() => "");
+      return { url: page.url(), title, nodes: mapped, truncated: eligible > mapped.length };
+    },
+    // backendNodeId -> physical click (browser-use-pi AX recipe): scroll into
+    // the layout viewport, read the content quad, click the centroid via the
+    // CDP 3-event path. Coordinates hit whatever is visible — check overlays
+    // and disabled state (visible on the AX node) first.
+    async clickNode(backendNodeId: number, options?: { hoverMs?: number }) {
+      if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) throw new Error("tab.clickNode expects a positive backendNodeId from tab.axTree().");
+      const session = await ensureCdpSession();
+      await session.send("DOM.scrollIntoViewIfNeeded" as never, { backendNodeId } as never);
+      const { model } = await session.send("DOM.getBoxModel" as never, { backendNodeId } as never) as { model?: { content?: number[] } };
+      const quad = model?.content;
+      if (!quad || quad.length < 8) throw new Error(`tab.clickNode: backendNodeId ${backendNodeId} has no box model (hidden or detached).`);
+      await this.cdpClick((quad[0]! + quad[2]! + quad[4]! + quad[6]!) / 4, (quad[1]! + quad[3]! + quad[5]! + quad[7]!) / 4, options);
+    },
+    // Focus by backendNodeId and insert text through the CDP input pipeline
+    // (Input.insertText handles arbitrary unicode in one shot). replace:true
+    // selects existing content first (native select() for inputs, or
+    // selectAllChildren for contenteditable); replace + "" sends Backspace —
+    // insertText("") inserts nothing.
+    async typeNode(backendNodeId: number, text: string, options?: { replace?: boolean }) {
+      if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) throw new Error("tab.typeNode expects a positive backendNodeId from tab.axTree().");
+      const session = await ensureCdpSession();
+      await session.send("DOM.focus" as never, { backendNodeId } as never);
+      if (options?.replace) {
+        const { object } = await session.send("DOM.resolveNode" as never, { backendNodeId } as never) as { object?: { objectId?: string } };
+        if (object?.objectId) {
+          try {
+            await session.send("Runtime.callFunctionOn" as never, {
+              objectId: object.objectId,
+              functionDeclaration: `function() { if (typeof this.select === "function") { this.select(); } else { const s = this.ownerDocument.defaultView.getSelection(); if (s) { s.selectAllChildren(this); } } }`,
+            } as never);
+          } finally {
+            await session.send("Runtime.releaseObject" as never, { objectId: object.objectId } as never).catch(() => {});
+          }
+        }
+        if (text === "") {
+          await session.send("Input.dispatchKeyEvent" as never, { type: "rawKeyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 } as never);
+          await session.send("Input.dispatchKeyEvent" as never, { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 } as never);
+          return;
+        }
+      }
+      if (text) await session.send("Input.insertText" as never, { text } as never);
+    },
+    // One-shot CDP event waiter on the page session (browser-use-pi
+    // browser.waitFor port): register BEFORE triggering the action — events
+    // are not commands and are never replayed.
+    async waitForCdp(method: string, options?: { predicate?: (params: Record<string, unknown>) => boolean; timeout?: number }) {
+      const session = await ensureCdpSession();
+      const timeout = Math.max(1, Math.floor(options?.timeout ?? deadline()));
+      const emitter = session as unknown as { on(m: string, h: (p: unknown) => void): void; off(m: string, h: (p: unknown) => void): void };
+      return new Promise<Record<string, unknown>>((resolvePromise, rejectPromise) => {
+        const finish = (error?: Error, value?: Record<string, unknown>) => {
+          clearTimeout(timer);
+          emitter.off(method, listener);
+          signal?.removeEventListener("abort", abort);
+          if (error) rejectPromise(error); else resolvePromise(value ?? {});
+        };
+        const listener = (params: unknown) => {
+          try {
+            if (!options?.predicate || options.predicate(params as Record<string, unknown>)) finish(undefined, params as Record<string, unknown>);
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+          }
+        };
+        const abort = () => finish(abortError());
+        const timer = setTimeout(() => finish(new Error(`CDP event ${method} exceeded ${timeout} ms.`)), timeout);
+        emitter.on(method, listener);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      });
     },
     cookies: {
       async get(filter?: { domain?: string; name?: string }) {
@@ -1843,8 +2079,8 @@ async function connectBrowser(options: CanonicalBrowserOpenOptions, key: string)
   if (options.channel === "extension") throw new Error("Internal error: extension entries must use the browser-bridge backend.");
   if (options.channel === "profile") {
     if (!options.userProfileDir) throw new Error("attach_user_profile requires app.user_profile_dir pointing at a Chrome user-data-dir whose browser runs with --remote-debugging-port.");
-    let port = await devToolsPortFor(options.userProfileDir);
-    if (!port) {
+    let endpoint = await devToolsEndpointFor(options.userProfileDir);
+    if (!endpoint) {
       // No live debug port: start the user's own Chrome with remote debugging on
       // their profile (zero-setup attach). This mirrors GenericAgent's extension
       // convenience without a second WS control channel — pi still drives via CDP.
@@ -1852,15 +2088,17 @@ async function connectBrowser(options: CanonicalBrowserOpenOptions, key: string)
       const executablePath = await findBrowserExecutable(options.executablePath, options.cwd);
       if (!executablePath) throw new Error("No Chromium browser found to launch for attach_user_profile. Set app.path, PUPPETEER_EXECUTABLE_PATH, or CHROME_PATH, or start Chrome manually with --remote-debugging-port.");
       if (await staleProfileProcessesExist(options.userProfileDir)) await reclaimProfileProcesses(options.userProfileDir);
-      port = await launchAttachedChrome(executablePath, options.userProfileDir, options);
+      endpoint = await launchAttachedChrome(executablePath, options.userProfileDir, options);
     }
-    const pending = puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
-    const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
+    const browser = await connectViaDevtoolsEndpoint(endpoint, options, options.timeoutMs);
     return { browser, owned: false, kind: "connected", channel: "profile", reused: false, profileDir: options.userProfileDir };
   }
   if (options.channel === "cdp") {
     if (!options.cdpUrl) throw new Error('app.channel "cdp" requires app.cdp_url.');
-    const pending = puppeteer.connect({ browserURL: options.cdpUrl.replace(/\/$/, "") });
+    const cdpUrl = options.cdpUrl.replace(/\/$/, "");
+    const pending = /^wss?:\/\//i.test(cdpUrl)
+      ? puppeteer.connect({ browserWSEndpoint: cdpUrl })
+      : puppeteer.connect({ browserURL: cdpUrl });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
     return { browser, owned: false, kind: "connected", channel: "cdp", reused: false };
   }
@@ -1879,24 +2117,57 @@ async function connectBrowser(options: CanonicalBrowserOpenOptions, key: string)
 }
 
 async function tryReuseBrowser(profileDir: string, options: BrowserOpenOptions): Promise<{ browser: Browser; kind: "headless" | "headed" } | undefined> {
-  const port = await devToolsPortFor(profileDir);
-  if (!port) return undefined;
-  const pending = puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
+  const endpoint = await devToolsEndpointFor(profileDir);
+  if (!endpoint) return undefined;
   try {
-    const browser = await acquireResource(pending, options.signal, Math.min(2_000, options.timeoutMs), (late) => late.disconnect());
+    const browser = await connectViaDevtoolsEndpoint(endpoint, options, Math.min(2_000, options.timeoutMs));
     return { browser, kind: options.visible ? "headed" : "headless" };
   } catch {
     return undefined;
   }
 }
 
-async function devToolsPortFor(profileDir: string): Promise<number | undefined> {
+// DevToolsActivePort carries "<port>\n<ws path>". Both lines are validated so a
+// stale or partially-written file cannot be mistaken for a live endpoint
+// (browser-use-pi browser.ts port).
+export function parseDevToolsActivePort(contents: string): { port: number; wsPath: string } | undefined {
+  const [portLine, wsPath] = contents.trim().split(/\r?\n/);
+  const port = Number(portLine?.trim());
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+  if (typeof wsPath !== "string" || !wsPath.trim().startsWith("/devtools/browser/")) return undefined;
+  return { port, wsPath: wsPath.trim() };
+}
+
+async function devToolsEndpointFor(profileDir: string): Promise<{ port: number; wsPath: string } | undefined> {
   try {
-    const contents = await fs.readFile(path.join(profileDir, "DevToolsActivePort"), "utf8");
-    const port = Number(contents.split(/\r?\n/, 1)[0]);
-    return Number.isInteger(port) && port > 0 ? port : undefined;
+    return parseDevToolsActivePort(await fs.readFile(path.join(profileDir, "DevToolsActivePort"), "utf8"));
   } catch {
     return undefined;
+  }
+}
+
+// Chrome 147+ can refuse /json/version on the default profile; the
+// DevToolsActivePort ws path still answers, so fall back to a direct
+// browserWSEndpoint connect. The original discovery error is the one surfaced.
+async function connectViaDevtoolsEndpoint(endpoint: { port: number; wsPath: string }, options: BrowserOpenOptions, timeoutMs: number): Promise<Browser> {
+  try {
+    return await acquireResource(
+      puppeteer.connect({ browserURL: `http://127.0.0.1:${endpoint.port}` }),
+      options.signal,
+      timeoutMs,
+      (late) => late.disconnect(),
+    );
+  } catch (error) {
+    try {
+      return await acquireResource(
+        puppeteer.connect({ browserWSEndpoint: `ws://127.0.0.1:${endpoint.port}${endpoint.wsPath}` }),
+        options.signal,
+        timeoutMs,
+        (late) => late.disconnect(),
+      );
+    } catch {
+      throw error;
+    }
   }
 }
 
@@ -1974,8 +2245,8 @@ function runCapture(command: string, args: string[], timeoutMs: number): Promise
 // DevToolsActivePort until the endpoint is ready. The child is detached (unref)
 // so it survives pi's exit — the user keeps using their own browser. We do not
 // own it; a later attach call in the same session will reuse the live port via
-// devToolsPortFor + tryReuseBrowser path.
-async function launchAttachedChrome(executablePath: string, userProfileDir: string, options: BrowserOpenOptions): Promise<number> {
+// devToolsEndpointFor + tryReuseBrowser path.
+async function launchAttachedChrome(executablePath: string, userProfileDir: string, options: BrowserOpenOptions): Promise<{ port: number; wsPath: string }> {
   const port = 9222;
   const args = [
     `--remote-debugging-port=${port}`,
@@ -1991,7 +2262,7 @@ async function launchAttachedChrome(executablePath: string, userProfileDir: stri
   const deadline = Date.now() + Math.min(options.timeoutMs, 15_000);
   while (Date.now() < deadline) {
     if (options.signal?.aborted) throw abortError();
-    const ready = await devToolsPortFor(userProfileDir);
+    const ready = await devToolsEndpointFor(userProfileDir);
     if (ready) return ready;
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
@@ -2021,6 +2292,42 @@ async function launchBrowser(executablePath: string, options: BrowserOpenOptions
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, async (late) => { await closeWithin(late, profileDir); });
     return { browser, kind };
   }
+}
+
+// Navigation guard (browser-use-pi policy.ts port, interception-free): the
+// entry's own page gets a persistent framenavigated check, and every new page
+// target is inspected and closed when denied. Denied loads may briefly start
+// before the guard navigates back to about:blank — this bounds where the agent
+// can go, it is not a network sandbox and does not filter sub-resources.
+function installNavigationGuards(entry: PuppeteerEntry): void {
+  const guardPage = (page: Page) => {
+    page.on("framenavigated", (frame: Frame) => {
+      const policy = entry.policy;
+      if (!policy || frame !== page.mainFrame()) return;
+      const url = frame.url();
+      if (url && !policy.allowed(url)) {
+        recordPolicyViolation(policy, "navigation", url);
+        void page.goto("about:blank").catch(() => {});
+      }
+    });
+  };
+  guardPage(entry.page);
+  entry.browser.on("targetcreated", (target) => {
+    if (!entry.policy || target.type() !== "page") return;
+    const check = (url: string): boolean => {
+      if (!url || entry.policy!.allowed(url)) return false;
+      recordPolicyViolation(entry.policy!, "new tab", url);
+      void target.page().then((page) => page?.close()).catch(() => {});
+      return true;
+    };
+    if (check(target.url())) return;
+    void target.page()
+      .then((page) => {
+        if (!page || page.isClosed()) return;
+        if (!check(page.url())) guardPage(page);
+      })
+      .catch(() => {});
+  });
 }
 
 async function pickPage(browser: Browser, target?: string): Promise<Page | undefined> {
@@ -2189,6 +2496,7 @@ function browserOpenRequestKey(options: CanonicalBrowserOpenOptions, browser: st
     waitUntil: options.waitUntil ?? "load",
     dialogs: options.dialogs ?? "accept",
     visible: options.channel === "managed" ? (options.visible ?? false) : null,
+    policy: options.policy ?? null,
   });
 }
 
@@ -2341,6 +2649,7 @@ function observeBrowserRunAsyncMethods<T extends object>(
   target: T,
   scope: string,
   report: BrowserRunPromiseReporter,
+  beforeCall?: (scope: string, property: PropertyKey, args: unknown[]) => void,
 ): T {
   const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
   let proxy: T;
@@ -2351,6 +2660,7 @@ function observeBrowserRunAsyncMethods<T extends object>(
       const cached = methods.get(property);
       if (cached) return cached;
       const wrapped = (...args: unknown[]): unknown => {
+        beforeCall?.(scope, property, args);
         const result = Reflect.apply(value, inner, args);
         if (result === inner) return proxy;
         return observeBrowserRunPromise(result, `${scope}.${String(property)}`, report);
@@ -2372,12 +2682,22 @@ export function observeBrowserRunApis<
   browser: TBrowser,
   tab: TTab,
   report?: BrowserRunPromiseReporter,
+  guardNavigation?: (url: string) => void,
 ): { page: TPage; browser: TBrowser; tab: TTab } {
   const notify = report ?? ((operation: string, error: unknown) => {
     const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.warn(`[pi-maestro-flow] browser run ${JSON.stringify(name)} left ${operation} promise unobserved: ${reason}`);
   });
-  const observedPage = observeBrowserRunAsyncMethods(page, "page", notify);
+  // Navigation guard (policy open option): rejects before the command flies for
+  // the direct goto path; clicks/popups are covered by installNavigationGuards.
+  const beforeCall = guardNavigation
+    ? (scope: string, property: PropertyKey, args: unknown[]) => {
+        if ((scope === "page" || scope === "tab") && property === "goto" && typeof args[0] === "string") {
+          guardNavigation(args[0]);
+        }
+      }
+    : undefined;
+  const observedPage = observeBrowserRunAsyncMethods(page, "page", notify, beforeCall);
   const observedBrowser = observeBrowserRunAsyncMethods(browser, "browser", notify);
   const nested = tab as TTab & { page?: TPage; cookies?: object };
   if (nested.page) nested.page = observedPage;
@@ -2385,7 +2705,7 @@ export function observeBrowserRunApis<
   return {
     page: observedPage,
     browser: observedBrowser,
-    tab: observeBrowserRunAsyncMethods(tab, "tab", notify),
+    tab: observeBrowserRunAsyncMethods(tab, "tab", notify, beforeCall),
   };
 }
 

@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as path from "node:path";
 import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
-import { BrowserManager, browserRunErrorHint, canonicalizeBrowserOpenOptions, compileRunCode, observeBrowserRunApis, settleBrowserDialog, type BrowserManagerLike, type BrowserManagerStatus, type BrowserOpenOptions, type BrowserPickCaptureCallback, type BrowserPickResult, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
+import { BrowserManager, browserRunErrorHint, canonicalizeBrowserOpenOptions, compileNavigationPolicy, compileRunCode, domainMatcher, observeBrowserRunApis, parseDevToolsActivePort, settleBrowserDialog, type BrowserManagerLike, type BrowserManagerStatus, type BrowserOpenOptions, type BrowserPickCaptureCallback, type BrowserPickResult, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
 import { PICKER_INJECT_JS, PICKER_POLL_JS, PICKER_TEARDOWN_JS } from "../src/tools/browser/picker.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "../src/tools/browser/stealth.ts";
 
@@ -263,6 +263,75 @@ test("canonical browser channel inference preserves legacy routing", () => {
   assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "extension" }).channel, "extension");
   assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "profile", userProfileDir: "C:/profile" }).channel, "profile");
   assert.equal(canonicalizeBrowserOpenOptions({ ...base, channel: "cdp", cdpUrl: "http://127.0.0.1:9222" }).channel, "cdp");
+});
+
+test("browser DevToolsActivePort parsing validates port and ws path", () => {
+  assert.deepEqual(parseDevToolsActivePort("9222\n/devtools/browser/abc-def\n"), { port: 9222, wsPath: "/devtools/browser/abc-def" });
+  assert.deepEqual(parseDevToolsActivePort("  9222 \r\n/devtools/browser/x"), { port: 9222, wsPath: "/devtools/browser/x" });
+  assert.equal(parseDevToolsActivePort("9222\n"), undefined, "missing ws path");
+  assert.equal(parseDevToolsActivePort("9222\n/other/path"), undefined, "ws path must start with /devtools/browser/");
+  assert.equal(parseDevToolsActivePort("0\n/devtools/browser/x"), undefined);
+  assert.equal(parseDevToolsActivePort("65536\n/devtools/browser/x"), undefined);
+  assert.equal(parseDevToolsActivePort("notaport\n/devtools/browser/x"), undefined);
+  assert.equal(parseDevToolsActivePort(""), undefined);
+});
+
+test("browser navigation policy compiles matchers and gates http(s) hosts", () => {
+  assert.equal(compileNavigationPolicy(undefined), undefined);
+  const policy = compileNavigationPolicy({ allow: ["*.example.com", "allowed.org"], deny: ["bad.example.com"] });
+  assert.ok(policy);
+  assert.equal(policy.allowed("about:blank"), true);
+  assert.equal(policy.allowed("data:text/html,<p>x</p>"), true);
+  assert.equal(policy.allowed("blob:https://example.com/id"), true);
+  assert.equal(policy.allowed("https://example.com/path"), true, "*.example.com includes the apex");
+  assert.equal(policy.allowed("https://sub.example.com"), true);
+  assert.equal(policy.allowed("https://bad.example.com"), false, "deny wins over allow");
+  assert.equal(policy.allowed("https://allowed.org"), true);
+  assert.equal(policy.allowed("https://other.org"), false, "not in the allow list");
+  assert.equal(policy.allowed("https://notexample.com"), false, "wildcard must not overmatch");
+  assert.equal(policy.allowed("https://example.com.evil.org"), false);
+  assert.equal(policy.allowed("file:///etc/passwd"), false, "non-http(s) denied under a policy");
+  assert.equal(policy.allowed("https://user:pw@example.com"), false, "credentialed URLs denied");
+  assert.equal(policy.allowed("not a url"), false);
+  const denyOnly = compileNavigationPolicy({ deny: ["denied.com"] });
+  assert.ok(denyOnly);
+  assert.equal(denyOnly.allowed("https://denied.com"), false);
+  assert.equal(denyOnly.allowed("https://sub.denied.com"), true, "exact deny does not cover subdomains");
+  assert.equal(denyOnly.allowed("https://ok.com"), true);
+  assert.throws(() => domainMatcher("*.bad*pat"), /wildcard/);
+  assert.throws(() => domainMatcher("http://x.com"), /hostname/);
+  assert.throws(() => compileNavigationPolicy({ deny: "x.com" as never }), /array/);
+});
+
+test("browser open canonicalization validates policy and rejects it on the extension channel", () => {
+  const base = { name: "main", cwd: "D:/workspace", timeoutMs: 30_000 };
+  const ok = canonicalizeBrowserOpenOptions({ ...base, policy: { deny: ["x.com"] } });
+  assert.equal(ok.channel, "managed");
+  assert.throws(
+    () => canonicalizeBrowserOpenOptions({ ...base, channel: "extension", policy: { deny: ["x.com"] } }),
+    /app\.channel "extension" conflicts with legacy app\.policy/,
+  );
+  assert.throws(
+    () => canonicalizeBrowserOpenOptions({ ...base, policy: { allow: ["not a host!!"] } }),
+    /hostname|wildcard/,
+  );
+});
+
+test("browser schema accepts app.policy and the tool forwards it to the manager", async () => {
+  assert.equal(Check(BrowserParams, { action: "open", app: { policy: { allow: ["*.ok.com"], deny: ["bad.com"] } } }), true);
+  assert.equal(Check(BrowserParams, { action: "open", app: { policy: "nope" } }), false);
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  await tool.execute("open", { action: "open", app: { policy: { deny: ["deny.example.com"] } } }, undefined, undefined, { cwd: "D:/workspace" } as never);
+  assert.deepEqual(manager.opened?.policy, { deny: ["deny.example.com"] });
+});
+
+test("browser tool guidelines and description expose the AX/CDP-event/policy helpers", () => {
+  const tool = createBrowserTool(new FakeBrowserManager());
+  const joined = `${tool.description}\n${(tool.promptGuidelines ?? []).join("\n")}`;
+  for (const name of ["tab.axTree", "tab.clickNode", "tab.typeNode", "tab.waitForCdp", "app.policy"]) {
+    assert.ok(joined.includes(name), `tool surface must mention ${name}`);
+  }
 });
 
 test("canonical browser channel conflicts fail closed", () => {
@@ -719,6 +788,123 @@ test("browser manager scopes request interception listeners to one run", async (
       return { title: await page.title(), requestListeners: page.listenerCount("request") };
     `, process.cwd(), undefined, 15_000);
     assert.deepEqual(second.returnValue, { title: "Interception", requestListeners: firstResult.baseline });
+  } finally {
+    await manager.closeAll();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("browser AX helpers, CDP event wait, output spill, and navigation policy on a real Chromium", async (t) => {
+  // Serve a real http page so the framenavigated guard sees a committed navigation.
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end("<!doctype html><title>Denied Host</title>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const deniedUrl = `http://127.0.0.1:${address.port}/denied`;
+  const manager = new BrowserManager();
+  try {
+    try {
+      await manager.open({
+        name: "ax",
+        cwd: process.cwd(),
+        url: "data:text/html," + encodeURIComponent("<title>AX</title><input id='name' value='old'><button id='btn' onclick='this.dataset.hit=\"1\"'>Go</button>"),
+        timeoutMs: 15_000,
+      });
+    } catch (error) {
+      if (error instanceof Error && /No Chromium browser found/.test(error.message)) {
+        t.skip("No local Chromium executable is available.");
+        return;
+      }
+      throw error;
+    }
+    const axOut = await manager.run("ax", `
+      const tree = await tab.axTree();
+      const input = tree.nodes.find(n => n.role === 'textbox');
+      const button = tree.nodes.find(n => n.role === 'button' && /Go/.test(n.name));
+      assert(input, 'textbox node missing in axTree');
+      assert(button, 'button node missing in axTree');
+      await tab.typeNode(input.id, 'Hello 世界', { replace: true });
+      await tab.clickNode(button.id);
+      const value = await tab.evaluate(() => document.getElementById('name').value);
+      const hit = await tab.evaluate(() => document.getElementById('btn').dataset.hit);
+      // One-shot CDP event waiter: subscribe BEFORE the triggering action.
+      await tab.cdp('Page.enable');
+      const nav = tab.waitForCdp('Page.loadEventFired', { timeout: 10000 });
+      await tab.goto('data:text/html,<title>After</title>');
+      await nav;
+      return { value, hit, nodeCount: tree.nodes.length, title: await page.title() };
+    `, process.cwd(), undefined, 20_000);
+    const ax = axOut.returnValue as { value: string; hit: string; nodeCount: number; title: string };
+    assert.equal(ax.value, "Hello 世界", "typeNode(replace:true) must overwrite the input value via the CDP input pipeline");
+    assert.equal(ax.hit, "1", "clickNode must dispatch a real click at the node's box-model centroid");
+    assert.ok(ax.nodeCount > 0, "axTree must return nodes");
+    assert.equal(ax.title, "After", "waitForCdp must resolve on the awaited event and navigation must complete");
+    // Timeout path of the waiter.
+    await assert.rejects(
+      manager.run("ax", "await tab.waitForCdp('Page.neverFiredEvent', { timeout: 200 });", process.cwd(), undefined, 15_000),
+      /CDP event Page\.neverFiredEvent exceeded 200 ms/,
+    );
+    await manager.close("ax");
+
+    // Navigation policy: denied goto throws pre-flight; a committed denied
+    // navigation (link click) is bounced to about:blank and reported.
+    await manager.open({
+      name: "pol",
+      cwd: process.cwd(),
+      url: "data:text/html,<title>Pol</title>",
+      timeoutMs: 15_000,
+      policy: { deny: ["127.0.0.1"] },
+    });
+    try {
+      await assert.rejects(
+        manager.run("pol", `await tab.goto(${JSON.stringify(deniedUrl)});`, process.cwd(), undefined, 15_000),
+        /Browser navigation blocked by domain policy/,
+      );
+      const allowed = await manager.run("pol", "await tab.goto('data:text/html,<title>Allowed</title>'); return page.url();", process.cwd(), undefined, 15_000);
+      assert.ok(String(allowed.returnValue).startsWith("data:"), "data: navigations stay allowed under a deny-only policy");
+      const clicked = await manager.run("pol", `
+        await tab.evaluate((href) => { const a = document.createElement('a'); a.href = href; a.textContent = 'x'; document.body.appendChild(a); a.click(); }, ${JSON.stringify(deniedUrl)});
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && page.url() !== 'about:blank') await new Promise(r => setTimeout(r, 100));
+        return page.url();
+      `, process.cwd(), undefined, 15_000);
+      assert.equal(clicked.returnValue, "about:blank", "denied in-page navigation must bounce to about:blank");
+      assert.ok(
+        clicked.displays.some((item) => item.type === "text" && item.text.includes("[policy] blocked")),
+        "run output must surface the policy violation",
+      );
+      // Re-opening without policy clears the guard.
+      await manager.open({ name: "pol", cwd: process.cwd(), timeoutMs: 15_000 });
+      const cleared = await manager.run("pol", `await tab.goto(${JSON.stringify(deniedUrl)}); return page.url();`, process.cwd(), undefined, 15_000);
+      assert.ok(String(cleared.returnValue).startsWith("http://127.0.0.1:"), "re-open without policy must clear the guard");
+    } finally {
+      await manager.close("pol");
+    }
+
+    // Output overflow preserves captured text to a spill file.
+    await manager.open({ name: "spill", cwd: process.cwd(), url: "data:text/html,<title>Spill</title>", timeoutMs: 15_000 });
+    try {
+      let spillPath = "";
+      await assert.rejects(
+        manager.run("spill", "print('x'.repeat(512)); return true;", process.cwd(), undefined, 15_000, 128),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          const match = /Captured output \(pre-limit\): (.+)$/.exec(error.message);
+          assert.ok(match, `overflow error must carry the spill file path: ${error.message}`);
+          spillPath = match[1]!.trim();
+          return true;
+        },
+      );
+      const spilled = await fs.readFile(spillPath, "utf8");
+      assert.ok(spilled.includes("x".repeat(64)), "spill file must contain the captured pre-limit output");
+      await fs.rm(spillPath, { force: true });
+    } finally {
+      await manager.close("spill");
+    }
   } finally {
     await manager.closeAll();
     server.closeAllConnections();
