@@ -74,6 +74,7 @@ function harness(deferHandles = false) {
 				focus: () => undefined,
 				unfocus: () => undefined,
 				isFocused: () => false,
+				getBounds: () => undefined,
 			};
 			const session: CustomSession = {
 				component,

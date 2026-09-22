@@ -19,12 +19,14 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import {
   calculateCost,
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   parseStreamingJson,
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
-  type Context,
   type ImageContent,
+  type JsonObject,
   type Message,
   type Model,
   type SimpleStreamOptions,
@@ -32,6 +34,7 @@ import {
   type ThinkingContent,
   type ToolCall,
   type ToolResultMessage,
+  type TranscriptContext,
   type Usage,
   type UserMessage,
 } from "@earendil-works/pi-ai";
@@ -117,7 +120,7 @@ interface DevinTurn {
 /** Stream one Cascade turn as pi assistant message events. */
 export function streamDevin(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
@@ -310,7 +313,7 @@ export function streamDevin(
                 ? delta.argumentsJson
                 : previous + delta.argumentsJson;
               toolPartialJson.set(toolCallId, accumulated);
-              block.arguments = parseStreamingJson<Record<string, unknown>>(accumulated);
+              block.arguments = parseStreamingJson<JsonObject>(accumulated);
               stream.push({
                 type: "toolcall_delta",
                 contentIndex: output.content.indexOf(block),
@@ -337,7 +340,7 @@ export function streamDevin(
       endTextBlock();
       endThinkingBlock();
       for (const [id, block] of toolBlocks) {
-        block.arguments = parseStreamingJson<Record<string, unknown>>(toolPartialJson.get(id));
+        block.arguments = parseStreamingJson<JsonObject>(toolPartialJson.get(id));
         stream.push({
           type: "toolcall_end",
           contentIndex: output.content.indexOf(block),
@@ -553,13 +556,13 @@ function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
 /** Build the `GetChatMessage` request for one Cascade turn. */
 export function buildDevinChatRequest(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   messages: Message[],
   turn: DevinTurn,
   options?: SimpleStreamOptions,
   target?: DevinTurnTarget,
 ): GetChatMessageRequest {
-  const tools = (context.tools ?? []).map((tool) =>
+  const tools = getCurrentTools(context.messages).map((tool) =>
     create(ChatToolDefinitionSchema, {
       name: tool.name,
       description: tool.description,
@@ -569,7 +572,7 @@ export function buildDevinChatRequest(
   );
   return create(GetChatMessageRequestSchema, {
     metadata: devinCliMetadata(turn.apiKey, turn.userJwt),
-    prompt: context.systemPrompt ?? "",
+    prompt: getCurrentSystemPrompt(context.messages),
     chatMessagePrompts: buildChatMessagePrompts(messages, turn.cascadeId, model),
     chatModelUid: target?.wireUid ?? model.id,
     ...(target?.assignmentJwt ? { modelAssignmentJwt: target.assignmentJwt } : {}),
@@ -669,6 +672,9 @@ function buildChatMessagePrompts(
       }));
       continue;
     }
+    // System messages carry the prompt and tool declarations; they are sent in
+    // the request's dedicated prompt field, not as conversation items.
+    if (message.role === "system") continue;
     prompts.push(buildToolPrompt(message, cascadeId, index));
   }
   return prompts;

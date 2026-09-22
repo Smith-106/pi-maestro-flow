@@ -90,6 +90,8 @@ const SESSION_ENTRY_TYPES = new Set([
   "branch_summary",
   "custom",
   "custom_message",
+  "context_edit",
+  "usage",
   "label",
   "session_info",
 ]);
