@@ -595,9 +595,40 @@ function projectChain(sessionId: string, chain: readonly RawEntry[], include: Re
 } {
   const entries: SessionHistoryEntry[] = [];
   const turnSeeds: TurnSeed[] = [];
+  // Apply branch-local context edits so the history shows what the model
+  // actually received: a null replacement omits the target, otherwise the
+  // replacement content stands in for the entry's own content. Mirror the
+  // host's scope: only edits surviving the latest compaction boundary (the
+  // kept range plus everything after it) can affect the projection.
+  let editScopeStart = 0;
+  for (let index = chain.length - 1; index >= 0; index--) {
+    if (chain[index]?.type !== "compaction") continue;
+    const firstKept = chain[index]?.firstKeptEntryId;
+    const keptIndex = typeof firstKept === "string" ? chain.findIndex((entry) => entry.id === firstKept) : -1;
+    editScopeStart = keptIndex >= 0 && keptIndex < index ? keptIndex : index;
+    break;
+  }
+  const contextEdits = new Map<string, unknown>();
+  for (const entry of chain.slice(editScopeStart)) {
+    if (entry.type === "context_edit" && typeof entry.targetId === "string" && entry.replacement !== undefined) {
+      contextEdits.set(entry.targetId, entry.replacement);
+    }
+  }
+  const projectedContent = (entryIndex: number, entry: RawEntry, content: unknown): { omit: boolean; content: unknown } => {
+    // Edits to entries outside the surviving scope are inert for the host —
+    // its projection no longer contains the target — so history shows the
+    // original bytes the model last saw.
+    if (entryIndex < editScopeStart) return { omit: false, content };
+    const edit = contextEdits.get(entry.id);
+    if (edit === null) return { omit: true, content };
+    if (edit && typeof edit === "object" && !Array.isArray(edit) && "content" in edit) {
+      return { omit: false, content: (edit as Record<string, unknown>).content };
+    }
+    return { omit: false, content };
+  };
   let turn = 0;
   let firstUser: string | undefined;
-  for (const entry of chain) {
+  for (const [entryIndex, entry] of chain.entries()) {
     const timestamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) || 0 : 0;
     if (entry.type === "message") {
       const message = entry.message;
@@ -605,9 +636,11 @@ function projectChain(sessionId: string, chain: readonly RawEntry[], include: Re
       const value = message as Record<string, unknown>;
       const role = value.role;
       const messageTimestamp = typeof value.timestamp === "number" ? value.timestamp : timestamp;
+      const projected = projectedContent(entryIndex, entry, value.content);
+      if (projected.omit) continue;
       if (role === "user") {
         turn += 1;
-        const text = contentText(value.content);
+        const text = contentText(projected.content);
         turnSeeds.push({
           turn,
           startedAt: messageTimestamp,
@@ -616,7 +649,14 @@ function projectChain(sessionId: string, chain: readonly RawEntry[], include: Re
         if (include.has("user")) firstUser ??= text;
         pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "user", text, timestamp: messageTimestamp });
       } else if (role === "assistant") {
-        const blocks = Array.isArray(value.content) ? value.content : [];
+        // The host wraps a string replacement into a single text block for
+        // assistant/toolResult roles; mirror that so an edited assistant
+        // message still renders instead of vanishing.
+        const blocks = Array.isArray(projected.content)
+          ? projected.content
+          : typeof projected.content === "string"
+            ? [{ type: "text", text: projected.content }]
+            : [];
         for (const block of blocks) {
           if (!block || typeof block !== "object" || Array.isArray(block)) continue;
           const candidate = block as Record<string, unknown>;
@@ -625,13 +665,15 @@ function projectChain(sessionId: string, chain: readonly RawEntry[], include: Re
           }
         }
       } else if (role === "toolResult") {
-        pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "tool_result", text: contentText(value.content), timestamp: messageTimestamp });
+        pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "tool_result", text: contentText(projected.content), timestamp: messageTimestamp });
       } else if (role === "custom" && value.display === true) {
-        pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "visible_custom", text: contentText(value.content), timestamp: messageTimestamp });
+        pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "visible_custom", text: contentText(projected.content), timestamp: messageTimestamp });
       }
       // bashExecution and all other message roles are deliberately excluded.
     } else if (entry.type === "custom_message" && entry.display === true) {
-      pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "visible_custom", text: contentText(entry.content), timestamp });
+      const projected = projectedContent(entryIndex, entry, entry.content);
+      if (projected.omit) continue;
+      pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "visible_custom", text: contentText(projected.content), timestamp });
     } else if (entry.type === "compaction") {
       pushEntry(entries, include, { sessionId, entryId: entry.id, turn, kind: "compaction", text: typeof entry.summary === "string" ? entry.summary : "", timestamp });
     }

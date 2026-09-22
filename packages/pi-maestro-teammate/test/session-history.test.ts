@@ -184,3 +184,41 @@ test("search match count and snippets stay bounded", async () => {
   assert.equal(manyResult.matchCount, MAX_SESSION_HISTORY_MATCHES + 1);
   assert.equal(manyResult.truncated, true);
 });
+
+test("context_edit entries project replacements within the surviving scope", async () => {
+  const dir = tmpDir();
+  // cp-1 keeps from "a3" onward: r2 falls outside the scope, so a later edit
+  // targeting it is inert for the projection — the history shows the original
+  // bytes the model last saw. Edits to in-scope entries apply; a null
+  // replacement omits the entry (and its turn).
+  const file = writeTranscript(dir, "edited.jsonl", [
+    header("edit-session"),
+    user("u1", null, "first phase"),
+    toolResult("r2", "u1", "raw verbose output"),
+    assistant("a3", "r2", "original answer"),
+    compaction("cp-1", "a3", "2026-08-01T00:00:04.000Z", "checkpoint"),
+    user("u4", "cp-1", "second phase"),
+    { type: "context_edit", id: "e1", parentId: "u4", timestamp: "2026-08-01T00:00:05.000Z", targetId: "r2", replacement: { content: [{ type: "text", text: "edited output" }] } },
+    { type: "context_edit", id: "e2", parentId: "e1", timestamp: "2026-08-01T00:00:06.000Z", targetId: "a3", replacement: { content: "rewritten answer" } },
+    { type: "context_edit", id: "e3", parentId: "e2", timestamp: "2026-08-01T00:00:07.000Z", targetId: "u4", replacement: { content: "replaced question" } },
+    user("u5", "e3", "third phase"),
+    { type: "context_edit", id: "e4", parentId: "u5", timestamp: "2026-08-01T00:00:08.000Z", targetId: "u5", replacement: null },
+  ]);
+  const service = new SessionHistoryService(inventory(file));
+
+  const first = await service.read({ sessionId: "edit-session", turn: 1 });
+  assert.equal(first.found, true);
+  const a3 = first.turn?.entries.find((entry) => entry.entryId === "a3");
+  assert.equal(a3?.text, "rewritten answer", "string replacements render as a text block");
+
+  const tools = await service.read({ sessionId: "edit-session", turn: 1, include: ["tool_result"] });
+  const r2 = tools.turn?.entries.find((entry) => entry.entryId === "r2");
+  assert.equal(r2?.text, "raw verbose output", "out-of-scope edits stay inert");
+
+  const second = await service.read({ sessionId: "edit-session", turn: 2 });
+  assert.equal(second.turn?.userText, "replaced question", "in-scope edits apply");
+
+  // The null-edited user message is omitted, so its turn never forms.
+  const omitted = await service.read({ sessionId: "edit-session", turn: 3 });
+  assert.equal(omitted.found, false);
+});
