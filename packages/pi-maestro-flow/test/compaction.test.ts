@@ -6773,6 +6773,136 @@ test("L2 token growth is re-accounted before choosing the critical L4 replacemen
   guard.reset(ctx);
 });
 
+test("turn_end boundary drafts commit recorded prunes as context edits", async () => {
+  const journal: Array<{ type: string; data: unknown }> = [];
+  let payloadLimitBytes: number | undefined;
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old-edit",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  } as never;
+  const frontier = { role: "user", content: [{ type: "text", text: "keep".repeat(1_500) }] };
+  const imageResult = {
+    role: "toolResult",
+    toolCallId: "old-img",
+    toolName: "read",
+    content: [{ type: "image", data: "a".repeat(2_000), mimeType: "image/png" }],
+    isError: false,
+  } as never;
+  const latestResult = {
+    role: "toolResult",
+    toolCallId: "latest-edit",
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  } as never;
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old-edit", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, oldResult, frontier, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "latest-edit", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  }, latestResult, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old-img", name: "read", arguments: {} }],
+  }, imageResult] as never;
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    abort() {},
+    sessionManager: { getSessionId: () => "context-edit-session", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({
+      ...settings,
+      ...(payloadLimitBytes !== undefined ? { payloadLimitBytes } : {}),
+    }),
+    loadInternals: async () => { throw new Error("stop after transform"); },
+  });
+
+  guard.onSessionStart(ctx);
+  const transformed = await guard.evaluate(messages, ctx);
+  const prunedReplacement = (transformed?.[1] as { content?: unknown } | undefined)?.content;
+  assert.ok(prunedReplacement !== undefined, "the stale result must be pruned before a draft exists");
+
+  // File-backed spill replacements embed a tmp path the journal re-validates
+  // on resume — they stay journaled and never become context edits. If the
+  // spill write failed the entry froze into a self-contained placeholder,
+  // which is committable like any other plain prune.
+  const fileBacked = JSON.stringify(transformed?.[1]).includes("persisted-output");
+  const projected = [
+    { sourceEntry: { id: "entry-old" }, messages: [oldResult] },
+    { sourceEntry: { id: "entry-img" }, messages: [imageResult] },
+    { sourceEntry: { id: "entry-latest" }, messages: [latestResult] },
+  ] as never;
+  const spilledDrafts = guard.contextEditDrafts(projected);
+  assert.deepEqual(
+    spilledDrafts.map((draft) => draft.targetId),
+    fileBacked ? [] : ["entry-old"],
+    "file-backed replacements keep journal coverage for path revalidation",
+  );
+
+  // A self-contained payload prune is committable.
+  payloadLimitBytes = 500;
+  guard.refreshSettings();
+  const transformed2 = await guard.evaluate(messages, ctx);
+  const imgReplacement = (transformed2?.at(-1) as { content?: unknown } | undefined)?.content;
+  assert.ok(imgReplacement !== undefined, "the oversize image payload must be pruned");
+
+  const drafts = guard.contextEditDrafts(projected);
+  assert.deepEqual(
+    drafts.map((draft) => draft.targetId),
+    fileBacked ? ["entry-img"] : ["entry-old", "entry-img"],
+    "only committable prunes earn edits",
+  );
+  const imgDraft = drafts.find((draft) => draft.targetId === "entry-img");
+  assert.equal(imgDraft?.type, "context_edit");
+  assert.equal(
+    JSON.stringify(imgDraft?.replacement),
+    JSON.stringify({ content: imgReplacement }),
+    "the edit must carry the same replacement bytes the transform applies",
+  );
+  // Emission is not commitment: while the projection still serves the original
+  // bytes the draft is re-emitted (a dropped boundary batch must self-heal).
+  assert.equal(guard.contextEditDrafts(projected).length, drafts.length, "unobserved commits are re-drafted");
+
+  // Once the projection serves the replacement bytes the commit is observed:
+  // no more drafts, and journal coverage can retire.
+  const committed = [
+    { sourceEntry: { id: "entry-old" }, messages: [fileBacked ? oldResult : transformed?.[1]] },
+    { sourceEntry: { id: "entry-img" }, messages: [transformed2?.at(-1)] },
+    { sourceEntry: { id: "entry-latest" }, messages: [latestResult] },
+  ] as never;
+  assert.deepEqual(guard.contextEditDrafts(committed), [], "observed commits are not re-drafted");
+
+  // The next persist retires the committed prune as a removal while the
+  // uncommitted (or file-backed) entry keeps its journal coverage.
+  await guard.evaluate(messages, ctx);
+  const lastState = journal.filter((entry) => entry.type === "maestro-auto-prune-state").at(-1)?.data as {
+    mode?: string;
+    prunes?: Array<{ callId?: string }>;
+    upserts?: Array<{ callId?: string }>;
+    removals?: string[];
+  } | undefined;
+  assert.ok(lastState?.removals?.includes("old-img") === true, "committed edits retire from the journal");
+  assert.equal(
+    lastState?.removals?.includes("old-edit") ?? false,
+    !fileBacked,
+    "only observed commits retire; file-backed prunes stay journaled",
+  );
+  guard.reset(ctx);
+  await cleanupSpillDir("context-edit-session");
+});
+
 test("L4 minimal replacement remains byte-identical across turns and restore", async () => {
   const appended: Array<{ type: string; data: unknown }> = [];
   const dependencies = {

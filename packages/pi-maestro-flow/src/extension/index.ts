@@ -4078,6 +4078,14 @@ When NOT to use:
     return todoResult ?? planResult;
   });
 
+  // Persist each recorded prune as a context_edit so the session projection —
+  // not just the request-time transform — carries it across turns, resume, and
+  // forked child sessions.
+  pi.on("turn_end", (event) => {
+    const drafts = midTurnAutoCompaction.contextEditDrafts(event.context.contextEntries);
+    return drafts.length > 0 ? { entries: [...event.entries, ...drafts] } : undefined;
+  });
+
   pi.on("before_provider_request", (event, ctx) =>
     midTurnAutoCompaction.beforeProviderRequest(event.payload, ctx));
 
@@ -4670,6 +4678,10 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
       );
       return undefined;
     }
+  });
+  pi.on("turn_end", (event) => {
+    const drafts = autoCompaction.contextEditDrafts(event.context.contextEntries);
+    return drafts.length > 0 ? { entries: [...event.entries, ...drafts] } : undefined;
   });
   pi.on("before_provider_request", (event, ctx) =>
     autoCompaction.beforeProviderRequest(event.payload, ctx));

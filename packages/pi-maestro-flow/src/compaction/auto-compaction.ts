@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
+  ContextEditEntryDraft,
   ContextUsage,
   ExtensionAPI,
   ExtensionContext,
+  ProjectedSessionEntry,
   SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -138,6 +140,12 @@ function recoveryDeliveryPrompt(prompt: string, recoveryId: string): string {
   return `${prompt}\n\n${recoveryDeliveryMarker(recoveryId)}`;
 }
 export const MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS = 32;
+/**
+ * Drafts re-emitted for one prune while its commit stays unobserved. If
+ * another boundary writer keeps superseding the target, we defer to it and
+ * leave journal coverage in place rather than appending edits forever.
+ */
+const MAX_CONTEXT_EDIT_DRAFTS = 4;
 export const MAX_OFF_BRANCH_PRUNE_ENTRIES = 128;
 export const MAX_OFF_BRANCH_PRUNE_BYTES = 128 * 1024;
 
@@ -173,6 +181,16 @@ export interface PruneManifestEntry {
   checkpointId?: string;
   /** For level "dedup": the referenced tool result that stays in context. */
   refCallId?: string;
+  /**
+   * This prune's context_edit is confirmed on the session branch: the
+   * projection was observed serving the replacement bytes, so the prune
+   * journal no longer carries it. Set only on observation — emitting a draft
+   * proves nothing because the host may still drop the whole boundary batch.
+   * In-memory only — never serialized into the journal.
+   */
+  editCommitted?: boolean;
+  /** Boundary drafts emitted for this prune without a commit being observed yet. */
+  editDrafts?: number;
 }
 
 export type PruneLevel = "pruned" | "spill" | "minimal" | "lossless" | "dedup" | "payload";
@@ -526,6 +544,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onToolCall(ctx: ExtensionContext): ToolBoundaryGateResult | undefined;
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): Promise<unknown | undefined>;
+  /**
+   * Draft one persistent context_edit per recorded prune whose commit is not
+   * yet observed on the branch (call from the turn_end boundary). Once the
+   * host commits the draft its projection replays the same replacement bytes
+   * on every later request — including resume, fork, and compaction
+   * preparation — so persistPruneManifest stops journaling confirmed entries.
+   */
+  contextEditDrafts(contextEntries: readonly ProjectedSessionEntry[]): ContextEditEntryDraft[];
   shouldSkipStopHook(): boolean;
   isProviderPressureRecoveryActive(): boolean;
   /**
@@ -2498,6 +2524,45 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         };
       });
     },
+    contextEditDrafts(contextEntries) {
+      const drafts: ContextEditEntryDraft[] = [];
+      for (const [callId, entry] of state.pruneManifest) {
+        if (entry.editCommitted) continue;
+        // File-backed replacements (spill / minimal) embed a tmp path that the
+        // journal re-validates on resume. Committing the text into the branch
+        // would pin a possibly dead path with no downgrade left, so they stay
+        // journaled and never become context edits.
+        if (entry.spillPath !== undefined || entry.level === "minimal") continue;
+        const content = "content" in entry.replacement ? entry.replacement.content : undefined;
+        if (content === undefined) continue;
+        // Resolve the call to the session entry that currently projects it.
+        // Unresolvable targets (already omitted or compacted away) stay
+        // uncommitted and keep their journal coverage.
+        let targetId: string | undefined;
+        let projectedMessage: AgentMessage | undefined;
+        for (const projected of contextEntries) {
+          const found = projected.messages.find((message) => toolResultCallId(message) === callId);
+          if (found) {
+            targetId = projected.sourceEntry.id;
+            projectedMessage = found;
+            break;
+          }
+        }
+        if (!targetId || !projectedMessage) continue;
+        // Committed is confirmed by observation: once the projection serves the
+        // replacement bytes the edit is on the branch and journal coverage can
+        // retire. Emitting the draft proves nothing — a later boundary handler
+        // can still drop or replace the batch before commit.
+        if (toolResultDigest(projectedMessage) === toolResultDigest(entry.replacement)) {
+          entry.editCommitted = true;
+          continue;
+        }
+        if ((entry.editDrafts ?? 0) >= MAX_CONTEXT_EDIT_DRAFTS) continue;
+        entry.editDrafts = (entry.editDrafts ?? 0) + 1;
+        drafts.push({ type: "context_edit", targetId, replacement: { content } });
+      }
+      return drafts;
+    },
     async beforeProviderRequest(payload, ctx) {
       const guarded = disableInvalidBudgetThinking(payload);
       if (guarded === payload) {
@@ -3503,6 +3568,9 @@ function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): voi
     setPreferredPrune(byCallId, entry, state.reachableCheckpoints);
   }
   for (const [callId, entry] of state.pruneManifest.entries()) {
+    // A committed context_edit makes the prune authoritative on the branch: the
+    // projection replays it, so the journal no longer needs to carry it.
+    if (entry.editCommitted) continue;
     if (!entry.checkpointId) entry.checkpointId = state.activeCheckpointId;
     byCallId.set(callId, persistedEntryOf(callId, entry));
   }
