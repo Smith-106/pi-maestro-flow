@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.31.0",
+  "version": "0.31.1",
   "description": "All-in-one multi-agent orchestration for the Pi coding agent — parallel teammate dispatch, goals, plans, knowledge system, MCP/LSP/browser, and cockpit visualization in a single install",
   "type": "module",
   "bin": {
@@ -117,7 +117,7 @@
     "pi-maestro-fabric": "0.1.0",
     "pi-maestro-fabric-core": "0.1.0",
     "pi-maestro-settings-core": "0.2.2",
-    "pi-maestro-teammate": "2.7.0",
+    "pi-maestro-teammate": "2.7.1",
     "promise.try": "^2.0.1",
     "proper-lockfile": "4.1.2",
     "puppeteer-core": "24.31.0",
