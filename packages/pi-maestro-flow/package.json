@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.31.1",
+  "version": "0.31.2",
   "description": "All-in-one multi-agent orchestration for the Pi coding agent — parallel teammate dispatch, goals, plans, knowledge system, MCP/LSP/browser, and cockpit visualization in a single install",
   "type": "module",
   "bin": {
