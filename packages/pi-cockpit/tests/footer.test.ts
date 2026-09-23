@@ -1,4 +1,3 @@
-import { altKey } from "pi-maestro-settings-core/v1";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -14,9 +13,6 @@ import {
 	type WidthUtils,
 } from "../src/footer.ts";
 import { resolveGlyphs } from "../src/icons.ts";
-
-/** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
-const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
 
 // Hermetic width utils: mock theme strips no ansi, so visible width == string length.
 const theme: Pick<Theme, "fg"> = { fg: (_c, t) => t };
@@ -366,36 +362,20 @@ test("Plan mode leads line one while duplicate thinking is omitted", () => {
 	assert.equal(lines[0].match(/high/g)?.length, 1);
 });
 
-test("active bash_bg status renders left-aligned on line two", () => {
-	const lines = renderFooter(parts({
-		width: 100,
-		bashBgStatus: `⠴ · BG · 1 running · 8s · ${altKey("J")} details`,
-	}));
-	assert.equal(lines.length, 2);
-	assert.equal(lines[1], `⠴ · BG · 1 running · 8s · ${altKey("J")} details`);
-	assert.doesNotMatch(lines[0], new RegExp(`BG|${altRe("J")}`));
-});
-
-test("bash_bg status is clipped to the footer width", () => {
-	const lines = renderFooter(parts({
-		width: 24,
-		bashBgStatus: `BG 1 running ${"long-command ".repeat(5)}`,
-	}));
-	assert.equal(lines.length, 2);
-	assert.ok(utils.measure(lines[1]) <= 24);
-	assert.match(lines[1], /…$/);
+test("footer has no background-job row", () => {
+	const lines = renderFooter(parts({ width: 100 }));
+	assert.equal(lines.length, 1);
+	assert.doesNotMatch(lines[0], /BG|Alt\+J/);
 });
 
 test("workflow status renders after the mode-bearing first line", () => {
 	const lines = renderFooter(parts({
-		bashBgStatus: "BG · 1 running",
 		workflowStatus: "⚑ session · running · 003/execute",
 		extensionStatuses: [{ key: "mode", text: "PLAN" }],
 	}));
-	assert.equal(lines.length, 3);
+	assert.equal(lines.length, 2);
 	assert.match(lines[0], /^PLAN/);
-	assert.match(lines[1], /^BG/);
-	assert.match(lines[2], /^⚑ session/);
+	assert.match(lines[1], /^⚑ session/);
 });
 
 test("maestro workflow snapshot renders a dedicated session/run line", () => {

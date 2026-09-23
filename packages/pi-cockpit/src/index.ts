@@ -48,7 +48,6 @@ import {
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { TodoOverlay } from "./todo-overlay.ts";
 import { AgentOverlay } from "./agent-overlay.ts";
-import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
 import { registerTeammateMessageRenderer } from "./teammate-message.ts";
 import { registerGuardedEditTool } from "./edit-guard.ts";
@@ -1568,20 +1567,6 @@ export default function (pi: ExtensionAPI): void {
 					const branch = footerData.getGitBranch();
 					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
 					const glyphs = resolveGlyphs(config.icons.mode);
-					const now = nowSnapshot;
-					const jobs = bashBg.snapshot();
-					const bashBgStatus = renderBashBgSummary(
-						jobs,
-						width,
-						theme,
-						FOOTER_UTILS,
-						{
-							glyphs,
-							spin: spinFrame(glyphs, now, isAnimating()),
-							now,
-							hideLiveDuration: config.staticMode,
-						},
-					)[0];
 					const totals = getUsageTotals(ctx.sessionManager.getEntries());
 					const usageStatus = config.usage.enabled && config.usage.footer
 						? usageSubsystem?.getStatus(theme, config.usage.barWidth)
@@ -1595,7 +1580,7 @@ export default function (pi: ExtensionAPI): void {
 						formatCwd(ctx.sessionManager.getCwd()),
 						cu?.percent ?? 0, cu?.tokens ?? 0, cu?.contextWindow ?? ctx.model?.contextWindow ?? 0,
 						refId(totals), config.currency ?? "", config.currencyRate ?? "",
-						branch ?? "", bashBgStatus ?? "", usageStatus ?? "",
+						branch ?? "", usageStatus ?? "",
 						extensionStatuses.map((status) => `${status.key}:${status.text}`).join("|"),
 						refId(maestroWorkflow), maestro.contentRevision,
 					].join(";");
@@ -1612,7 +1597,6 @@ export default function (pi: ExtensionAPI): void {
 						currency: config.currency,
 						currencyRate: config.currencyRate,
 						git: branch ?? undefined,
-						bashBgStatus,
 						usageStatus,
 						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,
 						maestroWorkflow,

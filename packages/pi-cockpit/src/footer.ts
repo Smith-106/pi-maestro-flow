@@ -34,7 +34,6 @@ export interface FooterParts {
 	currencyRate?: number;
 	git?: string;
 	agentSummary?: string;
-	bashBgStatus?: string;
 	workflowStatus?: string;
 	/** Maestro workflow session/run snapshot from the UI projection channel. */
 	maestroWorkflow?: MaestroWorkflowV1 | null;
@@ -446,9 +445,6 @@ export function renderFooter(p: FooterParts): string[] {
 
 	const line1 = alignRight(fittedLeft.join(identitySeparator), right1, width, utils.measure);
 	const lines = [utils.clip(line1, width, ell)];
-	if (p.bashBgStatus) {
-		lines.push(utils.clip(p.bashBgStatus, width, ell));
-	}
 	if (p.usageStatus) {
 		lines.push(utils.clip(p.usageStatus, width, ell));
 	}

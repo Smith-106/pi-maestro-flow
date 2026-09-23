@@ -389,7 +389,7 @@ test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a r
 	assert.match(flowSource, /pi\.events\.on\(BASH_BG_QUERY_EVENT, publishSnapshot\)/);
 	assert.match(cockpitSource, /pi\.events\.on\(BASH_BG_UPDATE_EVENT/);
 	assert.match(cockpitSource, /pi\.events\.emit\(BASH_BG_QUERY_EVENT/);
-	assert.match(cockpitSource, /bashBgStatus: renderBashBgSummary|const bashBgStatus = renderBashBgSummary/);
+	assert.doesNotMatch(cockpitSource, /renderBashBgSummary|bashBgStatus/);
 	assert.match(cockpitSource, /registerShortcut\(BASH_BG_OVERLAY_KEY/);
 });
 
