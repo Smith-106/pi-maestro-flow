@@ -796,10 +796,19 @@ export async function dispatchRegisteredChildTool(
         (signal) => executeBroker(signal),
       )
     : await executeBroker(active?.abortController.signal);
+  // TeammateChildToolResult.details is optional for brokers, but the child's
+  // isTeammateToolResult wire check requires the own property — normalize here
+  // so a conforming broker result cannot surface as "invalid result envelope".
   reply({
     type: "teammate_proxy_result",
     requestId,
-    result,
+    result: isRecord(result) && Array.isArray(result.content)
+      ? { details: {}, ...result }
+      : {
+          content: [{ type: "text", text: `Teammate child tool "${toolName}" returned a malformed result.` }],
+          isError: true,
+          details: {},
+        },
   });
   return true;
 }
@@ -3514,6 +3523,7 @@ export async function handleProxyRequest(
       result: {
         content: [{ type: "text", text: `Unsupported teammate child proxy tool: ${tool}` }],
         isError: true,
+        details: {},
       },
     });
   } catch (error) {

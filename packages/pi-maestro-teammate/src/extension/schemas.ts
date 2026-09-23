@@ -67,7 +67,7 @@ export const TaskSpec = Type.Object({
   ),
   agent: Type.Optional(
     Type.String({
-      description: 'Agent name to dispatch; defaults to the top-level agent, then "general"',
+      description: 'Agent name to dispatch; defaults to the top-level agent, then "general". Only registered names are accepted — list them with teammate-list view="roles" instead of guessing.',
     }),
   ),
   taskType: Type.Optional(TaskType),
@@ -173,7 +173,7 @@ export const TeammateParams = Type.Object({
   ),
   agent: Type.Optional(
     Type.String({
-      description: 'Default agent for tasks that omit agent; defaults to "general"',
+      description: 'Default agent for tasks that omit agent; defaults to "general". Only registered names are accepted — list them with teammate-list view="roles" instead of guessing.',
     }),
   ),
   taskType: Type.Optional(TaskType),

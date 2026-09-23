@@ -1048,10 +1048,12 @@ export async function runSingleAttempt(
     };
     timers.firstActivity = setTimeout(() => {
       if (state.initialResultPublished || state.receivedFirstActivity) return;
+      const stderrTail = state.stderrBuffer.trim();
       const message =
         `Timed out waiting for the first child agent event `
         + `(agent=${params.agent}, model=${state.resolvedModel || "unknown"}, correlationId=${correlationId}, `
-        + `phase=first-activity); the child process started but did not report model activity.`;
+        + `phase=first-activity); the child process started but did not report model activity.`
+        + (stderrTail ? ` stderr: ${truncateUtf8Tail(stderrTail, 1_000)}` : "");
       state.lastContent = message;
       state.runtimeFailure = message;
       appendBoundedTranscriptMessage(messages, { role: "system", content: message });
@@ -3294,6 +3296,7 @@ function replyUnhandledChildRequest(
     result: {
       content: [{ type: "text", text: "No parent child-request handler is available." }],
       isError: true,
+      details: {},
     },
   });
 }

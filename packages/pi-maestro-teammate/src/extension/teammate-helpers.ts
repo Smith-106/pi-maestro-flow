@@ -2333,6 +2333,9 @@ export function replyProxyFailure(
     result: {
       content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
       isError: true,
+      // The child's isTeammateToolResult requires `details` as an own property;
+      // omitting it masks the real error as "invalid result envelope".
+      details: {},
     },
   });
 }
