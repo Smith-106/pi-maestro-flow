@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-teammate",
-  "version": "2.7.1",
+  "version": "2.7.2",
   "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
   "engines": {
@@ -212,7 +212,7 @@
     "jiti": "2.7.0",
     "pi-maestro-settings-core": "0.2.2",
     "pi-maestro-backend-core": "0.1.4",
-    "pi-maestro-backends": "0.1.4",
+    "pi-maestro-backends": "0.1.5",
     "pi-maestro-fabric-core": "0.1.0",
     "proper-lockfile": "4.1.2",
     "ssh2": "1.17.0",

@@ -34,6 +34,15 @@ export { DSH_SETTINGS_CATALOGS } from "./catalog.ts";
 
 /** The registerable backend: capability table plus the SDK-backed driver. */
 export default createDshBackend(async (config, options) => {
-  const { createDshDriver } = await import("./driver.ts");
+  const { createDshDriver } = await import("./driver.ts").catch((cause) => {
+    const missing =
+      (cause as { code?: string }).code === "ERR_MODULE_NOT_FOUND" &&
+      String((cause as Error).message).includes("@deepseek-ai/dsh-sdk-client");
+    if (!missing) throw cause;
+    throw new Error(
+      "the dsh backend needs @deepseek-ai/dsh-sdk-client installed alongside pi-maestro-backends",
+      { cause },
+    );
+  });
   return createDshDriver(config, options);
 });
