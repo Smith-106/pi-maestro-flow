@@ -48,6 +48,7 @@ import {
   GoalToolParams,
   AskUserQuestionParams,
   TodoToolParams,
+  OcrReviewParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
 import { resolveGlyphs, setQuietMode, supportsCustomOverlay } from "pi-maestro-settings-core/ui";
@@ -55,6 +56,7 @@ import { isTodoDurationChartEnabled, setTodoDurationChartEnabled } from "../todo
 import { toolCallLine, toolResultCard, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
+import { executeOcrReview, type OcrReviewInput } from "../tools/ocr-review.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
 import { registerSwarmDisplay } from "../tools/swarm.ts";
@@ -1982,6 +1984,75 @@ Only request completion after all work is done; the extension verifies it indepe
   };
 
   pi.registerTool(goalTool);
+
+  // === OCR Code Review Tool ===
+  const ocrReviewTool: ToolDefinition<typeof OcrReviewParams> = {
+    name: "ocr-review",
+    label: "OCR Review",
+    description: `Run OpenCodeReview (ocr CLI) on Git changes. Actions:
+
+- preview: { action: "preview" } — deterministic reviewable-file selection + mode/ref metadata (merge_base for range mode). No LLM. Always the first step of a self-driven review.
+- rules: { action: "rules", paths: [...] } — per-file review rule groups resolved by OCR's rule engine. No LLM.
+- review: { action: "review" } — full OCR-managed review; the session's current model is injected via OCR_LLM_* env, no separate ocr config needed. Returns structured line-level findings (severity/category/path/start_line/end_line). Model selection: { model: "provider/modelId" } per call, or pin api-manager.json "ocr.modelRef"; default follows the session model.
+- health: { action: "health" } — ocr version + injected-model connectivity check.
+
+Scope: default reviews workspace changes (staged+unstaged+untracked); { commit } for one commit; { from, to } for a branch range; { resume } continues an interrupted review; { exclude } filters paths; { background } adds business context.
+
+Self-driven review (delegate mode): preview → collect diffs per returned refs → rules → review each file → report by severity with file:line evidence. Every reviewable_files entry must end reviewed or explicitly skipped (coverage is mandatory).`,
+    promptSnippet: "Review Git changes via the ocr CLI — deterministic scope/rules (delegate) or full managed review with the injected current model",
+    promptGuidelines: [
+      "Requires the ocr binary on PATH (npm i -g @alibaba-group/open-code-review); health action reports install/model problems.",
+      "For self-driven reviews run preview first, then rules, then review every listed file — coverage is mandatory, report skipped files with reasons.",
+      "review action injects the current session model; if the provider api is unsupported (non-anthropic/openai), fall back to preview+rules and review yourself.",
+    ],
+
+    parameters: OcrReviewParams,
+
+    async execute(
+      _id: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      _onUpdate: ((result: FlowToolResult) => void) | undefined,
+      ctx: ExtensionContext,
+    ): Promise<FlowToolResult> {
+      return executeOcrReview(params as OcrReviewInput, signal, ctx);
+    },
+
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      const action = String(args.action ?? "review");
+      const target = String(args.commit ?? (args.from ? `${args.from}..${args.to ?? "?"}` : "") ?? "");
+      return toolCallLine(theme, "ocr", target ? `${action} ${target}` : action);
+    },
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const text = result.content.find((item) => item.type === "text");
+      const message = text && "text" in text ? text.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      const action = String(ctx.args.action ?? "review");
+      return toolResultLine(theme, { name: "ocr", ok: !isError, arg: action, summary: resultSummary(result), expanded: opts.expanded, detail: message });
+    },
+  };
+  pi.registerTool(ocrReviewTool);
+
+  pi.registerCommand("ocr-review", {
+    description: "Review code changes with OpenCodeReview — workspace (default), --commit, or --from/--to range",
+    async handler(args, ctx) {
+      if (ctx.isIdle?.() === false) {
+        ctx.ui.notify("Agent is busy; run /ocr-review when idle.", "warning");
+        return;
+      }
+      const trimmed = args.trim();
+      pi.sendUserMessage([
+        "Run a code review with the ocr-review tool (OpenCodeReview CLI).",
+        trimmed
+          ? `User intent/target/background: ${trimmed}`
+          : "Target: current workspace changes (workspace mode, default).",
+        "Prefer action=review (OCR-managed, current model auto-injected). If it reports the model cannot be injected, fall back to delegate mode: action=preview, then action=rules for the listed files, review each diff yourself, and report findings grouped by severity with file:line evidence.",
+      ].join("\n"));
+    },
+  });
 
   // === Ask User Question Tool ===
   registerAskUserQuestionTool(pi, notifyController.requestInput);
@@ -4318,6 +4389,7 @@ When NOT to use:
       "api.retry": () => openApiManager("retry", "API retry settings"),
       "api.cache": () => openApiManager("cache", "Prompt cache policy"),
       "api.nextsuggest": () => openApiManager("nextsuggest", "Next-step suggestion settings"),
+      "api.ocr": () => openApiManager("ocr", "OCR review settings"),
       "api.enhance": () => openApiManager("enhance", "Prompt enhance settings"),
       "api.prompt-enhance": () => openApiManager("prompt-enhance", "Prompt enhance (optimize) settings"),
       "api.optimize": () => openApiManager("optimize", "Prompt optimize settings"),

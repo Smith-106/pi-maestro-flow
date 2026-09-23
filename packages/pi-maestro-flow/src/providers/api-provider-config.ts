@@ -38,6 +38,11 @@ import {
   saveOptimizeConfig,
 } from "../prompt-optimize/config.ts";
 import {
+  DEFAULT_OCR_CONFIG,
+  loadOcrConfig,
+  saveOcrConfig,
+} from "../ocr-review/config.ts";
+import {
   EFFORT_STATUS_KEY,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
@@ -474,7 +479,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "key" | "list" | "logout" | "nextsuggest" | "optimize" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "switch-key" | "thinking" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "enable" | "enhance" | "export" | "filter" | "import" | "key" | "list" | "logout" | "nextsuggest" | "ocr" | "optimize" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "switch-key" | "thinking" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -1180,6 +1185,73 @@ export async function manageNextSuggestSettings(
       config = { ...DEFAULT_NEXT_SUGGEST_CONFIG };
       await saveNextSuggestConfig(config, defaultsPath);
       ctx.ui.notify("下一步建议设置已重置为默认。", "info");
+      continue;
+    }
+  }
+}
+
+/**
+ * OCR review settings panel inside the API manager.
+ *
+ * The managed-review model pin is persisted in the api-manager.json `ocr`
+ * section and consumed by the ocr-review tool's `review`/`health` actions.
+ */
+export async function manageOcrSettings(
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+  modelsPath: string,
+): Promise<void> {
+  const modelLabel = (value: string): string => value === "session" ? "跟随会话模型" : value;
+  if (!ctx.hasUI) {
+    const current = await loadOcrConfig(defaultsPath);
+    ctx.ui.notify(`OCR 评审模型：${modelLabel(current.modelRef)}`, "info");
+    return;
+  }
+
+  let config = await loadOcrConfig(defaultsPath);
+  const options = () => [
+    `评审模型：${modelLabel(config.modelRef)}（点击选择）`,
+    "重置为默认设置",
+  ];
+
+  for (;;) {
+    const choice = await ctx.ui.select("OCR 评审设置（/api-manager ocr）", options());
+    if (choice === undefined) return;
+
+    if (choice.startsWith("评审模型")) {
+      const models = await buildGlobalModelOptions("configure", modelsPath, defaultsPath);
+      const labels = [
+        `跟随会话模型${config.modelRef === "session" ? "（当前）" : ""}`,
+        ...models.map((entry) =>
+          `${entry.label}${entry.pick.kind === "model" && config.modelRef === `${entry.pick.providerId}/${entry.pick.modelId}` ? "（当前）" : ""}`
+        ),
+      ];
+      const pick = await ctx.ui.select("选择 OCR 评审模型（独立于会话模型）", labels);
+      if (pick === undefined) continue;
+      if (pick === labels[0]) {
+        config.modelRef = "session";
+      } else {
+        const entry = models.find((item) =>
+          `${item.label}${item.pick.kind === "model" && config.modelRef === `${item.pick.providerId}/${item.pick.modelId}` ? "（当前）" : ""}` === pick
+        );
+        if (entry && entry.pick.kind === "model") {
+          config.modelRef = `${entry.pick.providerId}/${entry.pick.modelId}`;
+        }
+      }
+      await saveOcrConfig(config, defaultsPath);
+      ctx.ui.notify(`OCR 评审模型已设为：${modelLabel(config.modelRef)}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("重置")) {
+      const confirmed = await ctx.ui.confirm(
+        "确认重置 OCR 评审设置为默认值？",
+        "将恢复为：跟随会话模型",
+      );
+      if (!confirmed) continue;
+      config = { ...DEFAULT_OCR_CONFIG };
+      await saveOcrConfig(config, defaultsPath);
+      ctx.ui.notify("OCR 评审设置已重置为默认。", "info");
       continue;
     }
   }
@@ -1949,6 +2021,10 @@ async function showApiProviderManager(
   }
   if (action === "nextsuggest") {
     await manageNextSuggestSettings(ctx, defaultsPath, modelsPath);
+    return;
+  }
+  if (action === "ocr") {
+    await manageOcrSettings(ctx, defaultsPath, modelsPath);
     return;
   }
   if (action === "enhance") {

@@ -7,6 +7,7 @@ import { parse as parseYaml } from "yaml";
 import { normalizeGatewayConfig } from "../gateway/config.ts";
 import { gatewayConfigPath } from "../gateway/state-paths.ts";
 import { resolveOwnPackageJson, resolvePackageOrWorkspaceResource } from "../resources/maestro-package.ts";
+import { ocrInstalled } from "../tools/ocr-review.ts";
 
 /** An optional install item surfaced by `/install`. Mirrors the `OptionalSkill` pattern. */
 export interface InstallItem {
@@ -113,6 +114,15 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
     category: "external",
     promptIntro:
       "配置实验性的 OpenAI Secure MCP Tunnel。只在原生 ~/.pi/agent/gateway/config.yaml 中写环境变量名称，绝不写入或索取 secret 值；不得创建或预配 tunnel。client 解析顺序为 binaryPath → PATH → managed install；只有用户显式确认后才可写 auto_install: true 启用固定版本+SHA256 校验的托管下载，否则不得自动下载 tunnel-client。按文档验证外部 client、Gateway doctor/start/status，并保留显式 opt-in 语义。",
+  },
+  {
+    id: "ocr",
+    title: "OpenCodeReview 代码评审 CLI",
+    description: "安装 ocr CLI，为 ocr-review 工具与 reviewer agent 提供确定性 diff 范围/规则与托管评审；模型由 api-manager 注入，无需单独配置 OCR provider。",
+    docFile: "OCR-SETUP.md",
+    category: "external",
+    promptIntro:
+      "安装 OpenCodeReview（ocr CLI）。先检测 PATH 是否已有 ocr；缺失时经用户确认后用 npm 全局安装固定版本。绝不写 ~/.opencodereview/config.json、不运行 ocr config provider——pi 调用时经 OCR_LLM_* 环境变量注入 api-manager 当前模型。最后按 VERIFY 验证。",
   },
 ];
 
@@ -302,6 +312,8 @@ export function probeInstallStatus(id: string): InstallStatus {
       }
       case "openai-tunnel":
         return probeOpenAiTunnelStatus();
+      case "ocr":
+        return ocrInstalled() ? "installed" : "not-installed";
       default:
         return "unknown";
     }

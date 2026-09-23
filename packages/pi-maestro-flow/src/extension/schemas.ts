@@ -147,6 +147,34 @@ export const GoalToolParams = Type.Object({
   ),
 }, { additionalProperties: false });
 
+// === OCR Code Review Schema ===
+
+export const OcrReviewParams = Type.Object({
+  action: StringEnum(
+    ["review", "preview", "rules", "health"],
+    "review = full OCR-managed review (current model injected via env); preview/rules = delegate mode, deterministic, no LLM; health = version + LLM connectivity check",
+  ),
+  commit: Type.Optional(Type.String({ description: "Review one commit against its parent" })),
+  from: Type.Optional(Type.String({ description: "Base ref for a range review; must be paired with 'to'" })),
+  to: Type.Optional(Type.String({ description: "Target ref for a range review; must be paired with 'from'" })),
+  resume: Type.Optional(Type.String({ description: "Resume an interrupted review session by id (review only)" })),
+  paths: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "File paths to resolve review rules for (action=rules only; pass the reviewable_files list from preview)",
+    }),
+  ),
+  background: Type.Optional(Type.String({ description: "Business/requirement context to focus the review" })),
+  exclude: Type.Optional(Type.String({ description: "Comma-separated gitignore-style exclusion patterns" })),
+  repo: Type.Optional(Type.String({ description: "Repository root; defaults to the workspace cwd" })),
+  timeoutMinutes: Type.Optional(Type.Integer({ minimum: 1, description: "Per-file-group OCR timeout in minutes (review)" })),
+  overallTimeoutMinutes: Type.Optional(Type.Integer({ minimum: 1, description: "Wall-clock cap for the whole ocr process (review; default 45)" })),
+  model: Type.Optional(
+    Type.String({
+      description: "Review model override: 'provider/modelId' pins a registered model, 'session' follows the current session model (default). Falls back to the api-manager.json ocr.modelRef pin.",
+    }),
+  ),
+}, { additionalProperties: false });
+
 // === Ask User Question Schema ===
 
 const QuestionOptionSchema = Type.Object({

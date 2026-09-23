@@ -2388,6 +2388,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "cache-agent" || value === "agent-cache") return "cache-agent";
   if (value === "vision") return "vision";
   if (value === "nextsuggest" || value === "next-suggest" || value === "suggest") return "nextsuggest";
+  if (value === "ocr" || value === "ocr-review" || value === "code-review") return "ocr";
   if (value === "enhance") return "enhance";
   if (value === "prompt-enhance" || value === "optimize" || value === "prompt-optimize") return "optimize";
   if (value === "price" || value === "pricing" || value === "cost") return "price";
