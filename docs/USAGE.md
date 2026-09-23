@@ -22,7 +22,7 @@
    - [lsp — 语言服务器集成](#31-lsp--语言服务器集成)
    - [browser — 浏览器控制](#32-browser--浏览器控制)
    - [smart_search — 网络搜索与研究](#33-smart_search--网络搜索与研究)
-   - [ffgrep / fffind — 快速搜索](#34-ffgrep--fffind--快速搜索)
+   - [search / fffind — 快速搜索](#34-search--fffind--快速搜索)
    - [search_tool_bm25 — 工具发现](#35-search_tool_bm25--工具发现)
 4. [MCP 集成](#4-mcp-集成)
 5. [权限系统](#5-权限系统)
@@ -87,7 +87,7 @@ pi list
 | pi-maestro-flow | `lsp` | 语言服务器协议集成 |
 | pi-maestro-flow | `browser` | Chromium 浏览器控制 |
 | pi-maestro-flow | `smart_search` | 网络搜索/深度研究/URL 抓取 |
-| pi-maestro-flow | `ffgrep` | FFF 快速字面内容搜索 |
+| pi-maestro-flow | `search` | FFF 索引内容搜索（literal/regex/fuzzy，rg 兜底） |
 | pi-maestro-flow | `fffind` | FFF 快速模糊文件搜索 |
 | pi-maestro-flow | `search_tool_bm25` | BM25 工具发现 |
 | pi-maestro-flow | `model-availability` | 无密钥的模型注册与路由诊断 |
@@ -463,17 +463,27 @@ smart_search({ mode: "fetch", query: "https://docs.example.com/api/auth" })
 
 ---
 
-### 3.4 ffgrep / fffind — 快速搜索
+### 3.4 search / fffind — 快速搜索
 
-基于 [FFF](https://github.com/fff-labs/fff) 的原生索引搜索，仅注册到根 Pi 会话：
+基于 [FFF](https://github.com/fff-labs/fff) 的工作区级原生索引搜索。索引在会话启动时预热并驻留内存；teammate 子会话通过 broker 共享同一索引：
 
 ```javascript
-// 字面内容搜索
-ffgrep({ pattern: "validateToken", context: 3, limit: 20 })
+// 字面内容搜索（默认 mode="plain"）
+search({ pattern: "validateToken", context: 3, limit: 20 })
+
+// 正则 / 模糊内容搜索
+search({ pattern: "fn\\s+validate\\w*", mode: "regex" })
+search({ pattern: "valdiate token", mode: "fuzzy" })
+
+// 输出形态：files = 仅文件路径；count = 每文件命中数
+search({ pattern: "TODO", output: "files" })
+search({ pattern: "deprecated", output: "count", glob: "*.ts" })
 
 // 模糊文件路径搜索
 fffind({ pattern: "auth middleware", limit: 10 })
 ```
+
+索引不可用时 `search` 自动降级为 ripgrep（结果附 `[engine: rg]` 标注）；`mode="fuzzy"` 无降级等价物，索引不可用时返回明确错误。
 
 ---
 
@@ -635,7 +645,7 @@ Persistent profile 的 `enable|disable` 修改持久启用意图；`start|stop|r
 
 以下工具在任何模式下都自动允许（只读或无副作用）：
 
-`Read`, `Grep`, `Glob`, `Ls`, `Find`, `ffgrep`, `fffind`, `ask-user-question`, `teammate`, `teammate-send`, `teammate-list`, `teammate-watch`, `goal`, `todo`, `plan-*`, `search_tool_bm25`
+`Read`, `Grep`, `Glob`, `Ls`, `Find`, `search`, `fffind`, `ask-user-question`, `teammate`, `teammate-send`, `teammate-list`, `teammate-watch`, `goal`, `todo`, `plan-*`, `search_tool_bm25`
 
 ### Teammate 子进程权限中继
 

@@ -2,124 +2,188 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
-import { parse, resolve } from "node:path";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
-import { FileFinder, type FileFinderApi } from "@ff-labs/fff-node";
+import {
+  FileFinder,
+  type FileFinderApi,
+  type FileItem,
+  type GrepCursor,
+  type GrepMatch,
+} from "@ff-labs/fff-node";
 import { Type } from "typebox";
 import { resolveSearchScopePath } from "./search-scope-guard.ts";
+import { runRgSearch } from "./search-rg.ts";
 
-const SCAN_TIMEOUT_MS = 15_000;
-// Keep at most this many indexed workspaces alive. Each finder owns a native
-// file watcher plus an in-memory index, so unbounded caching would trade one
-// scan storm for another.
-const MAX_CACHED_FINDERS = 4;
+export const SearchToolParameters = Type.Object({
+  pattern: Type.String({
+    minLength: 1,
+    description:
+      "Text to search for — a literal string by default; a Rust-syntax regular expression with mode=\"regex\" (no look-around or backreferences — rewrite foo\\((?!\\)) as foo\\([^)]*\\)); an approximate term with mode=\"fuzzy\"",
+  }),
+  path: Type.Optional(
+    Type.String({
+      description:
+        "Directory or file to search, relative to the session working directory or absolute; must resolve inside the workspace (default: workspace root)",
+    }),
+  ),
+  mode: Type.Optional(
+    Type.Union([Type.Literal("plain"), Type.Literal("regex"), Type.Literal("fuzzy")], {
+      description:
+        "plain = literal substring (default); regex = regular expression; fuzzy = approximate content matching for unknown spellings (requires the index; incompatible with forced ignoreCase or '!' globs)",
+    }),
+  ),
+  glob: Type.Optional(
+    Type.String({
+      description: "Filter searched files by glob, e.g. '*.ts' or 'src/**/*.spec.ts'; prefix with '!' to exclude",
+    }),
+  ),
+  context: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      maximum: 20,
+      description: "Lines to show before and after each match for output=\"lines\" (default: 0, max: 20)",
+    }),
+  ),
+  ignoreCase: Type.Optional(
+    Type.Boolean({
+      description:
+        "true = always case-insensitive; false = always case-sensitive; omit for smart case (insensitive only when the pattern is all-lowercase)",
+    }),
+  ),
+  output: Type.Optional(
+    Type.Union([Type.Literal("lines"), Type.Literal("files"), Type.Literal("count")], {
+      description:
+        "lines = matching lines with file:line prefixes (default); files = matching file paths only; count = per-file matching-line totals as file:N rows",
+    }),
+  ),
+  limit: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      maximum: 1000,
+      description: "Max matches (lines) or file rows (files/count) to return (default: 50, max: 1000)",
+    }),
+  ),
+});
+
+export interface SearchToolInput {
+  pattern: string;
+  path?: string;
+  mode?: "plain" | "regex" | "fuzzy";
+  glob?: string;
+  context?: number;
+  ignoreCase?: boolean;
+  output?: "lines" | "files" | "count";
+  limit?: number;
+}
+
+/**
+ * Shared search surface consumed by both the root `search` tool and the
+ * teammate child-tool broker — one workspace index serves every session.
+ */
+export interface FffSearchHandle {
+  search(
+    input: SearchToolInput,
+    workspaceRoot: string,
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>>;
+}
 
 export interface RegisterFffOptions {
+  /** Test seam: replace native FileFinder creation. */
   createFinder?: typeof FileFinder.create;
+  /** Test seam: replace the ripgrep fallback runner. */
+  runRg?: typeof runRgSearch;
+  /** Test seam: initial scan timeout. */
   scanTimeoutMs?: number;
 }
 
-/**
- * Returns a human-readable reason when `dir` is a filesystem root or the user's
- * home directory. fff-node already refuses these at the native layer unless
- * `enableHomeDirScanning`/`enableFsRootScanning` are set; failing fast here
- * avoids the obscure native error and the wasted per-call init attempt.
- */
-function unsafeBasePathReason(dir: string): string | undefined {
-  if (dir === parse(dir).root) return "filesystem roots";
-  if (dir.toLowerCase() === homedir().toLowerCase()) return "home directories";
-  return undefined;
-}
+const SCAN_TIMEOUT_MS = 15_000;
+const SEARCH_TIME_BUDGET_MS = 8_000;
+const FFF_PAGE_SIZE = 200;
+const MAX_DRAIN_PAGES = 200;
+const MAX_DRAIN_MATCHES = 50_000;
+const MAX_GLOB_FILES = 20_000;
+const MAX_CACHED_FINDERS = 4;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 1000;
 
-/** Evicts the least-recently-used finder once the cache exceeds its cap. */
-function evictOldestFinder(finders: Map<string, FileFinderApi>): void {
-  while (finders.size > MAX_CACHED_FINDERS) {
-    const oldestKey = finders.keys().next().value;
-    if (oldestKey === undefined) break;
-    finders.get(oldestKey)?.destroy();
-    finders.delete(oldestKey);
-  }
-}
-
-const FffGrepParams = Type.Object({
-  pattern: Type.String({ minLength: 1, description: "Literal text to search for" }),
-  path: Type.Optional(Type.String({ description: "Directory to search relative to the workspace (default: workspace root)" })),
-  context: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, description: "Lines of context before and after each match (default: 0)" })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum number of matches to return (default: 20)" })),
-});
-
-const FffFindParams = Type.Object({
-  pattern: Type.String({ minLength: 1, description: "Fuzzy file-path query" }),
-  path: Type.Optional(Type.String({ description: "Directory to search relative to the workspace (default: workspace root)" })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum number of files to return (default: 30)" })),
-});
-
-/**
- * Adds FFF's native index only to the root Pi session. The tools stay separate
- * from Pi's built-ins, so existing grep/find calls remain backward compatible.
- */
-export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}): void {
+/** One index per workspace root — never one per searched subdirectory. */
+export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}): FffSearchHandle {
   const finders = new Map<string, FileFinderApi>();
   const initializingFinders = new Map<string, FileFinderApi>();
-  const failedCwds = new Set<string>();
+  const failedRoots = new Set<string>();
   const initializing = new Map<string, Promise<FileFinderApi>>();
   const createFinder = options.createFinder ?? FileFinder.create;
   const scanTimeoutMs = options.scanTimeoutMs ?? SCAN_TIMEOUT_MS;
+  const runRg = options.runRg ?? runRgSearch;
   let lifecycleGeneration = 0;
 
-  const ensureFinder = async (cwd: string): Promise<FileFinderApi> => {
-    const key = resolve(cwd);
-    const generation = lifecycleGeneration;
-    const denied = unsafeBasePathReason(key);
-    if (denied) {
-      throw new Error(`FFF does not index ${denied}; start Pi from a specific project directory or use the built-in find/grep tools`);
+  const unsafeBasePathReason = (cwd: string): string | null => {
+    const resolved = resolve(cwd);
+    if (resolved === homedir()) return "home directories";
+    if (resolved === parse(resolved).root) return "filesystem roots";
+    return null;
+  };
+
+  const ensureFinder = async (root: string): Promise<FileFinderApi> => {
+    const denied = unsafeBasePathReason(root);
+    if (denied) throw new Error(`search does not index ${denied}; start Pi from a specific project directory`);
+    if (failedRoots.has(root)) {
+      throw new Error(`search failed to scan ${root}; use rg in bash instead for deterministic fallback`);
     }
-    if (failedCwds.has(key)) {
-      throw new Error(`FFF index for ${key} failed to scan; use the built-in find/grep tools instead`);
-    }
-    const cached = finders.get(key);
-    if (cached && !cached.isDestroyed) return cached;
-    const pending = initializing.get(key);
+    const ready = finders.get(root);
+    if (ready) return ready;
+    const pending = initializing.get(root);
     if (pending) return pending;
-    let ownedFinder: FileFinderApi | undefined;
-    let task!: Promise<FileFinderApi>;
-    task = (async (): Promise<FileFinderApi> => {
-      const created = createFinder({ basePath: key, aiMode: true });
+
+    const generation = lifecycleGeneration;
+    let initPromise: Promise<FileFinderApi> | undefined;
+    initPromise = (async () => {
+      const created = createFinder({ basePath: root });
       if (!created.ok) {
-        failedCwds.add(key);
-        throw new Error(`FFF initialization failed: ${created.error}`);
+        throw new Error(`search index unavailable (${created.error})`);
       }
       const finder = created.value;
-      ownedFinder = finder;
-      initializingFinders.set(key, finder);
-      const scanned = await finder.waitForScan(scanTimeoutMs);
-      if (generation !== lifecycleGeneration || finder.isDestroyed) {
-        finder.destroy();
-        throw new Error("FFF initialization was cancelled because the session ended.");
+      initializingFinders.set(root, finder);
+      try {
+        const scan = await finder.waitForScan(scanTimeoutMs);
+        if (finder.isDestroyed) throw new Error("search session ended");
+        if (generation !== lifecycleGeneration) {
+          finder.destroy();
+          throw new Error("search session ended");
+        }
+        if (!scan.ok) {
+          finder.destroy();
+          failedRoots.add(root);
+          throw new Error(`search failed to scan ${root} (${scan.error}); use rg in bash instead for deterministic fallback`);
+        }
+        if (!scan.value) {
+          finder.destroy();
+          failedRoots.add(root);
+          throw new Error(`search timed out scanning ${root}; use rg in bash instead for deterministic fallback`);
+        }
+        finders.set(root, finder);
+        if (finders.size > MAX_CACHED_FINDERS) {
+          const oldest = finders.keys().next().value;
+          if (oldest && oldest !== root) {
+            finders.get(oldest)?.destroy();
+            finders.delete(oldest);
+          }
+        }
+        return finder;
+      } finally {
+        initializingFinders.delete(root);
+        if (initializing.get(root) === initPromise) initializing.delete(root);
       }
-      // waitForScan returns { ok: true, value: false } on timeout; destroying
-      // the finder here stops the runaway background index of large trees.
-      if (!scanned.ok || !scanned.value) {
-        const reason = scanned.ok
-          ? `FFF initial scan timed out after ${scanTimeoutMs}ms`
-          : `FFF initial scan failed: ${scanned.error}`;
-        finder.destroy();
-        failedCwds.add(key);
-        throw new Error(reason);
-      }
-      if (initializingFinders.get(key) === finder) initializingFinders.delete(key);
-      finders.set(key, finder);
-      evictOldestFinder(finders);
-      return finder;
-    })().finally(() => {
-      if (initializing.get(key) === task) initializing.delete(key);
-      if (ownedFinder && initializingFinders.get(key) === ownedFinder) {
-        initializingFinders.delete(key);
-      }
-    });
-    initializing.set(key, task);
-    return task;
+    })();
+    initializing.set(root, initPromise);
+    return initPromise;
   };
+
+  pi.on("session_start", (_event, ctx) => {
+    void ensureFinder(resolve(ctx.cwd)).catch(() => undefined);
+  });
 
   pi.on("session_shutdown", () => {
     lifecycleGeneration += 1;
@@ -128,42 +192,254 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     initializing.clear();
     for (const finder of finders.values()) finder.destroy();
     finders.clear();
-    failedCwds.clear();
+    failedRoots.clear();
   });
 
-  pi.registerTool({
-    name: "ffgrep",
-    label: "FFF Grep",
-    description: "Fast FFF-backed literal content search in the current workspace or a selected subdirectory.",
-    promptSnippet: "Search workspace file contents with FFF.",
-    parameters: FffGrepParams,
-    async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      if (signal?.aborted) throw abortError();
-      const activeFinder = await ensureFinder(resolveSearchScopePath(params.path, ctx.cwd));
-      if (signal?.aborted) throw abortError();
-      const result = activeFinder.grep(params.pattern, {
-        mode: "plain",
-        smartCase: true,
-        pageSize: params.limit ?? 20,
-        beforeContext: params.context ?? 0,
-        afterContext: params.context ?? 0,
+  /** Normalize a scope path to the '/'-separated index prefix it filters to. */
+  const scopePrefixOf = (root: string, scopePath: string): string => {
+    const prefix = relative(root, scopePath).split(sep).join("/");
+    if (prefix === ".." || prefix.startsWith("../") || isAbsolute(prefix)) {
+      throw new Error(`search path must resolve inside the indexed workspace ${root}`);
+    }
+    return prefix;
+  };
+
+  const inScope = (relativePath: string, scopePrefix: string, globSet?: Set<string>): boolean =>
+    (scopePrefix === "" || relativePath === scopePrefix || relativePath.startsWith(`${scopePrefix}/`))
+    && (globSet === undefined || globSet.has(relativePath));
+
+  /** Collect the indexed file set matching a glob (npm-glob semantics; bare names get a '**' prefix). */
+  const collectGlobSet = (finder: FileFinderApi, glob: string): Set<string> => {
+    const normalized = glob.includes("/") || glob.includes("\\") ? glob : `**/${glob}`;
+    const files = new Set<string>();
+    const pageSize = 1000;
+    for (let pageIndex = 0; files.size < MAX_GLOB_FILES; pageIndex += 1) {
+      const result = finder.glob(normalized, { pageIndex, pageSize });
+      if (!result.ok) {
+        throw new Error(`search glob failed: ${result.error}`);
+      }
+      for (const item of result.value.items) files.add(item.relativePath);
+      if (result.value.items.length === 0 || (pageIndex + 1) * pageSize >= result.value.totalMatched) break;
+    }
+    return files;
+  };
+
+  const formatLines = (matches: GrepMatch[]): string => {
+    const rows: string[] = [];
+    for (const match of matches) {
+      const before = match.contextBefore ?? [];
+      for (const [index, line] of before.entries()) {
+        rows.push(`${match.relativePath}-${match.lineNumber - before.length + index}- ${line}`);
+      }
+      rows.push(`${match.relativePath}:${match.lineNumber}: ${match.lineContent}`);
+      const after = match.contextAfter ?? [];
+      for (const [index, line] of after.entries()) {
+        rows.push(`${match.relativePath}-${match.lineNumber + 1 + index}- ${line}`);
+      }
+    }
+    return rows.join("\n");
+  };
+
+  const fffSearch = async (
+    finder: FileFinderApi,
+    input: SearchToolInput,
+    scopePrefix: string,
+    mode: "plain" | "regex" | "fuzzy",
+    output: "lines" | "files" | "count",
+    limit: number,
+    context: number,
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>> => {
+    let globSet: Set<string> | undefined;
+    if (input.glob) {
+      globSet = collectGlobSet(finder, input.glob);
+      if (globSet.size === 0) {
+        return { content: [{ type: "text", text: "No matches found" }], details: { engine: "fff", exhausted: true } };
+      }
+    }
+    const matches: GrepMatch[] = [];
+    const filesSeen = new Set<string>();
+    let cursor: GrepCursor | null = null;
+    let exhausted = false;
+    let filesSearched = 0;
+    let regexFallbackNote: string | undefined;
+    const deadline = Date.now() + SEARCH_TIME_BUDGET_MS;
+    for (let page = 0; page < MAX_DRAIN_PAGES; page += 1) {
+      if (signal?.aborted) {
+        const error = new Error("search aborted.");
+        error.name = "AbortError";
+        throw error;
+      }
+      if (output === "lines" && matches.length >= limit) break;
+      if (output === "files" && filesSeen.size >= limit) break;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const result = finder.grep(input.pattern, {
+        mode,
+        smartCase: input.ignoreCase !== false,
+        cursor,
+        beforeContext: context,
+        afterContext: context,
+        pageSize: output === "lines" ? Math.max((limit - matches.length) * 2, 50) : FFF_PAGE_SIZE,
         classifyDefinitions: true,
+        timeBudgetMs: remaining,
       });
-      if (!result.ok) throw new Error(`FFF grep failed: ${result.error}`);
-      return { content: [{ type: "text", text: formatGrep(result.value) }] } as AgentToolResult<unknown>;
+      if (!result.ok) {
+        throw new Error(`search failed: ${result.error}`);
+      }
+      if (result.value.regexFallbackError) {
+        regexFallbackNote = `invalid regex — matched literally (${result.value.regexFallbackError})`;
+      }
+      filesSearched += result.value.totalFilesSearched ?? 0;
+      for (const item of result.value.items) {
+        if (!inScope(item.relativePath, scopePrefix, globSet)) continue;
+        matches.push(item);
+        filesSeen.add(item.relativePath);
+      }
+      cursor = result.value.nextCursor ?? null;
+      if (!cursor || result.value.items.length === 0) break;
+      if (matches.length >= MAX_DRAIN_MATCHES) break;
+    }
+    exhausted = cursor === null;
+
+    let text: string;
+    if (output === "files") {
+      const rows = [...new Set(matches.map((match) => match.relativePath))].slice(0, limit);
+      text = rows.length ? rows.join("\n") : "No matches found";
+    } else if (output === "count") {
+      const counts = new Map<string, number>();
+      for (const match of matches) counts.set(match.relativePath, (counts.get(match.relativePath) ?? 0) + 1);
+      const rows = [...counts.entries()].slice(0, limit).map(([file, count]) => `${file}:${count}`);
+      text = rows.length ? rows.join("\n") : "No matches found";
+    } else {
+      text = matches.length ? formatLines(matches.slice(0, limit)) : "No matches found";
+    }
+
+    const notes: string[] = [];
+    if (regexFallbackNote) notes.push(regexFallbackNote);
+    if (!exhausted) {
+      notes.push(output === "lines"
+        ? `stopped at ${limit} matches — refine the pattern or raise limit for more`
+        : output === "files"
+          ? `stopped at ${limit} files — refine the pattern or raise limit for more`
+          : "index drain stopped early — counts may be incomplete");
+    }
+    return {
+      content: [{ type: "text", text: notes.length ? `${text}\n\n[${notes.join("; ")}]` : text }],
+      details: { engine: "fff", exhausted, filesSearched },
+    };
+  };
+
+  const rgSearch = async (
+    input: SearchToolInput,
+    scopePath: string,
+    mode: "plain" | "regex",
+    output: "lines" | "files" | "count",
+    limit: number,
+    context: number,
+    reason: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>> => {
+    const result = await runRg({
+      pattern: input.pattern,
+      regex: mode === "regex",
+      path: scopePath,
+      glob: input.glob,
+      context,
+      ignoreCase: input.ignoreCase,
+      output,
+      limit,
+      signal,
+    });
+    const notes = [`engine: rg${reason ? ` (${reason})` : ""}`];
+    if (result.limitReached) notes.push(`${limit} ${output === "lines" ? "matches" : "rows"} limit reached — refine the pattern or raise limit`);
+    return {
+      content: [{ type: "text", text: `${result.text}\n\n[${notes.join("; ")}]` }],
+      details: { engine: "rg", truncated: result.limitReached },
+    };
+  };
+
+  const search: FffSearchHandle["search"] = async (input, workspaceRoot, signal) => {
+    const root = resolve(workspaceRoot);
+    const denied = unsafeBasePathReason(root);
+    if (denied) {
+      throw new Error(`search does not index ${denied}; start Pi from a specific project directory`);
+    }
+    const scopePath = resolveSearchScopePath(input.path, root);
+    const scopePrefix = scopePrefixOf(root, scopePath);
+    const mode = input.mode ?? "plain";
+    const output = input.output ?? "lines";
+    const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const context = Math.min(Math.max(input.context ?? 0, 0), 20);
+
+    const forcedInsensitive = input.ignoreCase === true && /[A-Z]/.test(input.pattern);
+    const globNeedsRg = input.glob?.startsWith("!") ?? false;
+    if (mode === "fuzzy" && (forcedInsensitive || globNeedsRg)) {
+      throw new Error(
+        "search mode=fuzzy requires the FFF index and does not support forced ignoreCase or negated globs",
+      );
+    }
+
+    let finder: FileFinderApi | undefined;
+    let rgReason: string | undefined;
+    if (mode === "fuzzy") {
+      finder = await ensureFinder(root);
+    } else if (forcedInsensitive) {
+      rgReason = "forced case-insensitive matching";
+    } else if (globNeedsRg) {
+      rgReason = "negated glob pattern";
+    } else {
+      const generation = lifecycleGeneration;
+      try {
+        finder = await ensureFinder(root);
+      } catch (error) {
+        // A mid-init session shutdown must abort the search, not spawn rg on a
+        // session that is already tearing down.
+        if (generation !== lifecycleGeneration) throw error;
+        rgReason = `index unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    if (!finder) {
+      return rgSearch(input, scopePath, mode === "regex" ? "regex" : "plain", output, limit, context, rgReason, signal);
+    }
+    return fffSearch(finder, input, scopePrefix, mode, output, limit, context, signal);
+  };
+
+  pi.registerTool({
+    name: "search",
+    label: "Search",
+    description:
+      "Search workspace file contents via a shared, prewarmed index — literal, regex, or fuzzy matching with lines/files/count output; ripgrep takes over automatically when the index cannot serve a query. Subsumes grep: literal text is the default, mode=\"regex\" covers patterns, and ignoreCase/context/glob/output mirror -i/-C/-g/-l/-c. Prefer this over running grep or rg through bash.",
+    promptSnippet: "Search workspace file contents (literal/regex/fuzzy) via the shared index.",
+    promptGuidelines: [
+      "output=\"lines\" (default) returns file:line match text with optional context lines; output=\"files\" lists candidate paths before reading them; output=\"count\" shows per-file match totals to gauge how widespread a pattern is.",
+      "mode=\"plain\" is literal substring matching for exact identifiers. mode=\"regex\" uses Rust regex syntax — look-around and backreferences are not supported; an invalid regex falls back to literal matching with a note. mode=\"fuzzy\" is approximate matching when the exact spelling is unknown.",
+      "Omit ignoreCase for smart case (insensitive only when the pattern is all-lowercase); set true to force insensitivity or false for always-sensitive.",
+      "path scopes to a directory or a single file inside the workspace; glob filters file names at any depth and supports '!' negation.",
+      "Truncated results end with a bracketed note; narrow with a more specific pattern, path, or glob before raising limit.",
+      "Typical calls: {pattern: \"handleRequest\", output: \"files\"} to locate; {pattern: \"class \\w+Service\", mode: \"regex\", glob: \"*.ts\"} for typed patterns; {pattern: \"TODO\", ignoreCase: true, context: 2} for annotated hits; {pattern: \"getUsr\", mode: \"fuzzy\"} when the spelling is unknown.",
+      "Use fffind for file-path search instead of content search.",
+    ],
+    parameters: SearchToolParameters,
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      if (signal?.aborted) {
+        const error = new Error("search aborted.");
+        error.name = "AbortError";
+        throw error;
+      }
+      return search(params, ctx.cwd, signal);
     },
     renderShell: "self",
     renderCall(args, theme, ctx) {
       if (ctx?.isPartial === false) return new Text("", 0, 0);
-      return toolCallLine(theme, "ffgrep", `"${String(args.pattern ?? "")}"`);
+      return toolCallLine(theme, "search", `"${String(args.pattern ?? "")}"`);
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
-      const lines = text.split("\n").filter(Boolean);
       return toolResultLine(theme, {
-        name: "ffgrep",
-        ok: text !== "No matches" && lines.length > 0,
+        name: "search",
+        ok: text !== "No matches found" && text.length > 0,
         arg: `"${String(ctx.args.pattern ?? "")}"`,
         summary: resultSummary(result),
         expanded: opts.expanded,
@@ -174,20 +450,43 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
 
   pi.registerTool({
     name: "fffind",
-    label: "FFF Find",
-    description: "Fast FFF-backed fuzzy file-path search in the current workspace or a selected subdirectory.",
-    promptSnippet: "Find workspace files by fuzzy path with FFF.",
-    parameters: FffFindParams,
-    async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      if (signal?.aborted) throw abortError();
-      const activeFinder = await ensureFinder(resolveSearchScopePath(params.path, ctx.cwd));
-      if (signal?.aborted) throw abortError();
-      const result = activeFinder.fileSearch(params.pattern, { pageSize: params.limit ?? 30 });
-      if (!result.ok) throw new Error(`FFF file search failed: ${result.error}`);
-      const text = result.value.items.length
-        ? result.value.items.map((item) => item.relativePath).join("\n")
-        : "No files found";
-      return { content: [{ type: "text", text }] } as AgentToolResult<unknown>;
+    label: "Find",
+    description:
+      "Fuzzy file path search over the workspace index. For content search use `search`.",
+    promptSnippet: "Fuzzy file path search via the workspace index.",
+    parameters: Type.Object({
+      pattern: Type.String({ minLength: 1, description: "Fuzzy file path fragment" }),
+      path: Type.Optional(Type.String({ description: "Directory under the workspace to scope to" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Max results (default: 50)" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      if (signal?.aborted) {
+        const error = new Error("fffind aborted.");
+        error.name = "AbortError";
+        throw error;
+      }
+      const root = resolve(ctx.cwd);
+      const scopePath = resolveSearchScopePath(params.path, root);
+      const scopePrefix = scopePrefixOf(root, scopePath);
+      const limit = Math.min(Math.max(params.limit ?? DEFAULT_LIMIT, 1), 200);
+      const finder = await ensureFinder(root);
+      const items: FileItem[] = [];
+      const pageSize = Math.min(Math.max(limit * 2, 50), 500);
+      for (let pageIndex = 0; items.length < limit && pageIndex < MAX_DRAIN_PAGES; pageIndex += 1) {
+        const result = finder.fileSearch(params.pattern, { pageIndex, pageSize });
+        if (!result.ok) {
+          throw new Error(`fffind failed: ${result.error}`);
+        }
+        for (const item of result.value.items) {
+          if (inScope(item.relativePath, scopePrefix)) items.push(item);
+        }
+        if (result.value.items.length === 0 || (pageIndex + 1) * pageSize >= result.value.totalMatched) break;
+      }
+      const rows = items.slice(0, limit).map((item) => item.relativePath);
+      return {
+        content: [{ type: "text", text: rows.length ? rows.join("\n") : "No files found" }],
+        details: { engine: "fff" },
+      };
     },
     renderShell: "self",
     renderCall(args, theme, ctx) {
@@ -207,16 +506,6 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
       });
     },
   });
-}
 
-function formatGrep(result: { items: Array<{ relativePath: string; lineNumber: number; lineContent: string }> }): string {
-  return result.items.length
-    ? result.items.map((item) => `${item.relativePath}:${item.lineNumber}: ${item.lineContent}`).join("\n")
-    : "No matches found";
-}
-
-function abortError(): Error {
-  const error = new Error("FFF search aborted.");
-  error.name = "AbortError";
-  return error;
+  return { search };
 }

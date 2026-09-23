@@ -106,7 +106,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 - **19 个常驻工具 + 5 个 Plan 动态工具**
   - 调度：`teammate` · `teammate-send/list/watch/wait`
   - 编排：`maestro` · `goal` · `todo` · `run-control` · `plan-*`
-  - 连接：`mcp` · `lsp` · `browser` · `smart_search` · `ffgrep`/`fffind`
+  - 连接：`mcp` · `lsp` · `browser` · `smart_search` · `search`/`fffind`
   - 其他：`bash_bg` · `ask-user-question` · `search_tool_bm25`
 - **63 个技能**（由 [Maestro Flow](https://github.com/catlog22/maestro-flow) 维护）— 涵盖工作流编排、知识管理、团队协作、UI 设计、学术写作、技能工具六大类。完整清单见 [Maestro Flow 技能目录](https://github.com/catlog22/maestro-flow/tree/main/skills)
 - **32 个 Agent 角色** — 7 内置（explorer、planner、analyst、research、general、verifier、workflow）+ 25 项目级（executor、reviewer、debugger、roadmapper…）
@@ -138,7 +138,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 
 - **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — 意图驱动工作流编排框架 by [@catlog22](https://github.com/catlog22)
 - **[Pi Coding Agent](https://github.com/earendil-works/pi)** — 终端编码智能体（宿主运行时）by [@earendil-works](https://github.com/earendil-works)
-- 驱动内置工具的上游库：[@modelcontextprotocol/sdk](https://modelcontextprotocol.io)（`mcp`）· [Puppeteer](https://github.com/puppeteer/puppeteer)（`browser`）· [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff)（`ffgrep`/`fffind`）· [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch)（`smart_search`）· [pi-web-access](https://github.com/nicobailon/pi-web-access)（原生网络搜索/提取/curator）
+- 驱动内置工具的上游库：[@modelcontextprotocol/sdk](https://modelcontextprotocol.io)（`mcp`）· [Puppeteer](https://github.com/puppeteer/puppeteer)（`browser`）· [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff)（`search`/`fffind`）· [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch)（`smart_search`）· [pi-web-access](https://github.com/nicobailon/pi-web-access)（原生网络搜索/提取/curator）
 
 ## 许可证
 

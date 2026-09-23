@@ -39,7 +39,7 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "Glob",
   "Ls",
   "Find",
-  "ffgrep",
+  "search",
   "fffind",
   "ask-user-question",
   "teammate",

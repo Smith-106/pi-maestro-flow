@@ -22,7 +22,7 @@
    - 4.8 [todo — 任务管理](#48-todo--任务管理)
    - 4.9 [run-control — 工作流 Run 控制](#49-run-control--工作流-run-控制)
    - 4.10 [ask-user-question — 结构化用户提问](#410-ask-user-question--结构化用户提问)
-   - 4.11 [ffgrep — FFF 内容搜索](#411-ffgrep--fff-内容搜索)
+   - 4.11 [search — 索引内容搜索](#411-search--索引内容搜索)
    - 4.12 [fffind — FFF 文件路径搜索](#412-fffind--fff-文件路径搜索)
 5. [编程式 API（v1）](#5-编程式-apiv1)
 6. [GUI/UCL 侧车 HTTP API](#6-guiucl-侧车-http-api)
@@ -39,7 +39,7 @@
 
 | 包 | 版本 | 注册的工具 | 角色 |
 |----|------|-----------|------|
-| `pi-maestro-flow` | 0.5.0 | `maestro`、`goal`、`todo`、`run-control`、`ask-user-question`、`ffgrep`、`fffind` | 扩展包：流程命令、目标、任务、Run 控制、提问、FFF 搜索 |
+| `pi-maestro-flow` | 0.5.0 | `maestro`、`goal`、`todo`、`run-control`、`ask-user-question`、`search`、`fffind` | 扩展包：流程命令、目标、任务、Run 控制、提问、索引搜索 |
 | `pi-maestro-teammate` | 0.4.6 | `teammate`、`teammate-send`、`teammate-list`、`teammate-watch`、`teammate-wait` | 核心派发引擎：子代理 DAG 调度、RPC 消息 |
 
 **工具总览（12 个对外工具）**：
@@ -56,7 +56,7 @@
 | `todo` | 任务管理（create/update/list/get/delete/clear/next） | flow |
 | `run-control` | Maestro CLI 透传壳（Session/Run 生命周期，读写分类） | flow |
 | `ask-user-question` | 通过键盘优先的 TUI 向导收集结构化用户答案 | flow |
-| `ffgrep` | FFF 后端快速字面内容搜索 | flow |
+| `search` | FFF 索引内容搜索（literal/regex/fuzzy，rg 兜底） | flow |
 | `fffind` | FFF 后端模糊文件路径搜索 | flow |
 
 > **对接方式选择**
@@ -414,27 +414,33 @@ askUserQuestion({ questions: [
 
 ---
 
-### 4.11 `ffgrep` — FFF 内容搜索
+### 4.11 `search` — 索引内容搜索
 
-基于 [FFF](https://github.com/ff-labs/fff-node) 原生索引的快速字面内容搜索。仅注册在根 Pi 会话，不影响 Pi 内置 grep/find。
+基于 [FFF](https://github.com/ff-labs/fff-node) 工作区原生索引的内容搜索，支持字面/正则/模糊三种模式与 lines/files/count 三种输出。索引只在 workspace root 建立一份、会话启动时预热；teammate 子会话通过 child-tool broker 共享同一索引。索引不可用时自动降级 ripgrep（`details.engine` 标注 `fff`/`rg`）。
 
-**参数**（`FffGrepParams`）：
+**参数**（`SearchToolParameters`）：
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `pattern` | string | ✅ | 字面搜索文本（minLength 1） |
-| `context` | integer | | 上下文行数（0–20，默认 0） |
-| `limit` | integer | | 最大结果数（1–100，默认 20） |
+| `pattern` | string | ✅ | 搜索文本；`mode` 决定按字面/正则/模糊解释（minLength 1） |
+| `path` | string | | 限定到 workspace 内目录或文件（默认 workspace root；作为索引结果前缀过滤，不另建索引） |
+| `mode` | `"plain"\|"regex"\|"fuzzy"` | | 匹配模式（默认 `plain`） |
+| `glob` | string | | 限定文件 glob，如 `*.ts`、`src/**/*.spec.ts` |
+| `context` | integer | | 上下文行数（0–20，默认 0，仅 `output="lines"`） |
+| `ignoreCase` | boolean | | 省略=smartCase（全小写不区分大小写）；false=强制敏感；true=强制不敏感（走 rg） |
+| `output` | `"lines"\|"files"\|"count"` | | 输出形态（默认 `lines`） |
+| `limit` | integer | | 最大匹配数/文件行数（1–1000，默认 50） |
 
-**返回**：`AgentToolResult<unknown>`，`content[0].text` 为 `path:line: content` 格式的匹配行；无匹配时为 `No matches found`。
+**返回**：`AgentToolResult<unknown>`，`content[0].text` 为 `path:line: content`（lines）、每行一路径（files）或 `path:N`（count）；无匹配为 `No matches found`。
 
 **示例**：
 
 ```js
-ffgrep({ pattern: "CompactionArbiter", context: 2, limit: 10 })
+search({ pattern: "CompactionArbiter", context: 2, limit: 10 })
+search({ pattern: "TODO", output: "count", glob: "*.ts" })
 ```
 
-**注意**：首次调用会触发 FFF 索引初始化（含初始扫描，超时 15s）；`cwd` 变化时自动重建索引。搜索使用 `smartCase`（全小写时不区分大小写）并启用 `classifyDefinitions`。
+**注意**：`mode="fuzzy"` 依赖 FFF 索引且无 rg 等价物，索引不可用时返回明确错误；强制 `ignoreCase` 的含大写 pattern、以及 `!` 取反 glob 直接路由到 ripgrep。
 
 ---
 
@@ -457,7 +463,7 @@ ffgrep({ pattern: "CompactionArbiter", context: 2, limit: 10 })
 fffind({ pattern: "compaction arbiter", limit: 5 })
 ```
 
-**注意**：与 `ffgrep` 共享同一个 `FileFinder` 实例和索引生命周期。两个工具均在权限白名单中（`ALWAYS_ALLOWED_TOOLS`），所有审批模式下自动放行。
+**注意**：与 `search` 共享同一个 workspace-root `FileFinder` 实例和索引生命周期。两个工具均在权限白名单中（`ALWAYS_ALLOWED_TOOLS`），所有审批模式下自动放行。
 
 ---
 
@@ -884,7 +890,7 @@ console.log("风险清单:", risks);
 | `todo` | `action`（+`subject`/`id` 视 action） | `status`/`context`/`skills`/`filter`/`summary`/`goalId` | `{ tasks[], action, error? }` |
 | `run-control` | `argv`（Maestro CLI 参数） | — | CLI stdout + `{ argv, classification, command, snapshot, ownership? }` |
 | `ask-user-question` | `questions` | `options`/`multiSelect`/`header` | 结构化答案文本 |
-| `ffgrep` | `pattern` | `context`/`limit` | `path:line: content` 文本 |
+| `search` | `pattern` | `mode`/`output`/`glob`/`context`/`limit` | `path:line: content` 文本 |
 | `fffind` | `pattern` | `limit` | 相对路径列表文本 |
 
 ---

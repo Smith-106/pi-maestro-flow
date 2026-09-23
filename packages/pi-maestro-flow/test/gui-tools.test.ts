@@ -59,7 +59,7 @@ test("gui-registry: registers, looks up, lists, and classifies tools", () => {
     // Only the locked UCL surface may enter the cross-extension registry.
     registerGuiTool(fakeTool("lsp"), "pi-maestro-flow");
     registerGuiTool(fakeTool("browser"), "pi-maestro-flow");
-    registerGuiTool(fakeTool("ffgrep"), "pi-maestro-flow");
+    registerGuiTool(fakeTool("search"), "pi-maestro-flow");
     registerGuiTool(fakeTool("plan-status"), "pi-maestro-flow");
     registerGuiTool(fakeTool("anything"), "mcp");
     registerTeammateGuiTool(fakeTool("structured_output"), "pi-maestro-teammate");
@@ -67,7 +67,7 @@ test("gui-registry: registers, looks up, lists, and classifies tools", () => {
 
     assert.equal(getGuiTool("lsp"), undefined);
     assert.equal(getGuiTool("browser"), undefined);
-    assert.equal(getGuiTool("ffgrep"), undefined);
+    assert.equal(getGuiTool("search"), undefined);
     assert.equal(getGuiTool("structured_output"), undefined);
     assert.ok(getGuiTool("plan-status"));
     assert.ok(getGuiTool("anything"));

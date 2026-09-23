@@ -22,7 +22,7 @@
    - [lsp — Language Server Integration](#31-lsp--language-server-integration)
    - [browser — Browser Control](#32-browser--browser-control)
    - [smart_search — Web Search & Research](#33-smart_search--web-search--research)
-   - [ffgrep / fffind — Fast Search](#34-ffgrep--fffind--fast-search)
+   - [search / fffind — Fast Search](#34-search--fffind--fast-search)
    - [search_tool_bm25 — Tool Discovery](#35-search_tool_bm25--tool-discovery)
 4. [MCP Integration](#4-mcp-integration)
 5. [Permission System](#5-permission-system)
@@ -87,7 +87,7 @@ After installation, the plugin registers these tools with Pi:
 | pi-maestro-flow | `lsp` | Language Server Protocol integration |
 | pi-maestro-flow | `browser` | Chromium browser control |
 | pi-maestro-flow | `smart_search` | Web search / deep research / URL fetch |
-| pi-maestro-flow | `ffgrep` | FFF fast literal content search |
+| pi-maestro-flow | `search` | FFF indexed content search (literal/regex/fuzzy, rg fallback) |
 | pi-maestro-flow | `fffind` | FFF fast fuzzy file search |
 | pi-maestro-flow | `search_tool_bm25` | BM25 tool discovery |
 | pi-maestro-flow | `model-availability` | Secret-free model registration and route diagnostics |
@@ -469,17 +469,27 @@ Configure via `Alt+S` or `/smart-search-config`.
 
 ---
 
-### 3.4 ffgrep / fffind — Fast Search
+### 3.4 search / fffind — Fast Search
 
-Native index search powered by [FFF](https://github.com/fff-labs/fff), registered to root Pi session only:
+Workspace-native index search powered by [FFF](https://github.com/fff-labs/fff). The index warms up at session start and stays in memory; teammate child sessions share the same index through a broker:
 
 ```javascript
-// Literal content search
-ffgrep({ pattern: "validateToken", context: 3, limit: 20 })
+// Literal content search (default mode="plain")
+search({ pattern: "validateToken", context: 3, limit: 20 })
+
+// Regex / fuzzy content search
+search({ pattern: "fn\\s+validate\\w*", mode: "regex" })
+search({ pattern: "valdiate token", mode: "fuzzy" })
+
+// Output shapes: files = paths only; count = per-file hit counts
+search({ pattern: "TODO", output: "files" })
+search({ pattern: "deprecated", output: "count", glob: "*.ts" })
 
 // Fuzzy file path search
 fffind({ pattern: "auth middleware", limit: 10 })
 ```
+
+When the index is unavailable, `search` falls back to ripgrep (results are annotated `[engine: rg]`); `mode="fuzzy"` has no fallback equivalent and reports an explicit error instead.
 
 ---
 
@@ -623,7 +633,7 @@ Rules can be configured at session level (temporary) or local settings file (per
 
 These tools are auto-allowed in all modes (read-only or side-effect free):
 
-`Read`, `Grep`, `Glob`, `Ls`, `Find`, `ffgrep`, `fffind`, `ask-user-question`, `teammate`, `teammate-send`, `teammate-list`, `teammate-watch`, `goal`, `todo`, `plan-*`, `search_tool_bm25`
+`Read`, `Grep`, `Glob`, `Ls`, `Find`, `search`, `fffind`, `ask-user-question`, `teammate`, `teammate-send`, `teammate-list`, `teammate-watch`, `goal`, `todo`, `plan-*`, `search_tool_bm25`
 
 ### Teammate Child Permission Relay
 

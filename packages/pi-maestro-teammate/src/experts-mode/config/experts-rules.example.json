@@ -14,7 +14,7 @@
       "thinking": "low",
       "skills": [],
       "capabilities": ["explore", "search"],
-      "tools": ["read", "ffgrep", "fffind", "bash"]
+      "tools": ["read", "search", "fffind", "bash"]
     },
     "planner": {
       "agent": "planner",

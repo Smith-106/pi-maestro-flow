@@ -271,8 +271,8 @@ import { createLspTool } from "../tools/lsp-tool.ts";
 import { lspManager } from "../tools/lsp/manager.ts";
 import { registerSmartSearchTool } from "../tools/smart-search.ts";
 import { createSourceCheckTool } from "../tools/web-access/source-check-tool.ts";
-import { registerFff } from "../tools/fff.ts";
-import { registerSearchScopeGuard } from "../tools/search-scope-guard.ts";
+import { registerFff, SearchToolParameters, type SearchToolInput } from "../tools/fff.ts";
+import { registerSearchScopeGuard, resolveSearchScopePath, searchScopeBlockReason } from "../tools/search-scope-guard.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerFlowSchedule } from "../flow-schedule/register.ts";
@@ -387,6 +387,7 @@ export const MAESTRO_CHILD_TOOL_NAMES = [
   "browser",
   "computer_use",
   "todo",
+  "search",
 ] as const;
 
 function newContextToolsEnabled(cwd: string): boolean {
@@ -2238,7 +2239,7 @@ When NOT to use:
 
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
-  registerFff(pi);
+  const fffSearch = registerFff(pi);
   registerGatewayBoardTool(pi);
   registerGatewayFabricTools(pi);
   registerBashBg(pi);
@@ -4578,6 +4579,28 @@ When NOT to use:
         }
         return childComputerUseBroker.execute(request, ctx);
       }, { owner: `${teammateAuthorityOwner}:computer_use` }));
+      nextDisposers.push(registerTeammateChildToolBroker("search", async (request) => {
+        if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx) {
+          return {
+            content: [{ type: "text", text: "Root search authority belongs to a newer session generation." }],
+            isError: true,
+            details: {},
+          };
+        }
+        const blocked = await searchScopeBlockReason("search", request.input, ctx.cwd);
+        if (blocked) {
+          return { content: [{ type: "text", text: blocked }], isError: true, details: {} };
+        }
+        try {
+          return await fffSearch.search(request.input as unknown as SearchToolInput, ctx.cwd, request.signal);
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+            isError: true,
+            details: {},
+          };
+        }
+      }, { owner: `${teammateAuthorityOwner}:search` }));
       const sessionPermissionBroker: TeammatePermissionBroker = async (call, requestCtx) => {
         if (generation !== teammateRegistrationGeneration) {
           return { action: "deny", reason: "Root permission authority belongs to a newer session generation." };
@@ -4974,6 +4997,21 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
     },
   };
   pi.registerTool(todoProxyTool);
+  pi.registerTool({
+    name: "search",
+    label: "Search",
+    description:
+      "Search workspace file contents via the root session's shared index — literal, regex, or fuzzy matching with lines/files/count output. Falls back to ripgrep when the index cannot serve the query. Prefer this over the built-in grep for workspace content search.",
+    promptSnippet: "Search workspace file contents (literal/regex/fuzzy) via the shared root index.",
+    parameters: SearchToolParameters,
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      // Resolve path against the child's cwd before forwarding: tasks[].cwd may
+      // differ from the root workspace, and the broker re-checks the absolute
+      // path against the root workspace boundary.
+      const forwarded = { ...params, path: resolveSearchScopePath(params.path, ctx.cwd) };
+      return proxyTeammateChildTool("search", forwarded as unknown as Record<string, unknown>, signal);
+    },
+  });
   const permissionController = createPermissionController();
   pi.on("tool_call", (event, ctx) => {
     // structured_output is a schema-validated, child-local termination tool.

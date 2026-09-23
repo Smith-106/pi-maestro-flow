@@ -122,7 +122,7 @@ After the knowledge gate, first apply loaded knowledge and `knowledge_context`, 
 | Known project symbol | `maestro search "<symbol>" --code` |
 | Multi-file code discovery | `teammate`, agent `explorer` |
 | Mixed teammate/background status or waits | `observe` with typed `{ kind, id }` targets |
-| Exact bounded text search | `rg`; workspace literal content / fuzzy paths use `ffgrep` / `fffind` |
+| Exact bounded text search | `rg`; workspace content (literal/regex/fuzzy) and fuzzy paths use `search` / `fffind` |
 | Delegated analysis/development/review/testing | `teammate` |
 | External model absent from teammate catalog | `model-availability`, then delegate fallback |
 | Cross-turn autonomous work | `goal` |
@@ -204,7 +204,7 @@ Use `bash_bg run` when duration is uncertain: it returns inline if fast and back
 
 The shell is **Git Bash (MSYS2)** on Windows; use POSIX/bash syntax exclusively.
 
-- **Use the right tool**: Modify code with the `edit` tool, inspect files with the `read` tool, search paths with `fffind`/`ffgrep` as tool calls. Reserve bash for commands that genuinely need a shell (git, npm, node, rg, build tools).
+- **Use the right tool**: Modify code with the `edit` tool, inspect files with the `read` tool, search paths with `fffind`/`search` as tool calls. Reserve bash for commands that genuinely need a shell (git, npm, node, rg, build tools).
 - **Use forward slashes in paths** (`"C:/Users/…"`), or single-quote Windows paths (`'C:\Users\…'`).
 - **Confirm paths before use**: guard compound commands with `test -d`/`test -f`; pass only verified-existing paths to `rg`.
 - **Keep commands short** (< ~2 000 chars). For larger payloads, write a file with the `write` tool first, then execute it.

@@ -26,7 +26,7 @@ icon: "🏗️"
 - **19 个常驻工具 + 5 个 Plan 动态工具**
   - 调度：`teammate` · `teammate-send/list/watch/wait`
   - 编排：`maestro` · `goal` · `todo` · `run-control` · `plan-*`
-  - 连接：`mcp` · `lsp` · `browser` · `smart_search` · `ffgrep`/`fffind`
+  - 连接：`mcp` · `lsp` · `browser` · `smart_search` · `search`/`fffind`
   - 其他：`bash_bg` · `ask-user-question` · `search_tool_bm25`
 
 Plan 模式下额外激活 `plan-enter` / `plan-update` / `plan-review` / `plan-confirm` / `plan-exit` / `plan-status` 等只读规划工具。

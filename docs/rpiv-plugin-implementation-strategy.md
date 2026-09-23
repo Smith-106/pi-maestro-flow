@@ -424,7 +424,7 @@ interface WorkflowHostContext {
 ---
 name: codebase-analyzer
 description: "分析代码库实现细节..."
-tools: read, grep, find, ls       # 工具白名单
+tools: read, search, find, ls     # 工具白名单
 isolated: true                     # 隔离执行
 extensions: [rpiv-web-tools]       # 可选扩展
 ---
@@ -697,7 +697,7 @@ stages: {
 ---
 name: my-analyzer
 description: "简短描述（LLM 用于选择调度）"
-tools: read, grep, find, ls    # 最小权限工具集
+tools: read, search, find, ls  # 最小权限工具集
 isolated: true                  # 与主会话隔离
 ---
 

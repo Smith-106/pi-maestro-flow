@@ -2,7 +2,7 @@
  * Explore action — parallel code search via teammate sub-agents.
  *
  * For each prompt, spawns a teammate agent (explorer profile) that
- * searches the codebase using read/grep/find/ls tools.
+ * searches the codebase using read/search/find/ls tools.
  * Results are collected and merged into a unified exploration output.
  */
 
