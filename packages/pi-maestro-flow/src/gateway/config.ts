@@ -199,7 +199,8 @@ export interface GatewayOpenAiSecureTunnelProfileConfig extends GatewayTunnelPro
   provider: "openai";
   mode: "secure";
   lifecycle: "persistent";
-  publicUrl: string;
+  /** Optional operator-known origin. The managed OpenAI endpoint is owned by the control plane. */
+  publicUrl?: string;
   tunnelIdEnv: string;
   runtimeKeyEnv: string;
   credentialTtlMs: number;
@@ -292,7 +293,7 @@ export function gatewayTunnelProfileInput(
     experimental: true,
     localPort: port(profile.localPort),
     mcpPath: http.path,
-    publicUrl: profile.publicUrl,
+    ...(profile.publicUrl ? { publicUrl: profile.publicUrl } : {}),
     tunnelIdEnv: profile.tunnelIdEnv,
     runtimeKeyEnv: profile.runtimeKeyEnv,
     credentialTtlMs: profile.credentialTtlMs,
@@ -902,14 +903,13 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
       if (lifecycle !== "persistent") throw new GatewayConfigValidationError(`${path}.lifecycle must be persistent for OpenAI Secure Tunnel`);
       if (hasNamedFields) throw new GatewayConfigValidationError(`${path} OpenAI Secure Tunnel cannot define Cloudflare Named fields`);
       if (hasSshFields) throw new GatewayConfigValidationError(`${path} OpenAI Secure Tunnel cannot define SSH fields`);
-      if (!publicUrl) throw new GatewayConfigValidationError(`${path}.publicUrl is required`);
       const mcpAccess = normalizeMcp();
       return {
         ...common,
         provider,
         mode,
         lifecycle,
-        publicUrl,
+        ...(publicUrl ? { publicUrl } : {}),
         tunnelIdEnv: environmentName(item.tunnelIdEnv ?? item.tunnel_id_env, `${path}.tunnelIdEnv`, openai.tunnelIdEnv),
         runtimeKeyEnv: environmentName(item.runtimeKeyEnv ?? item.runtime_key_env, `${path}.runtimeKeyEnv`, openai.runtimeKeyEnv),
         credentialTtlMs: integer(item.credentialTtlMs ?? item.credential_ttl_ms, `${path}.credentialTtlMs`, 60_000, 60 * 60_000, openai.credentialTtlMs),
@@ -969,8 +969,12 @@ export function normalizeGatewayConfig(value: unknown): GatewayConfig {
   if (activePersistent.length > 1) throw new GatewayConfigValidationError("Only one persistent tunnel profile may be enabled");
   if (activePersistent.length === 1) {
     const profile = activePersistent[0]!;
-    if (auth.mode !== "oauth" && auth.mode !== "dual") throw new GatewayConfigValidationError("An enabled persistent tunnel profile requires auth.mode oauth or dual");
-    if (auth.oauth?.serverUrl !== profile.publicUrl) throw new GatewayConfigValidationError("auth.oauth.serverUrl must match the enabled persistent tunnel profile publicUrl");
+    if (profile.publicUrl !== undefined) {
+      if (auth.mode !== "oauth" && auth.mode !== "dual") throw new GatewayConfigValidationError("An enabled fixed-origin tunnel profile requires auth.mode oauth or dual");
+      if (auth.oauth?.serverUrl !== profile.publicUrl) throw new GatewayConfigValidationError("auth.oauth.serverUrl must match the enabled persistent tunnel profile publicUrl");
+    } else if (auth.mode === "open") {
+      throw new GatewayConfigValidationError("An enabled managed tunnel profile requires authenticated Gateway HTTP");
+    }
   }
   const tunnels: GatewayTunnelsConfig = { openai, profiles };
 

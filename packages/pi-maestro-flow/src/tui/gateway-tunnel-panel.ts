@@ -59,7 +59,7 @@ export function gatewayTunnelReadiness(
   const provider = providerReady === undefined ? "unknown" : providerReady ? "ready" : "not-ready";
   const mcp = !profile.enabled || !profile.mcpAccess?.enabled
     ? "not-ready"
-    : descriptor.mcpUrl || descriptor.ephemeral
+    : descriptor.mcpUrl || descriptor.ephemeral || descriptor.managed
       ? descriptor.readiness ? "ready" : "not-ready"
       : "unknown";
   const remoteAuthorizationE2E = provider === "ready" && mcp === "ready" && profile.mcpAccess?.auth !== undefined ? "ready" : mcp === "not-ready" || provider === "not-ready" ? "not-ready" : "unknown";
@@ -233,7 +233,7 @@ export class GatewayTunnelPanel implements Component, Focusable {
         if (enabled && profile.lifecycle === "persistent") return { ...profile, enabled: false };
         return profile;
       });
-      const authPatch = enabled ? {
+      const authPatch = enabled && targetPersisted.publicUrl ? {
         server: { disable_localhost_protection: true, trust_proxy_headers: true } as never,
         auth: {
           mode: original.auth.mode === "open" ? "oauth" : original.auth.mode === "bearer" ? "dual" : original.auth.mode,
@@ -275,9 +275,13 @@ export class GatewayTunnelPanel implements Component, Focusable {
       return [truncateToWidth(`Gateway Tunnel · ${this.profiles.length} profiles · ${this.escLabel}`, safeWidth, "…")];
     }
     const inner = safeWidth - 2;
-    const rows = [fitLine(`Pi Maestro Gateway · ${this.fg("36", "Tunnel")}（专用人工操作面）`, inner), rule(inner)];
+    const rows = [
+      fitLine(`Pi Maestro Gateway · ${this.fg("36", "Tunnel")}（专用人工操作面）`, inner),
+      fitLine(this.fg("2", "Direct Gateway · 无中转连接始终可用；以下 tunnel 是可选入口"), inner),
+      rule(inner),
+    ];
     if (this.profiles.length === 0) {
-      rows.push(fitLine("  ○ 尚无 tunnel profile；请先在 /gateway config 建立 profile", inner));
+      rows.push(fitLine("  ○ 尚无可选 tunnel profile；当前仍可直接连接 Gateway", inner));
       rows.push(fitLine(this.fg("2", "  默认 enabled: false · Enter 可添加 JSON metadata"), inner));
     }
     for (const [index, profile] of this.profiles.entries()) {
@@ -285,8 +289,13 @@ export class GatewayTunnelPanel implements Component, Focusable {
       const readiness = gatewayTunnelReadiness(profile, descriptor, this.providerReady(profile.id));
       const marker = index === this.selected ? this.fg("36", "▶") : " ";
       const enabled = profile.enabled ? this.fg("32", "enabled") : this.fg("2", "disabled");
-      const endpoint = descriptor.ephemeral ? "MCP URL: ephemeral（运行后不固定）" : `MCP URL: ${descriptor.mcpUrl ?? "未配置"}`;
-      rows.push(fitLine(`${marker} ${profile.id} · ${profile.provider}/${profile.mode} · ${profile.lifecycle === "persistent" ? "fixed" : "ephemeral"} · ${enabled}`, inner));
+      const endpoint = descriptor.ephemeral
+        ? "MCP URL: ephemeral（运行后不固定）"
+        : descriptor.managed
+          ? "Connection: OpenAI managed endpoint（control plane 管理）"
+          : `MCP URL: ${descriptor.mcpUrl ?? "未配置"}`;
+      const connectionKind = descriptor.managed ? "managed" : descriptor.ephemeral ? "ephemeral" : "fixed";
+      rows.push(fitLine(`${marker} ${profile.id} · ${profile.provider}/${profile.mode} · ${connectionKind} · ${enabled}`, inner));
       rows.push(fitLine(`  ${endpoint} · auth: ${descriptor.authKind}`, inner));
       rows.push(fitLine(`  OpenAI experimental: ${profile.provider === "openai" ? "yes" : "no"} · ${this.statusSegment("provider", readiness.provider)} · ${this.statusSegment("MCP", readiness.mcp)} · ${this.statusSegment("remote authorization E2E", readiness.remoteAuthorizationE2E)}`, inner));
       if (index === this.selected && profile.mcpAccess) {
@@ -303,10 +312,10 @@ export class GatewayTunnelPanel implements Component, Focusable {
     if (matchesKey(data, Key.enter) || data === "\r") { void this.editOrAddFromPrompt(); return; }
     if (matchesKey(data, Key.up) || matchesKey(data, "k")) this.selected = Math.max(0, this.selected - 1);
     else if (matchesKey(data, Key.down) || matchesKey(data, "j")) this.selected = Math.min(Math.max(0, this.profiles.length - 1), this.selected + 1);
-    else if (data === "d") void this.doctorNow().catch((error) => { this.setStatus(`doctor 失败: ${error instanceof Error ? error.message : String(error)}`); this.requestRender(); });
-    else if (data === "e") void this.switchSelected(true);
-    else if (data === "x") void this.switchSelected(false);
-    else if (data === "s") void this.save().catch((error) => { this.setStatus(`保存失败: ${error instanceof Error ? error.message : String(error)}`); this.requestRender(); });
+    else if (matchesKey(data, "d")) void this.doctorNow().catch((error) => { this.setStatus(`doctor 失败: ${error instanceof Error ? error.message : String(error)}`); this.requestRender(); });
+    else if (matchesKey(data, "e")) void this.switchSelected(true);
+    else if (matchesKey(data, "x")) void this.switchSelected(false);
+    else if (matchesKey(data, "s")) void this.save().catch((error) => { this.setStatus(`保存失败: ${error instanceof Error ? error.message : String(error)}`); this.requestRender(); });
     this.requestRender();
   }
 

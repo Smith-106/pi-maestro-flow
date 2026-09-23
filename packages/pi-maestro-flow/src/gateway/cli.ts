@@ -521,7 +521,7 @@ export async function main(argv = process.argv.slice(2), io: GatewayCliIo = {}):
           const profiles = config.tunnels.profiles.map((candidate) => candidate.id === profile.id ? { ...candidate, enabled } : candidate);
           await writeGatewayConfigPatch(flags.configPath ?? gatewayConfigPath(), {
             tunnels: { profiles } as never,
-            ...(enabled ? {
+            ...(enabled && profile.publicUrl ? {
               server: { disable_localhost_protection: true, trust_proxy_headers: true } as never,
               auth: {
                 mode: config.auth.mode === "open" ? "oauth" : config.auth.mode === "bearer" ? "dual" : config.auth.mode,

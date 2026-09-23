@@ -68,6 +68,39 @@ test("persistent switch synchronizes OAuth URL and restarts online daemon", asyn
   assert.deepEqual(loadGatewayConfigSync(configPath).tunnels.profiles.map((profile) => [profile.id, profile.enabled]), [["old", false], ["new", true]]);
 });
 
+test("managed OpenAI profile enables without inventing a public origin", async () => {
+  const configPath = join(mkdtempSync(join(tmpdir(), "gateway-panel-")), "config.yaml");
+  const managed: GatewayTunnelProfileConfig = {
+    id: "openai-managed", provider: "openai", mode: "secure", lifecycle: "persistent", enabled: false,
+    tunnelIdEnv: "CONTROL_PLANE_TUNNEL_ID", runtimeKeyEnv: "CONTROL_PLANE_API_KEY", credentialTtlMs: 300_000, autoInstall: true,
+    mcpAccess: { enabled: true, actions: ["gateway.host.status"], auth: { kind: "managed-forward", provider: "openai" } },
+  };
+  await writeGatewayConfigPatch(configPath, { auth: { mode: "bearer", token: "secret" }, tunnels: { profiles: [managed] } });
+  const calls: string[] = [];
+  const client = {
+    status: async () => ({ online: false }),
+    tunnelProfileStart: async (id: string) => { calls.push(`start:${id}`); },
+  } as unknown as GatewayControlClient;
+  const managedDoctor: GatewayTunnelDoctorReport = {
+    ok: true, bounded: true, sideEffects: false,
+    profiles: [{ profile: managed.id, provider: "openai", mode: "secure", lifecycle: "persistent", enabled: true, phase: "ready", readiness: true, stateOnly: true }],
+  };
+  const panel = new GatewayTunnelPanel({ configPath, initialProfiles: [managed], initialDoctor: managedDoctor, requestRender() {}, close() {}, createControlClient: () => client });
+  assert.match(panel.render(200).join("\n"), /Direct Gateway/u);
+  assert.match(panel.render(200).join("\n"), /OpenAI managed endpoint/u);
+
+  await panel.switchSelected(true);
+
+  const saved = loadGatewayConfigSync(configPath);
+  assert.deepEqual(calls, ["start:openai-managed"]);
+  assert.equal(saved.auth.mode, "bearer");
+  assert.equal(saved.auth.oauth?.serverUrl, undefined);
+  assert.equal(saved.server.disableLocalhostProtection, false);
+  assert.equal(saved.server.trustProxyHeaders, false);
+  assert.equal(saved.tunnels.profiles[0]?.enabled, true);
+  assert.match(panel.render(200).join("\n"), /provider: ready · MCP: ready · remote authorization E2E: ready/u);
+});
+
 test("online save rejects policy changes before writing stale daemon state", async () => {
   const configPath = join(mkdtempSync(join(tmpdir(), "gateway-panel-")), "config.yaml");
   const original: GatewayTunnelProfileConfig = { id: "profile", provider: "cloudflare", mode: "named", lifecycle: "persistent", enabled: false, publicUrl: "https://example.test", tunnelId: "p", tokenFile: "/tmp/p" };
@@ -103,6 +136,39 @@ test("Quick e/x are transient and x stops despite disabled desired state", async
   await panel.switchSelected(false);
   assert.deepEqual(calls, ["start:quick", "stop:quick"]);
   assert.equal(panel.getProfiles()[0]?.enabled, false);
+});
+
+test("Kitty CSI-u command keys operate the tunnel panel", async () => {
+  const configPath = join(mkdtempSync(join(tmpdir(), "gateway-panel-")), "config.yaml");
+  const quick: GatewayTunnelProfileConfig = { id: "quick", provider: "cloudflare", mode: "quick", lifecycle: "ephemeral", enabled: false };
+  const calls: string[] = [];
+  const client = {
+    status: async () => { calls.push("status"); return { online: false }; },
+    tunnelDoctor: async () => { calls.push("doctor"); return doctor; },
+    tunnelProfileStart: async (id: string) => { calls.push(`start:${id}`); },
+    tunnelProfileStop: async (id: string) => { calls.push(`stop:${id}`); },
+  } as unknown as GatewayControlClient;
+  let saveRenderCount = 0;
+  let resolveSaved: (() => void) | undefined;
+  const panel = new GatewayTunnelPanel({
+    configPath,
+    requestRender() { if (resolveSaved && ++saveRenderCount === 2) resolveSaved(); },
+    close() {},
+    initialProfiles: [quick],
+    createControlClient: () => client,
+  });
+
+  for (const key of ["d", "e", "x"] as const) {
+    panel.handleInput(`\x1b[${key.codePointAt(0)}u`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const saved = new Promise<void>((resolve) => { resolveSaved = resolve; });
+  saveRenderCount = 0;
+  panel.handleInput("\x1b[115u");
+  await saved;
+
+  assert.deepEqual(calls, ["doctor", "start:quick", "stop:quick", "status"]);
+  assert.deepEqual(loadGatewayConfigSync(configPath).tunnels.profiles.map((item) => item.id), ["quick"]);
 });
 
 test("structured editor canonicalizes snake aliases and rejects conflicts", async () => {

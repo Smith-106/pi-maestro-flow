@@ -86,6 +86,19 @@ test("Gateway config normalizes legacy snake-case sections and rejects invalid k
     id: "openai-prod", provider: "openai", mode: "secure", lifecycle: "persistent", enabled: true,
     publicUrl: "https://openai.example.com", tunnelIdEnv: "CONTROL_PLANE_TUNNEL_ID", runtimeKeyEnv: "CONTROL_PLANE_API_KEY", credentialTtlMs: 300_000, autoInstall: true,
   });
+  const managedOpenAiProfile = normalizeGatewayConfig({
+    auth: { mode: "bearer", token: "secret" },
+    tunnels: { profiles: [{ id: "openai-managed", provider: "openai", mode: "secure", enabled: true, auto_install: true }] },
+  }).tunnels.profiles[0]!;
+  assert.deepEqual(managedOpenAiProfile, {
+    id: "openai-managed", provider: "openai", mode: "secure", lifecycle: "persistent", enabled: true,
+    tunnelIdEnv: "CONTROL_PLANE_TUNNEL_ID", runtimeKeyEnv: "CONTROL_PLANE_API_KEY", credentialTtlMs: 300_000, autoInstall: true,
+  });
+  assert.deepEqual(gatewayTunnelProfileInput(managedOpenAiProfile, { port: 9090, path: "/mcp" }), {
+    mode: "secure", experimental: true, localPort: 9090, mcpPath: "/mcp",
+    tunnelIdEnv: "CONTROL_PLANE_TUNNEL_ID", runtimeKeyEnv: "CONTROL_PLANE_API_KEY", credentialTtlMs: 300_000, autoInstall: true,
+  });
+  assert.throws(() => normalizeGatewayConfig({ tunnels: { profiles: [{ id: "openai-open", provider: "openai", mode: "secure", enabled: true }] } }), /requires authenticated Gateway HTTP/);
   assert.throws(() => normalizeGatewayConfig({ tunnels: { profiles: [{ id: "bad-quick", provider: "cloudflare", mode: "quick", auto_install: true }] } }), /persistent-provider fields/);
   assert.throws(() => normalizeGatewayConfig({ tunnels: { profiles: [{ id: "bad", provider: "cloudflare", mode: "named", public_url: "https://mcp.example.com", tunnel_id: "prod", token: "literal-secret" }] } }), /not a recognized field/);
   assert.throws(() => normalizeGatewayConfig({ tunnels: { profiles: [{ id: "bad", provider: "cloudflare", mode: "named", public_url: "https://mcp.example.com", tunnel_id: "prod" }] } }), /exactly one/);

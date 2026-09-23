@@ -109,6 +109,24 @@ test("connection projection is an allowlist and never exposes runtime secrets", 
   for (const forbidden of ["opaqueId", "tunnelId", "runtimeKey", "bearer", "authorization", "argv", "env", "provider detail"]) assert.equal(serialized.includes(forbidden), false);
 });
 
+test("managed OpenAI connection projection does not invent or leak a public URL", () => {
+  const profile = normalizeGatewayConfig({
+    auth: { mode: "bearer", token: "secret" },
+    tunnels: { profiles: [{
+      id: "openai-managed", provider: "openai", mode: "secure", enabled: true,
+      mcpAccess: { enabled: true, actions: ["gateway.host.status"], auth: { kind: "managed-forward", provider: "openai" } },
+    }] },
+  }).tunnels.profiles[0]!;
+  const descriptor = projectGatewayTunnelMcpConnectionDescriptor(profile, {
+    state: { generation: 8, observed: { phase: "ready", endpoint: "https://secret:bearer@managed.example.com/mcp" } },
+  });
+  assert.deepEqual(descriptor, {
+    profile: "openai-managed", provider: "openai", mode: "secure", managed: true,
+    authKind: "managed-forward", enabled: true, phase: "ready", generation: 8, readiness: true,
+  });
+  assert.equal(JSON.stringify(descriptor).includes("managed.example.com"), false);
+});
+
 test("custom transport paths are used by connection descriptors", () => {
   const profile = normalizeGatewayConfig({
     transport: { http: { path: "/api/mcp" } },

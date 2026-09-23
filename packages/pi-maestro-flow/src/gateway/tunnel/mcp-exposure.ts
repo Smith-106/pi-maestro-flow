@@ -7,8 +7,9 @@ export interface GatewayTunnelMcpConnectionDescriptor {
   profile: string;
   provider: string;
   mode: string;
-  /** Persistent profiles expose a fixed endpoint; ephemeral Quick profiles omit this key. */
+  /** Operator-known fixed URL, managed control-plane endpoint, or ephemeral provider URL. */
   fixed?: true;
+  managed?: true;
   ephemeral?: true;
   publicOrigin?: string;
   mcpUrl?: string;
@@ -73,8 +74,12 @@ export function projectGatewayTunnelMcpConnectionDescriptor(
     descriptor.ephemeral = true;
     return descriptor;
   }
-  descriptor.fixed = true;
   const fixedUrl = access?.publicUrl ?? profile.publicUrl;
+  if (fixedUrl === undefined && profile.provider === "openai" && profile.mode === "secure") {
+    descriptor.managed = true;
+    return descriptor;
+  }
+  descriptor.fixed = true;
   if (fixedUrl !== undefined) {
     const controlledPath = httpPath;
     const mcpUrl = access?.publicUrl
