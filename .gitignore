@@ -129,8 +129,11 @@ instr.txt
 
 # Local analysis scratch (unpacked npm sources, diagnostic dumps)
 .tmp-analysis/
+.tmp/
 # Pi session transcript logs
 pi-session-*.html
+# Devin CLI usage stats page (local generated report)
+devin-cli-stats.html
 # Unrelated local Python experiment scripts
 /fit_engine*.py
 wechat_E4f4Eqpn_HPuJqPGLOzE1g/combined.jpg
