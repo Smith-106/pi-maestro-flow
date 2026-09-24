@@ -499,13 +499,19 @@ export async function resolveResource(
         throw new Error(`Session entry not found or not visible: ${sessionUri}`);
       }
       // The public service already strips thinking, hidden rows, abandoned
-      // branches, and tool arguments. Serialize only the selected entry so a
-      // resource read cannot accidentally widen into a transcript dump.
-      return {
-        content: trimOutput(JSON.stringify(result.selectedEntry, null, 2)),
-        title: sessionUri,
-        cached: false,
-      };
+      // branches, and tool arguments. Emit only the selected entry's projected
+      // text rows — bounded to that entry — so a resource read cannot widen
+      // into a transcript dump.
+      {
+        const selected = result.selectedEntry;
+        const body = selected.entries.map((entry) => entry.text).filter((text) => text.length > 0).join("\n");
+        const header = `[${selected.resourceUri} · ${selected.entries[0]?.kind ?? "entry"} · turn ${selected.turn}]`;
+        return {
+          content: trimOutput(`${header}\n\n${body || "(no text content)"}`),
+          title: sessionUri,
+          cached: false,
+        };
+      }
     }
     case "artifact": {
       const service = options.fabricArtifacts;

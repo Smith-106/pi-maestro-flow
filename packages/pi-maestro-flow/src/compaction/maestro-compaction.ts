@@ -36,6 +36,13 @@ import type {
 } from "./compaction-arbiter.ts";
 import { readEffectiveCompactionSettings } from "./compaction-settings.ts";
 import {
+  collectEvidenceReceipts,
+  mergeEvidenceReceipts,
+  normalizeEvidenceReceipts,
+  renderEvidenceIndexLines,
+  type EvidenceReceipt,
+} from "./evidence-index.ts";
+import {
   MIN_SUMMARY_OUTPUT_TOKENS,
   SUMMARY_CAPACITY_MARGIN_TOKENS,
   summaryOutputTokenLimit,
@@ -562,6 +569,12 @@ export interface MaestroCompactionDetails {
   /** Deterministic context-reset request metadata (v4; absent on legacy entries). */
   newContext?: MaestroNewContextDetails;
   /**
+   * Categorized receipts for tool-call results dropped by this checkpoint
+   * (v4 additive; absent on legacy entries). Each receipt names the dropped
+   * toolResult session entry and its exact session:// recovery URI.
+   */
+  evidenceIndex?: EvidenceReceipt[];
+  /**
    * Optional durable trigger metadata. Additive and self-describing (discriminated
    * by `owner`), so older readers can still consume the checkpoint.
    */
@@ -825,6 +838,14 @@ export async function captureMaestroCompactionDetails(
     currentReferences,
     checkpointId,
   );
+  const evidenceIndex = mergeEvidenceReceipts(
+    previousDetails?.evidenceIndex ?? [],
+    collectEvidenceReceipts({
+      sessionId: ctx.sessionManager.getSessionId(),
+      branchEntries: event.branchEntries,
+      firstKeptEntryId: dependencies.firstKeptEntryIdOverride ?? event.preparation.firstKeptEntryId,
+    }),
+  );
   return {
     kind: DETAILS_KIND,
     schemaVersion: DETAILS_VERSION,
@@ -839,6 +860,7 @@ export async function captureMaestroCompactionDetails(
     plan,
     activeSkills,
     references,
+    ...(evidenceIndex.length ? { evidenceIndex } : {}),
     knowhowPath,
     ...(dependencies.newContext ? {
       newContext: {
@@ -896,7 +918,7 @@ export async function createMaestroCompaction(
     if (!summary) return summaryFailure("The deterministic summary was empty");
     return {
       compaction: {
-        summary,
+        summary: appendEvidenceIndexSection(summary, details),
         firstKeptEntryId: dependencies.firstKeptEntryIdOverride ?? event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
         details,
@@ -941,7 +963,7 @@ export async function createMaestroCompaction(
 
     return {
       compaction: {
-        summary,
+        summary: appendEvidenceIndexSection(summary, details),
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
         details,
@@ -964,6 +986,12 @@ export function buildMaestroCompactionPrompt(input: {
     runtimeState: input.runtimeState,
     operatorFocus: input.customInstructions ?? null,
   }, null, 2);
+}
+
+/** Append the bounded recovery-receipt section to any summary producer's output. */
+function appendEvidenceIndexSection(summary: string, details: MaestroCompactionDetails): string {
+  const lines = renderEvidenceIndexLines(details.evidenceIndex ?? []);
+  return lines.length ? `${summary}\n\n${lines.join("\n")}` : summary;
 }
 
 export function mergeCompactionReferences(
@@ -1162,6 +1190,7 @@ export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompac
       } satisfies MaestroNewContextDetails;
     })()
     : undefined;
+  const evidenceIndex = normalizeEvidenceReceipts(candidate.evidenceIndex);
   return {
     ...(candidate as MaestroCompactionDetails),
     schemaVersion: DETAILS_VERSION,
@@ -1169,6 +1198,7 @@ export function normalizeMaestroCompactionDetails(value: unknown): MaestroCompac
     goal,
     plan,
     newContext,
+    ...(evidenceIndex ? { evidenceIndex } : { evidenceIndex: undefined }),
     activeSkills: candidate.activeSkills.map((skill) => ({ ...skill, requiredFiles: [...skill.requiredFiles], deferredFiles: [...skill.deferredFiles] })),
     references: candidate.references.map((reference) => ({ ...reference })),
   };

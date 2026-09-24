@@ -110,7 +110,7 @@ function sessionIdOf(ctx: Pick<ExtensionContext, "sessionManager">): string {
   return sessionFile ? `file:${sessionFile}` : "unknown-session";
 }
 
-function boundedUtf8(value: string, maxBytes: number): string {
+export function boundedUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
   let bytes = 0;
   let output = "";
@@ -783,6 +783,9 @@ export function buildNewContextRecoveryCapsule(details: MaestroCompactionDetails
     "- Continue from the current Workflow/Plan and your own active Todo's exact next action; recommendations do not override live state or actor ownership.",
     "- Listed paths and URIs are recovery pointers, not a mandatory reading list. Use read for local files and resource for protocol URIs only when needed.",
     "- If a required current-session fact or URI is absent, use session_history with scope=current_session; do not guess.",
+    ...(details.evidenceIndex?.length
+      ? ["- The appended Evidence Index lists dropped tool results with exact session:// entry URIs and read offsets; resolve one with the resource tool instead of re-reading files or re-running commands."]
+      : []),
     "- Capsule: Maestro New Context Recovery Capsule v2; no model summary was generated.",
     "",
     "## Next-Step Recommendations",
