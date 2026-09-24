@@ -63,10 +63,10 @@ test("core Pi conversion routes lifecycle authority through run-control", () => 
 ~/.maestro/workflows/run-mode.md
 </required_reading>
 <purpose>Coordinator</purpose>
-maestro session open "goal" --id demo --participant actor-1 --actor actor-1 --request-id req-open --reason "open" --json
-maestro session chain insert --session demo --step-id analyze --command analyze --arg "goal" --participant actor-1 --actor actor-1 --request-id req-insert --reason "insert" --expected-orchestration-revision 0 --json
-maestro session chain update --session demo --step-id analyze --stage analysis --arg "scope" --participant actor-1 --actor actor-1 --request-id req-update --reason "update" --expected-orchestration-revision 1 --json
-maestro run next --session demo --participant actor-1 --actor actor-1 --request-id req-next --reason "next" --expected-orchestration-revision 2 --json
+maestro session open "goal" --id demo --actor actor-1 --json
+maestro session chain insert --session demo --step-id analyze --command analyze --arg "goal" --actor actor-1 --expected-orchestration-revision 0 --json
+maestro session chain update --session demo --step-id analyze --stage analysis --arg "scope" --actor actor-1 --expected-orchestration-revision 1 --json
+maestro run next --session demo --actor actor-1 --expected-orchestration-revision 2 --json
 `;
 
   for (const name of piCoordinatorSkills) {

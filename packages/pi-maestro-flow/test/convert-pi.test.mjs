@@ -67,10 +67,10 @@ allowed-tools: Read Bash Agent
 </required_reading>
 <purpose>Coordinator</purpose>
 \`\`\`bash
-maestro session open "<intent>" --id <slug> --participant {actor_id} --actor {actor_id} --request-id {open_request_id} --reason "open Session" --json
-maestro session chain insert --session {session_id} --step-id {step_id} --command analyze --arg "<intent>" --participant {actor_id} --actor {actor_id} --request-id {insert_request_id} --reason "add step" --expected-orchestration-revision {open_revision} --json
-maestro session chain update --session {session_id} --step-id {step_id} --stage analysis --arg "<scope>" --participant {actor_id} --actor {actor_id} --request-id {update_request_id} --reason "update step" --expected-orchestration-revision {insert_revision} --json
-maestro run next --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {next_request_id} --reason "dispatch step" --expected-orchestration-revision {update_revision} --json
+maestro session open "<intent>" --id <slug> --actor {actor_id} --json
+maestro session chain insert --session {session_id} --step-id {step_id} --command analyze --arg "<intent>" --actor {actor_id} --expected-orchestration-revision {open_revision} --json
+maestro session chain update --session {session_id} --step-id {step_id} --stage analysis --arg "<scope>" --actor {actor_id} --expected-orchestration-revision {insert_revision} --json
+maestro run next --session {session_id} --actor {actor_id} --expected-orchestration-revision {update_revision} --json
 \`\`\`
 `,
     verify(output) {
@@ -81,7 +81,7 @@ maestro run next --session {session_id} --participant {actor_id} --actor {actor_
       assert.match(output, /session chain insert[^\n]*--arg "<intent>"/);
       assert.match(output, /session chain update[^\n]*--arg "<scope>"/);
       assert.match(output, /maestro run next --session/);
-      assert.match(output, /--participant \{actor_id\} --actor \{actor_id\}/);
+      assert.match(output, /--actor \{actor_id\}/);
       assert.doesNotMatch(output, /maestro run start|maestro run edit|maestro run prepare|session open[^\n]*--chain-file/);
     },
   },
@@ -115,7 +115,7 @@ S_PARSE:
   {
     name: "keeps v3 run next / run complete lifecycle examples intact",
     file: "D:/fixture/skills/maestro-next/SKILL.md",
-    input: `1. \`maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .\`。
+    input: `1. \`maestro run next --session {session_id} --actor {a} --expected-orchestration-revision {rev} --workflow-root .\`。
 2. 使用已解析的 \`argument_requirements\` 创建当前 step 的 Run；不得用路径扫描补 upstream。
 3. 按 birth packet 的 \`brief.command\` 加载完整执行指南。
 4. 执行 workflow，写正式 deliverables，运行 gates。
@@ -139,9 +139,9 @@ allowed-tools: Read Bash
 ~/.maestro/workflows/run-mode.md
 </required_reading>
 <purpose>Router</purpose>
-maestro session open "goal" --id demo --participant actor-1 --actor actor-1 --request-id req-open --reason "open" --json
-maestro session chain insert --session demo --step-id companion --command companion --arg "goal" --participant actor-1 --actor actor-1 --request-id req-insert --reason "insert" --expected-orchestration-revision 0 --json
-maestro run next --session demo --participant actor-1 --actor actor-1 --request-id req-next --reason "next" --expected-orchestration-revision 1 --json
+maestro session open "goal" --id demo --actor actor-1 --json
+maestro session chain insert --session demo --step-id companion --command companion --arg "goal" --actor actor-1 --expected-orchestration-revision 0 --json
+maestro run next --session demo --actor actor-1 --expected-orchestration-revision 1 --json
 `,
     verify(output) {
       assert.match(output, /^allowed-tools: Read Bash maestro run-control$/m);

@@ -357,7 +357,8 @@ test("plan-B v3 cores select the session-v3 adapter and route mutations through 
     );
     assert.equal(completed.command.exitCode, 0);
     const completeCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "complete")!;
-    assert.equal(flagValue(completeCall, "--participant"), "pi-core");
+    assert.equal(flagValue(completeCall, "--actor"), "pi-core");
+    assert.equal(flagValue(completeCall, "--participant"), undefined);
     assert.equal(flagValue(completeCall, "--expected-orchestration-revision"), "4");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -382,7 +383,7 @@ test("artifact republish injects inspect-derived CAS and host identity for execu
           assert.equal(argv[0], "artifact");
           assert.equal(argv[1], "republish");
           assert.equal(flagValue(argv, "--session"), "session-1");
-          assert.equal(flagValue(argv, "--participant"), "pi-artifact");
+          assert.equal(flagValue(argv, "--participant"), undefined);
           assert.equal(flagValue(argv, "--actor"), "pi-artifact");
           assert.equal(flagValue(argv, "--assessment-hash"), `sha256:${"a".repeat(64)}`);
           assert.equal(flagValue(argv, "--expected-artifact-revision"), "7");
@@ -2243,7 +2244,7 @@ contract:
     assert.equal(openEnvelope.ok, true);
     assert.equal(openEnvelope.result.session_id, "real-v3-fresh");
     const openCall = calls.find((call) => call[0] === "session" && call[1] === "open")!;
-    assert.equal(flagValue(openCall, "--participant"), host);
+    assert.equal(flagValue(openCall, "--participant"), undefined);
     assert.equal(flagValue(openCall, "--actor"), host);
     assert.ok(flagValue(openCall, "--request-id"));
     assert.equal(flagValue(openCall, "--reason"), "Pi run-control v3 mutation");
@@ -2264,7 +2265,7 @@ contract:
     const insertEnvelope = JSON.parse(insert.command.stdout) as Record<string, any>;
     assert.equal(insertEnvelope.operation, "session-chain-insert");
     const insertCall = calls.find((call) => call[0] === "session" && call[1] === "chain" && call[2] === "insert")!;
-    assert.equal(flagValue(insertCall, "--participant"), host);
+    assert.equal(flagValue(insertCall, "--participant"), undefined);
     assert.equal(flagValue(insertCall, "--actor"), host);
     assert.ok(flagValue(insertCall, "--request-id"));
     assert.equal(flagValue(insertCall, "--expected-orchestration-revision"), "1");
@@ -2275,7 +2276,7 @@ contract:
     const nextEnvelope = JSON.parse(next.command.stdout) as Record<string, any>;
     assert.equal(nextEnvelope.operation, "next");
     const nextCall = calls.find((call) => call[0] === "run" && call[1] === "next")!;
-    assert.equal(flagValue(nextCall, "--participant"), host);
+    assert.equal(flagValue(nextCall, "--participant"), undefined);
     assert.equal(flagValue(nextCall, "--actor"), host);
     assert.ok(flagValue(nextCall, "--request-id"));
     assert.equal(flagValue(nextCall, "--expected-orchestration-revision"), "2");
@@ -2487,7 +2488,7 @@ contract:
     assert.equal(briefEnvelope.result.run.status, "running");
     assert.equal(briefEnvelope.result.run.run_id, runId);
     assert.equal(
-      calls.some((call) => call[0] === "run" && call[1] === "brief" && call.includes("--participant")),
+      calls.some((call) => call[0] === "run" && call[1] === "brief" && call.includes("--actor")),
       false,
       "brief reads pass through without coordinator identity injection",
     );
@@ -2586,7 +2587,7 @@ test("real Maestro v3 coordinator migrates one legacy Session with resolved revi
       (call) => call[0] === "session" && call[1] === "migrate" && call.includes("--to-v3"),
     )!;
     assert.equal(flagValue(migrateCall, "--session"), legacySessionId);
-    assert.equal(flagValue(migrateCall, "--participant"), "pi-real-migrate");
+    assert.equal(flagValue(migrateCall, "--participant"), undefined);
     assert.equal(flagValue(migrateCall, "--actor"), "pi-real-migrate");
     assert.ok(flagValue(migrateCall, "--request-id"));
     assert.equal(flagValue(migrateCall, "--reason"), "Pi run-control v3 mutation");
@@ -3162,7 +3163,7 @@ test("default CLI runner settles once and removes listeners when error races clo
 // session-v3 coordinator (Plan-B Session/Run minimal-state core)
 // ---------------------------------------------------------------------------
 
-test("session-v3 exec injects participant/actor/request-id/reason/json and expected revisions", async () => {
+test("session-v3 exec injects actor/request-id/reason/json and expected revisions", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-inject-"));
   const calls: string[][] = [];
   const snapshot = v3SessionSnapshot("session-1");
@@ -3188,7 +3189,7 @@ test("session-v3 exec injects participant/actor/request-id/reason/json and expec
     );
     assert.equal(open.command.exitCode, 0);
     const openCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "open")!;
-    assert.equal(flagValue(openCall, "--participant"), "pi-v3");
+    assert.equal(flagValue(openCall, "--participant"), undefined);
     assert.equal(flagValue(openCall, "--actor"), "pi-v3");
     assert.equal(flagValue(openCall, "--request-id"), expectedToolRequestId);
     assert.doesNotMatch(flagValue(openCall, "--request-id")!, /[:#]/);
@@ -3315,7 +3316,7 @@ test("session-v3 migration injects legacy fences and requires caller batch manif
     assert.equal(migrated.command.exitCode, 0);
     const migrateCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "migrate")!;
     assert.equal(flagValue(migrateCall, "--session"), "legacy-1");
-    assert.equal(flagValue(migrateCall, "--participant"), "pi-migrate");
+    assert.equal(flagValue(migrateCall, "--participant"), undefined);
     assert.equal(flagValue(migrateCall, "--actor"), "pi-migrate");
     assert.ok(flagValue(migrateCall, "--request-id"));
     assert.equal(flagValue(migrateCall, "--reason"), "Pi run-control v3 mutation");

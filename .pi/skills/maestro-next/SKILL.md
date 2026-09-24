@@ -25,9 +25,9 @@ Pi mirrors canonical Session/Run state automatically:
 Pi lifecycle routing:
 
 - Execute every Session/Run lifecycle read or mutation with the `run-control` tool by passing the displayed Maestro arguments as `argv` without the leading `maestro` executable. Never execute lifecycle mutation through Bash.
-- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the complete v3 authority envelope: exact `--session`, identical `--participant` and `--actor`, a distinct `--request-id`, `--reason`, and the applicable entity revision fences.
-- For `session open`, the coordinator injects participant == actor, request ID, reason, and JSON output; a new Session has no `--session` or expected revision yet.
-- For operations on an active Session, the coordinator injects the exact `--session`, participant == actor, request ID, reason, and current `--expected-orchestration-revision`; Run mutations also receive `--expected-run-revision`. `session migrate` uses legacy identity/activity revision fences instead.
+- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the v3 authority envelope: exact `--session`, `--actor` (the CLI derives `--participant` from it), and the applicable entity revision fences; `--request-id` and `--reason` are optional with derived defaults.
+- For `session open`, the coordinator injects the host identity as `--actor`, request ID, reason, and JSON output; a new Session has no `--session` or expected revision yet.
+- For operations on an active Session, the coordinator injects the exact `--session`, `--actor` (participant defaults to it), request ID, reason, and current `--expected-orchestration-revision`; Run mutations also receive `--expected-run-revision`. `session migrate` uses legacy identity/activity revision fences instead.
 - The coordinator must be available for every `run-control` call. Session opening does not require an already active Session; all other mutations target an exact active or explicitly named Session.
 
 </pi_run_control>
@@ -266,19 +266,19 @@ Single-run path only. Multi-step execution is handled by `/maestro` (manual) and
 For first-tier steps (those with prepare/ + workflows/ files):
 
 ```bash
-# 1. Open an empty Session; participant and actor are the same identity.
-maestro session open "<objective>" --id YYYYMMDD-<step>-<topic> --participant {actor_id} --actor {actor_id} --request-id {open_request_id} --reason "open single-step Session" --json
+# 1. Open an empty Session; --actor carries the authorized identity (--participant defaults to it).
+maestro session open "<objective>" --id YYYYMMDD-<step>-<topic> --actor {actor_id} --json
 #    Or attach an existing compatible Session read-only first: maestro session status --session {session_id} --json
 
 # 2. Persist the selected step and each required positional command input.
-maestro session chain insert --session {session_id} --step-id {step_id} --command <step> --arg "<domain input>" --participant {actor_id} --actor {actor_id} --request-id {insert_request_id} --reason "add selected step" --expected-orchestration-revision {open_orchestration_revision} --json
+maestro session chain insert --session {session_id} --step-id {step_id} --command <step> --arg "<domain input>" --actor {actor_id} --expected-orchestration-revision {open_orchestration_revision} --json
 
 # 2a. LLM performs pre-task thinking using the prepare guidance embedded in the birth packet.
 
 # 3. Dispatch with the exact revision returned by chain insert.
-maestro run next --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {next_request_id} --reason "dispatch selected step" --expected-orchestration-revision {insert_orchestration_revision} --json
+maestro run next --session {session_id} --actor {actor_id} --expected-orchestration-revision {insert_orchestration_revision} --json
 #    Direct machine-protocol alternative (only for an existing exact step):
-#    maestro run create <step> "<domain input>" --session {session_id} --run {run_id} --step {step_id} --goal "<goal>" --input <ART-id> --participant {actor_id} --actor {actor_id} --request-id {create_request_id} --reason "create selected Run" --expected-orchestration-revision {step_orchestration_revision} --json
+#    maestro run create <step> "<domain input>" --session {session_id} --run {run_id} --step {step_id} --goal "<goal>" --input <ART-id> --actor {actor_id} --expected-orchestration-revision {step_orchestration_revision} --json
 #    Returns: run_id, run_dir, upstream, resolved task, entry blockers, and structured executable continuation
 
 # 3a. Entry blocker degradation (execute-specific)
@@ -306,7 +306,7 @@ maestro run next --session {session_id} --participant {actor_id} --actor {actor_
 
 # 6. Check and complete the run
 maestro run check {run_id} --session {session_id} --json
-maestro run complete {run_id} --session {session_id} --participant {actor_id} --actor {actor_id} --request-id {complete_request_id} --reason "complete selected step" --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --verdict done --advance --json
+maestro run complete {run_id} --session {session_id} --actor {actor_id} --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --verdict done --advance --json
 ```
 
 After `run complete --advance`: re-infer lifecycle and surface the natural next step as a continuation hint — stepwise multi-step work proceeds by re-invoking `/maestro-next` or `/maestro -c`.

@@ -326,9 +326,9 @@ const piRunControlHostBlock = `
 Pi lifecycle routing:
 
 - Execute every Session/Run lifecycle read or mutation with the \`run-control\` tool by passing the displayed Maestro arguments as \`argv\` without the leading \`maestro\` executable. Never execute lifecycle mutation through Bash.
-- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the complete v3 authority envelope: exact \`--session\`, identical \`--participant\` and \`--actor\`, a distinct \`--request-id\`, \`--reason\`, and the applicable entity revision fences.
-- For \`session open\`, the coordinator injects participant == actor, request ID, reason, and JSON output; a new Session has no \`--session\` or expected revision yet.
-- For operations on an active Session, the coordinator injects the exact \`--session\`, participant == actor, request ID, reason, and current \`--expected-orchestration-revision\`; Run mutations also receive \`--expected-run-revision\`. \`session migrate\` uses legacy identity/activity revision fences instead.
+- Fenced Maestro CLI examples below are human syntax references, not an alternate Pi execution path. Shorthand command-family mentions are not executable examples. Any executable human CLI example must show the v3 authority envelope: exact \`--session\`, \`--actor\` (the CLI derives \`--participant\` from it), and the applicable entity revision fences; \`--request-id\` and \`--reason\` are optional with derived defaults.
+- For \`session open\`, the coordinator injects the host identity as \`--actor\`, request ID, reason, and JSON output; a new Session has no \`--session\` or expected revision yet.
+- For operations on an active Session, the coordinator injects the exact \`--session\`, \`--actor\` (participant defaults to it), request ID, reason, and current \`--expected-orchestration-revision\`; Run mutations also receive \`--expected-run-revision\`. \`session migrate\` uses legacy identity/activity revision fences instead.
 - The coordinator must be available for every \`run-control\` call. Session opening does not require an already active Session; all other mutations target an exact active or explicitly named Session.
 
 </pi_run_control>`;

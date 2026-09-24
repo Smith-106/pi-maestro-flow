@@ -113,7 +113,7 @@ maestro knowledge stage knowhow "<title>" --content-file <path|-> --session <ses
 # 1) 完成当前 Run 并推进链（sealed run；verdict 驱动 --advance）
 maestro run complete <run-id> --session {session_id} --verdict done|done_with_concerns|needs_retry|blocked --summary "<text>" [--decision "<text>"] [--reason "<text>"] --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev}
 # 2) 全部 step 完成后封存 Session（session complete = v3 的 seal 面）
-maestro session complete --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev}
+maestro session complete --session {session_id} --actor {a} --expected-orchestration-revision {rev}
 # v2 的 session done/session seal 已移除；run complete 即唯一完成面
 # CLI --verdict 同时接受 report 层 ready 词表别名并内部映射：ready→done / ready_with_concerns→done_with_concerns / failed→needs_retry（blocked 两表一致）
 ```
@@ -169,7 +169,7 @@ node scripts/self-evolve-approval.mjs record --action promote --session <session
 
 #### Step 6 — session complete + 未来验证
 ```bash
-maestro session complete --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev}
+maestro session complete --session {session_id} --actor {a} --expected-orchestration-revision {rev}
 # 未来 run 反馈验证（promote 后即可测）
 maestro search "<title>" --type knowhow|spec --json
 ```

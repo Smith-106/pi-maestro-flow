@@ -914,8 +914,10 @@ export class WorkflowCoordinator {
   /**
    * session/3.0 raw Maestro argv passthrough (run-control shell surface).
    * Reads pass through unchanged; writes get the v3 mutation envelope
-   * (participant/actor/request-id/reason/json and expected entity revisions)
-   * injected by the coordinator, mirroring addV3MutationOptions in the core.
+   * (actor/request-id/reason/json and expected entity revisions) injected by
+   * the coordinator, mirroring addV3MutationOptions in the core. The CLI
+   * derives --participant from --actor, so the coordinator injects only the
+   * actor and refuses a caller-supplied --participant that conflicts with it.
    * There is no mutation lease in v3: the core relies on participant identity
    * and entity-revision CAS instead.
    */
@@ -977,7 +979,12 @@ export class WorkflowCoordinator {
   ): Promise<string[]> {
     const participantId = requireHostSessionId(hostSessionId);
     const prepared = [...argv];
-    addFlag(prepared, "--participant", participantId);
+    // The CLI defaults --participant to --actor; keep refusing a caller flag
+    // that conflicts with coordinator authority.
+    const suppliedParticipant = optionalSingleFlag(prepared, "--participant");
+    if (suppliedParticipant !== undefined && suppliedParticipant !== participantId) {
+      throw new Error("Core-execution mutation refused: --participant conflicts with coordinator authority");
+    }
     addFlag(prepared, "--actor", participantId);
     addRequiredFlagIfMissing(
       prepared,
@@ -1220,7 +1227,12 @@ export class WorkflowCoordinator {
     const consumer = requireSingleFlag(argv, "--consumer");
     const alias = requireSingleFlag(argv, "--alias");
     const prepared = [...argv];
-    addFlag(prepared, "--participant", ownerId);
+    // --participant defaults to --actor in the CLI; refuse a conflicting
+    // caller-supplied value instead of injecting it.
+    const suppliedParticipant = optionalSingleFlag(prepared, "--participant");
+    if (suppliedParticipant !== undefined && suppliedParticipant !== ownerId) {
+      throw new Error("Core-execution mutation refused: --participant conflicts with coordinator authority");
+    }
     addFlag(prepared, "--actor", ownerId);
     addFlagIfMissing(prepared, "--request-id", randomUUID());
     addFlagIfMissing(prepared, "--reason", "Republish Artifact compatibility through Pi run-control");

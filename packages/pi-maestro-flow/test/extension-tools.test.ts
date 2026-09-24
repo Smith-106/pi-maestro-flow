@@ -505,7 +505,7 @@ test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway c
   assert.match(runControl?.description ?? "", /blocked in Plan mode/);
   assert.match(runControl?.description ?? "", /Opening a new Session/);
   assert.match(runControl?.description ?? "", /already active Session is not required/);
-  assert.match(runControl?.description ?? "", /identical --participant and --actor/);
+  assert.match(runControl?.description ?? "", /injects the current Pi host identity as --actor/);
   assert.match(runControl?.description ?? "", /exact --session/);
   assert.match(runControl?.description ?? "", /--expected-orchestration-revision/);
   assert.match(runControl?.description ?? "", /--expected-run-revision/);
