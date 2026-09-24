@@ -147,6 +147,45 @@ test("run-response parser accepts session chain update run-response/1.2", () => 
   });
 });
 
+test("run-response parser accepts session list and retired-stub envelopes", () => {
+  // session list is a real v3 operation emitted by the core; the retired
+  // name stubs (session done, run status|done|list) answer with structured
+  // SESSION_SCHEMA_UNSUPPORTED envelopes carrying the replacement command.
+  const list = parseRunResponse({
+    ...responseV12,
+    operation: "session-list",
+    result: [{ session_id: "session-1", status: "open" }],
+  });
+  assert.equal(list.operation, "session-list");
+  assert.equal(list.ok, true);
+
+  const retired = parseRunResponse({
+    ...responseV12,
+    operation: "session-done",
+    request_id: null,
+    revision: null,
+    ok: false,
+    exit_code: 1,
+    disposition: "domain_error",
+    result: null,
+    error: {
+      code: "SESSION_SCHEMA_UNSUPPORTED",
+      message: "maestro session done is retired for session/3.0 workspaces",
+      retryable: false,
+      details: { deprecated_command: "session done", replacement_command: "maestro session complete" },
+      target_type: null,
+      target_id: null,
+      expected_revision: null,
+      current_revision: null,
+      changed_by: null,
+      next_actions: ["use-session-complete"],
+    },
+  });
+  assert.equal(retired.ok, false);
+  assert.equal(retired.error?.code, "SESSION_SCHEMA_UNSUPPORTED");
+  assert.equal(retired.error?.details.replacement_command, "maestro session complete");
+});
+
 test("run-response parser accepts artifact republish success, domain error, and revision conflict", async (t) => {
   await t.test("success", () => {
     const parsed = parseRunResponse({

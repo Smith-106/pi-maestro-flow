@@ -3443,6 +3443,30 @@ test("session-v3 full lifecycle open -> chain insert -> run next -> check -> com
   }
 });
 
+test("session-v3 run cancel injects both run and orchestration revision fences", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-cancel-"));
+  const calls: string[][] = [];
+  const snapshot = v3SessionSnapshot("session-1");
+  const coordinator = testCoordinator(fakeBridge(snapshot), v3Adapter(calls, snapshot), new WorkflowLeaseStore(root));
+  try {
+    await coordinator.selectMode("session-v3");
+    const cancel = await coordinator.exec(
+      ["run", "cancel", "run-1"],
+      classifyRunControlArgv(["run", "cancel", "run-1"]),
+      "pi-v3",
+    );
+    assert.equal(cancel.command.exitCode, 0);
+    const cancelCall = calls.find((call) => call[0] === "exec" && call[1] === "run" && call[2] === "cancel")!;
+    assert.equal(flagValue(cancelCall, "--session"), "session-1");
+    assert.equal(flagValue(cancelCall, "--expected-run-revision"), "2");
+    // cancel frees the chain step: the CLI requires the orchestration fence too.
+    assert.equal(flagValue(cancelCall, "--expected-orchestration-revision"), "4");
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session-v3 revision conflicts surface next_actions and a re-read hint without replay", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-conflict-"));
   const calls: string[][] = [];

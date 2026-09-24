@@ -2667,12 +2667,14 @@ function isV3RunTarget(argv: readonly string[]): boolean {
 /**
  * Orchestration-target v3 mutations carry --expected-orchestration-revision:
  * session chain insert/skip/replace/update, run next/create/decide, session
- * complete/archive, and run complete (which advances the chain).
+ * complete/archive, and run complete/cancel (which update the chain step).
  * session open is handled before this check (no CAS for a brand-new Session).
  */
 function isV3OrchestrationTarget(argv: readonly string[]): boolean {
   if (argv[0] === "run") {
-    return ["next", "create", "decide", "complete"].includes(argv[1] ?? "");
+    // run cancel also frees the chain step, so the CLI requires
+    // --expected-orchestration-revision in addition to the Run CAS fence.
+    return ["next", "create", "decide", "complete", "cancel"].includes(argv[1] ?? "");
   }
   if (argv[0] !== "session") return false;
   const command = argv[1] ?? "";

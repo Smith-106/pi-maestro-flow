@@ -52,7 +52,9 @@ export type RunOperationV12 =
   | "session-migrate"
   | "session-complete"
   | "session-archive"
+  | "session-unarchive"
   | "session-status"
+  | "session-list"
   | "session-resume-view"
   | "session-chain-insert"
   | "session-chain-skip"
@@ -82,7 +84,11 @@ export type RunOperationV12 =
   | "execution-operation-release"
   | "execution-operation-status"
   | "artifact-inspect"
-  | "artifact-republish";
+  | "artifact-republish"
+  | "run-done"
+  | "run-list"
+  | "run-status"
+  | "session-done";
 
 export interface RunResponseNextAction {
   suggest_only: true;
@@ -336,7 +342,8 @@ const operationV11Schema = z.enum([
 const operationV12Schema = z.enum([
   ...operationV10Schema.options,
   "capabilities", "session-open", "session-migrate",
-  "session-complete", "session-archive", "session-unarchive", "session-status", "session-resume-view",
+  "session-complete", "session-archive", "session-unarchive", "session-status", "session-list",
+  "session-resume-view",
   "session-chain-insert", "session-chain-skip", "session-chain-replace", "session-chain-update",
   "run-cancel", "run-seal", "run-transition", "run-rebind", "run-decide", "execution-start", "execution-attach",
   "execution-status", "execution-pause", "execution-resolve", "execution-resume", "execution-seal",
@@ -344,6 +351,7 @@ const operationV12Schema = z.enum([
   "execution-lease-status", "execution-lease-heartbeat", "execution-lease-release", "execution-lease-recover",
   "execution-operation-claim", "execution-operation-heartbeat", "execution-operation-release",
   "execution-operation-status", "artifact-inspect", "artifact-republish",
+  "run-done", "run-list", "run-status", "session-done",
 ]);
 const errorCodeV10Schema = z.enum([
   "COMMANDER_USAGE", "SESSION_NOT_FOUND", "SESSION_AMBIGUOUS", "SESSION_NOT_RUNNING", "RESUME_REQUIRED",
