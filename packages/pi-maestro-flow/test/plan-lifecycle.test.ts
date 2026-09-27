@@ -30,6 +30,10 @@ import {
   type PlanWorkflowPublicationResult,
 } from "../src/tools/plan.ts";
 import {
+  registerPlanTransport,
+  type PlanTransportResult,
+} from "../src/plan-transport.ts";
+import {
   PlanStore,
   type LoadedPlan,
   type PlanExecutionChoice,
@@ -565,6 +569,63 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
   }
 });
 
+test("remote Plan confirmation wins over the local TUI and carries the full request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-transport-confirm-"));
+  const requests: Array<{ kind: string; markdown: string; revision: number; actions: readonly string[] }> = [];
+  const results: PlanTransportResult[] = [{ status: "decision", decision: { action: "execute" } }];
+  const dispose = registerPlanTransport({
+    open(request) {
+      requests.push({ kind: request.kind, markdown: request.markdown, revision: request.revision, actions: request.availableActions });
+      return {
+        promise: Promise.resolve(results.shift()!),
+        cancel() {},
+      };
+    },
+  });
+  const harness = createHarness(root, false);
+  harness.ctx.isIdle = () => false;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Remote approval" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(requests[0]?.kind, "confirm");
+    assert.equal(requests[0]?.markdown, "# Remote approval");
+    assert.ok(requests[0]?.actions.includes("execute"));
+  } finally {
+    dispose();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("remote Plan review saves an edited draft with the supplied revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-transport-review-"));
+  let requestKind = "";
+  const dispose = registerPlanTransport({
+    open(request) {
+      requestKind = request.kind;
+      return {
+        promise: Promise.resolve({ status: "edited", markdown: "# Edited remotely", expectedRevision: request.revision }),
+        cancel() {},
+      };
+    },
+  });
+  const harness = createHarness(root, false);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Original" });
+    await execute(harness, "plan-review");
+    assert.equal(requestKind, "review");
+    assert.equal(getPlanText(), "# Edited remotely");
+  } finally {
+    dispose();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test("plan-confirm waits for Act-model restoration before returning current-context execution", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-model-restore-"));
   let restoreCalls = 0;

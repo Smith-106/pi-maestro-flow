@@ -37,6 +37,8 @@ export type PlanConfirmationAction =
 export interface PlanConfirmationDecision {
   action: PlanConfirmationAction;
   execution?: PlanExecutionChoice;
+  /** Remote Plan transports may supply discussion text without opening a local input prompt. */
+  discussion?: string;
 }
 
 export interface PlanWorkflowConfirmationTarget {
