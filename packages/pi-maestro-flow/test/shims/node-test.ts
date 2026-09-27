@@ -1,14 +1,39 @@
-import { test as vitestTest } from "vitest";
+import { test as vitestTest, vi } from "vitest";
 
 interface NodeTestContext {
   test: (name: string, fn: () => void | Promise<void>) => Promise<void>;
+  mock: {
+    timers: {
+      enable(options?: { apis?: string[] }): void;
+      tick(milliseconds: number): void;
+      reset(): void;
+    };
+  };
 }
 
 function wrap(fn: unknown): (ctx: unknown) => Promise<void> {
   return async (ctx) => {
     const subtest = (subName: string, subFn: () => void | Promise<void>): Promise<void> =>
       Promise.resolve().then(subFn);
-    const context = { ...(ctx as object), test: subtest } as NodeTestContext;
+    const timers = {
+      enable: (options?: { apis?: string[] }) => {
+        const apis = options?.apis?.filter((api): api is "setTimeout" | "setInterval" | "setImmediate" =>
+          api === "setTimeout" || api === "setInterval" || api === "setImmediate",
+        );
+        vi.useFakeTimers(apis && apis.length > 0 ? { toFake: apis } : undefined);
+      },
+      tick: (milliseconds: number) => {
+        vi.advanceTimersByTime(milliseconds);
+      },
+      reset: () => {
+        vi.useRealTimers();
+      },
+    };
+    const context = {
+      ...(ctx as object),
+      test: subtest,
+      mock: { timers },
+    } as NodeTestContext;
     await (fn as (t: NodeTestContext) => void | Promise<void>)(context);
   };
 }
