@@ -105,6 +105,22 @@ test("cancelling the local TUI cancels the mobile endpoint", async () => {
   }
 });
 
+test("cancelling from Mobile cancels the local TUI", async () => {
+  const harness = createRaceHarness();
+  const remote = deferred<AskTransportResult>();
+  const fixture = transportFixture(remote);
+  const dispose = registerAskTransport(fixture.transport);
+  try {
+    const pending = executeAsk({ questions: [{ question: "Pick" }] }, harness.ctx, { toolCallId: "raw-call-1" });
+    remote.resolve({ status: "cancelled" });
+    const result = await pending;
+    assert.deepEqual(result.details, { answers: [], cancelled: true });
+    assert.equal(harness.customOpened, true);
+  } finally {
+    dispose();
+  }
+});
+
 test("invalid remote answers do not win the race", async () => {
   const harness = createRaceHarness();
   const remote = deferred<AskTransportResult>();
