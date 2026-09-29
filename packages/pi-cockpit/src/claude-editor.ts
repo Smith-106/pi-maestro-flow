@@ -1,6 +1,7 @@
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey, getKeybindings, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { readAutocompleteState } from "./autocomplete-probe.ts";
+import { stripAnsi } from "./transcript-selection.ts";
 import { tuiT } from "./tui-i18n.ts";
 
 /** Invisible editor start marker consumed by the fullscreen controller (fullscreenInput only). */
@@ -22,8 +23,8 @@ export interface CockpitEditorRouteTarget {
 export interface CockpitClaudeEditorOptions {
 	/** Enable the double bare-Escape clear-input state machine. */
 	doubleEscapeClearInput: boolean;
-	/** Emit editor start/end markers in render() for the fullscreen controller. */
-	emitEditorMarkers: boolean;
+	/** Emit editor start/end markers while the fullscreen controller is active. */
+	emitEditorMarkers: boolean | (() => boolean);
 	/** Guard: true while pi is streaming or a capturing overlay is open (never arm). */
 	isBusy?: () => boolean;
 	/** Called after a double-Escape clears a non-empty draft. */
@@ -40,6 +41,12 @@ export interface CockpitClaudeEditorOptions {
 	getRouteTarget?: () => CockpitEditorRouteTarget | undefined;
 	/** Called with the constructed editor so the host can push route updates. */
 	onEditor?: (editor: CockpitClaudeEditor) => void;
+	/**
+	 * Repaints the embedded working-status row with a fixed color. The host
+	 * derives that row's color from the thinking-level border tint; Cockpit
+	 * keeps it neutral instead.
+	 */
+	workingStatusPaint?: (text: string) => string;
 }
 
 export interface DoubleEscapeDecision {
@@ -147,7 +154,10 @@ export class CockpitClaudeEditor extends CustomEditor {
 		const banner = this.browsing() && total > 0
 			? historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor)
 			: undefined;
-		if (!this.editorOptions.emitEditorMarkers) {
+		const emitEditorMarkers = typeof this.editorOptions.emitEditorMarkers === "function"
+			? this.editorOptions.emitEditorMarkers()
+			: this.editorOptions.emitEditorMarkers;
+		if (!emitEditorMarkers) {
 			return banner ? [...lines, banner] : lines;
 		}
 		// The fullscreen controller treats everything between the sentinels as the
@@ -202,6 +212,21 @@ export class CockpitClaudeEditor extends CustomEditor {
 	/** Repaint after a cross-extension input-target change. */
 	refreshRouteTarget(): void {
 		this.tui.requestRender();
+	}
+
+	/** Status row embedded in the top border keeps a constant color, never the thinking tint. */
+	override setWorkingStatusIndicator(indicator: {
+		renderInBorder(width: number): string;
+		renderSpinnerInBorder(width: number): string;
+	} | undefined): void {
+		const paint = this.editorOptions.workingStatusPaint;
+		if (indicator && paint) {
+			const render = indicator.renderInBorder.bind(indicator);
+			const renderSpinner = indicator.renderSpinnerInBorder.bind(indicator);
+			indicator.renderInBorder = (width: number) => paint(stripAnsi(render(width)));
+			indicator.renderSpinnerInBorder = (width: number) => paint(stripAnsi(renderSpinner(width)));
+		}
+		super.setWorkingStatusIndicator(indicator as Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]);
 	}
 
 	private isBareEscape(data: string): boolean {

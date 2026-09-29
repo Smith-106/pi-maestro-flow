@@ -1,9 +1,9 @@
 // Pure scheduling policy for the cockpit animation/redraw loop.
 //
-// index.ts wires live state (config.staticMode, running, jobs, lingering rows,
-// tick presence) into these functions so the static-mode matrix is unit-testable
-// without instantiating the extension. Three independent gates exist because the
-// surfaces they drive have different stakes:
+// index.ts wires live state (config.staticMode, foreground activity, jobs,
+// lingering rows, tick presence) into these functions so the static-mode matrix
+// is unit-testable without instantiating the extension. Three independent gates
+// exist because the surfaces they drive have different stakes:
 // - the main 500ms tick must keep running while failed/sleeping rows need
 //   expiry (failure retention is correctness, not animation);
 // - the spinner frame gate additionally requires the tick to actually exist, so
@@ -28,13 +28,13 @@ export interface TickPolicyState {
 /**
  * Whether the main 500ms redraw loop should run.
  *
- * Dynamic mode: any activity keeps it alive. Static mode: only lingering rows
- * do — they expire through read-driven pruning, so the loop must outlive them;
- * running agents and jobs repaint on their own events instead.
+ * Dynamic mode: foreground activity, jobs, and lingering rows keep it alive.
+ * Static mode: only lingering rows do — they expire through read-driven pruning,
+ * so the loop must outlive them; running agents and jobs repaint on their events.
  */
 export function shouldRunTick(p: TickPolicyState): boolean {
 	if (p.staticMode) return p.lingering;
-	return p.running || p.agentActive || p.bashActive || p.lingering;
+	return p.running || p.bashActive || p.lingering;
 }
 
 /**
@@ -43,7 +43,7 @@ export function shouldRunTick(p: TickPolicyState): boolean {
  * or a frozen mid-cycle frame would read as a hung UI.
  */
 export function shouldAnimateFrames(p: TickPolicyState): boolean {
-	return !p.staticMode && p.ticking && (p.running || p.agentActive || p.bashActive);
+	return !p.staticMode && p.ticking && (p.running || p.bashActive);
 }
 
 /**
@@ -52,5 +52,5 @@ export function shouldAnimateFrames(p: TickPolicyState): boolean {
  * static-mode gate is identical.
  */
 export function shouldAnimateSidebar(p: TickPolicyState): boolean {
-	return !p.staticMode && (p.running || p.agentActive || p.bashActive || p.lingering);
+	return !p.staticMode && (p.running || p.bashActive || p.lingering);
 }

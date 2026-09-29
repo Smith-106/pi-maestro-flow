@@ -65,7 +65,7 @@ export function formatThinkingDuration(ms: number): string {
 	const totalSeconds = Math.round(ms / 1000);
 	if (totalSeconds < 60) return `${totalSeconds}s`;
 	const minutes = Math.floor(totalSeconds / 60);
-	return `${minutes}m${String(totalSeconds % 60).padStart(2, "0")}s`;
+	return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
 }
 
 export interface ThinkingTimerOptions {

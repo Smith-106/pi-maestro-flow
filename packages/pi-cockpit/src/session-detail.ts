@@ -44,6 +44,10 @@ export interface SessionDetailScrollState {
 	following: boolean;
 }
 
+export interface SessionDetailRenderOptions {
+	liveTiming?: boolean;
+}
+
 export interface SessionDetailDeps {
 	getAgents: () => AgentRow[];
 	getViewingId: () => string | undefined;
@@ -92,16 +96,20 @@ export function renderSessionDetail(
 	maxRows = SESSION_DETAIL_TAIL_LINES + 1,
 	scroll: SessionDetailScrollState = { offset: 0, following: true },
 	hintText = tuiT("session.detailHint"),
+	options: SessionDetailRenderOptions = {},
 ): string[] {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return [];
 	const w = Math.max(1, width);
 	const now = Date.now();
+	const liveTiming = options.liveTiming ?? true;
 	const status = effectiveAgentStatus(row, now);
 	const color = detailStatusColor(status);
 	const label = row.name || row.role || row.agent || "agent";
 	const role = row.role && row.role !== label ? `(${row.role})` : "";
-	const duration = formatDuration(Math.max(0, (row.finishedAt ?? now) - row.startedAt));
+	const duration = row.finishedAt !== undefined || liveTiming
+		? formatDuration(Math.max(0, (row.finishedAt ?? now) - row.startedAt))
+		: "";
 	const model = row.resolvedModel ?? row.requestedModel;
 	const meta = [
 		row.phase ? row.phase : "",
@@ -121,7 +129,7 @@ export function renderSessionDetail(
 		isCliAgent(row) ? theme.fg("accent", tuiT("widget.agent.cli")) : "",
 		role ? theme.fg("dim", role) : "",
 		theme.fg(color, tuiStatus(status)),
-		theme.fg("dim", duration),
+		duration ? theme.fg("dim", duration) : "",
 		meta ? theme.fg("dim", meta) : "",
 	].filter(Boolean).join(" · ");
 	const hint = theme.fg("dim", hintText);
@@ -164,12 +172,12 @@ export function renderSessionDetail(
 				// unchanged for minutes there, so name the state and show how long the
 				// silence has lasted — a live agent stays distinguishable from a stuck one.
 				const idleMs = Math.max(0, now - row.lastActivityAt);
-				const idle = idleMs >= 5_000 ? ` · ${formatDuration(idleMs)}` : "";
+				const idle = liveTiming && idleMs >= 5_000 ? ` · ${formatDuration(idleMs)}` : "";
 				body.push(theme.fg("dim", `  ${tuiT("session.thinking")}${idle}`));
 			} else {
 				body.push(theme.fg("dim", `  ${tuiT("session.working")}`));
 			}
-		} else if (status === "stalled") {
+		} else if (status === "stalled" && liveTiming) {
 			body.push(theme.fg("error", `  ${tuiT("session.noActivity", {
 				duration: formatDuration(Math.max(0, now - row.lastActivityAt)),
 			})}`));
@@ -223,14 +231,21 @@ export function makeSessionDetailWidget(deps: SessionDetailDeps) {
 		render(width: number): string[] {
 			if (!deps.getVisible()) return [];
 			const maxRows = agentDetailRows(tui.terminal?.rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
-			return renderSessionDetail(
+			const renderWidth = Math.max(1, width - 1);
+			const rendered = renderSessionDetail(
 				deps.getAgents(),
 				deps.getViewingId(),
-				Math.max(1, width - 1),
+				renderWidth,
 				theme,
 				maxRows,
 				deps.getScroll?.(),
+				undefined,
+				{ liveTiming: false },
 			);
+			const fixed = rendered.length > 0
+				? rendered.slice(0, maxRows)
+				: [truncateToWidth(theme.fg("dim", `  ${tuiT("notice.noAgents")}`), renderWidth, "…")];
+			return [...fixed, ...Array.from({ length: maxRows - fixed.length }, () => "")];
 		},
 		invalidate(): void {},
 		dispose(): void {},

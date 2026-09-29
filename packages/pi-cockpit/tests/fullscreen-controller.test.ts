@@ -110,6 +110,18 @@ test("dynamic TUI references are left inactive and unwrapped", () => {
 	assert.doesNotThrow(() => reference.render(80));
 });
 
+test("controller becomes inactive when another owner replaces its render wrapper", () => {
+	const harness = makeHarness(() => buildLines([], EDITOR_BLOCK, CHROME));
+	const original = harness.tui.render;
+	const controller = createFullscreenController({});
+	controller.attach(harness.tui);
+	assert.equal(controller.isActive(), true);
+
+	harness.tui.render = original;
+	assert.equal(controller.isActive(), false, "editor markers must stop when the stripping wrapper is lost");
+	controller.dispose();
+});
+
 test("compose pads short transcript to exactly terminal rows with editor+chrome fixed at bottom", () => {
 	const transcript = ["a", "b", "c"];
 	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);

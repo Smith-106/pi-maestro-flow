@@ -6,7 +6,10 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentBar } from "../src/agent-bar.ts";
 import type { CockpitEndpoint } from "../src/endpoint-store.ts";
 import { SessionUiState } from "../src/session-ui-state.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import type { AgentRow } from "../src/types.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 /** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
 const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
@@ -73,27 +76,23 @@ const endpoints: CockpitEndpoint[] = [{
 	agentRow: row,
 }];
 
-test("Agent Bar renders chips with the selected session highlighted and per-chip unread badges, no status summary", () => {
+test("Teammate Rail renders one row with status glyphs, identities, localized state, and unread", () => {
 	const state = new SessionUiState();
 	state.reconcile("agent", endpoints, "root");
 	state.reconcile("agent", endpoints, "root");
-	const [line] = renderAgentBar(endpoints, state, 120, theme as Theme, {
+	const lines = renderAgentBar(endpoints, state, 120, theme as Theme, {
 		mainRunning: true,
 		now: 10_000,
 	});
-	assert.match(stripAnsi(line), new RegExp(`@main·${LOCAL_OWNER.slice(0, 6)}`));
-	assert.match(stripAnsi(line), /@builder/);
-	// The selected (root) chip is highlighted with the ▸ marker.
-	assert.match(stripAnsi(line), new RegExp(`▸ @main·${LOCAL_OWNER.slice(0, 6)}`));
-	// Unread stays as a per-chip badge, not a summary line.
-	assert.match(stripAnsi(line), /•1/);
-	// The removed right-edge summary (● @label · status · ctx N%) stays gone.
-	assert.doesNotMatch(stripAnsi(line), /●/);
-	assert.doesNotMatch(stripAnsi(line), /ctx/);
-	assert.doesNotMatch(stripAnsi(line), /running/);
+	assert.equal(lines.length, 1);
+	const plain = stripAnsi(lines[0]!);
+	assert.match(plain, new RegExp(`▸ ● @main·${LOCAL_OWNER.slice(0, 6)} · running`));
+	assert.match(plain, /● @builder •1$/);
+	// The removed right-edge status/metrics summary stays gone.
+	assert.doesNotMatch(plain, /ctx|tokens|tools/);
 });
 
-test("Agent Bar keeps a selected sleeping teammate in the accent color", () => {
+test("Teammate Rail keeps the selected marker distinct from the endpoint identity color", () => {
 	const sleeping = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? { ...endpoint, status: "sleeping" as const, agentRow: { ...row, status: "sleeping" as const } }
 		: endpoint);
@@ -104,8 +103,8 @@ test("Agent Bar keeps a selected sleeping teammate in the accent color", () => {
 		bold: (text) => text,
 	};
 	const line = renderAgentBar(sleeping, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
-	assert.match(line, /<accent>▸<\/accent> <accent>@builder<\/accent>/);
-	assert.doesNotMatch(line, /<muted>▸<\/muted>/);
+	assert.match(line, /<accent>▸<\/accent> <muted>○<\/muted> <muted>@builder<\/muted>/);
+	assert.match(line, / · sleeping/);
 });
 
 test("Agent Bar pans horizontally and keeps the selected chip visible when agents overflow", () => {
@@ -130,9 +129,9 @@ test("Agent Bar pans horizontally and keeps the selected chip visible when agent
 	const [line] = renderAgentBar(many, state, 60, theme as Theme, { now: 10_000 });
 	const plain = stripAnsi(line);
 	// The selection is always visible, at the right edge of the panned window.
-	assert.match(plain, /▸ @worker7/);
+	assert.match(plain, /▸ ● @worker7/);
 	// Both sides report what stays hidden; chips far left are out of view.
-	assert.match(plain, /◀4/);
+	assert.match(plain, /◀\d+/);
 	assert.match(plain, /2▶/);
 	assert.doesNotMatch(plain, /@main/);
 	assert.ok(visibleWidth(line) <= 60);
@@ -143,7 +142,7 @@ test("Agent Bar falls back to a highlighted chip when the selected id is stale",
 	state.reconcile("agent", endpoints, "root");
 	state.select("ghost");
 	const plain = stripAnsi(renderAgentBar(endpoints, state, 120, theme as Theme, { now: 10_000 })[0]);
-	assert.match(plain, /▸ @main/);
+	assert.match(plain, /▸ [^ ]+ @main/);
 });
 
 test("Agent Bar pans so every selection stays visible and highlighted at a fixed width", () => {
@@ -169,7 +168,7 @@ test("Agent Bar pans so every selection stays visible and highlighted at a fixed
 		state.select(endpoint.id);
 		const plain = stripAnsi(renderAgentBar(many, state, 60, theme as Theme, { now: 10_000 })[0]);
 		const label = endpoint.kind === "root" ? "main" : endpoint.label;
-		assert.match(plain, new RegExp(`▸ @${label}`), `selection ${endpoint.id}`);
+		assert.match(plain, new RegExp(`▸ [^ ]+ @${label}`), `selection ${endpoint.id}`);
 		// At the first chip nothing is hidden on the left; at the last, on the right.
 		if (index === 0) assert.doesNotMatch(plain, /◀/, `selection ${endpoint.id}`);
 		if (index === many.length - 1) assert.doesNotMatch(plain, /▶/, `selection ${endpoint.id}`);
@@ -183,12 +182,12 @@ test("Agent Bar renders every chip without markers when content plus the reserve
 	const wide = renderAgentBar(endpoints, state, 200, theme as Theme, { now: 10_000 })[0];
 	const exact = visibleWidth(wide);
 	const plain = stripAnsi(renderAgentBar(endpoints, state, exact + 1, theme as Theme, { now: 10_000 })[0]);
-	assert.match(plain, /▸ @builder/);
+	assert.match(plain, /▸ ● @builder/);
 	assert.match(plain, /@main/);
 	assert.doesNotMatch(plain, /◀|▶/);
 });
 
-test("Agent Bar is safe at widths 1 through 120 and never exceeds the width", () => {
+test("Teammate Rail is exactly one safe row at widths 1 through 120 and reserves the final column", () => {
 	const many: CockpitEndpoint[] = [
 		endpoints[0]!,
 		...Array.from({ length: 10 }, (_, index) => ({
@@ -208,10 +207,14 @@ test("Agent Bar is safe at widths 1 through 120 and never exceeds the width", ()
 	state.reconcile("agent", many, "root");
 	for (let width = 1; width <= 120; width++) {
 		state.select("agent7");
-		const [line] = renderAgentBar(many, state, width, theme as Theme, { now: 10_000 });
-		const liveWidth = Math.max(1, width - 1);
+		const lines = renderAgentBar(many, state, width, theme as Theme, { now: 10_000 });
+		assert.equal(lines.length, 1, `width ${width}`);
+		const line = lines[0]!;
+		const liveWidth = Math.max(0, width - 1);
 		assert.ok(visibleWidth(line) <= liveWidth, `width ${width}: ${visibleWidth(line)} > ${liveWidth}`);
 	}
+	assert.deepEqual(renderAgentBar(many, state, 1, theme as Theme, { now: 10_000 }), [""]);
+	assert.deepEqual(renderAgentBar([], new SessionUiState(), 1, theme as Theme, { now: 10_000 }), [""]);
 });
 
 test("Agent Bar shows the concise Alt+R Agent hint only when the surface is not covered by an overlay", () => {
@@ -242,26 +245,27 @@ test("Agent Bar renders the /artifact replacement hint in the requested accent c
 	assert.doesNotMatch(line, new RegExp(`${altRe("R")} list`));
 });
 
-test("Agent Bar appends the live tool to a running agent chip", () => {
+test("Teammate Rail uses the live tool name as its single suffix", () => {
 	const running = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? { ...endpoint, agentRow: { ...row, activeTool: "bash" } }
 		: endpoint);
 	const state = new SessionUiState();
 	state.reconcile("agent", running, "root");
 	const plain = stripAnsi(renderAgentBar(running, state, 120, theme as Theme, { now: 10_000 })[0]);
-	assert.match(plain, /@builder · bash/);
-	// The main chip (no agentRow) stays bare.
-	assert.doesNotMatch(plain, /@main ·/);
+	assert.match(plain, /@builder.* · bash/);
+	assert.doesNotMatch(plain, /@builder.* · bash.*running/);
+	assert.match(plain, /@main·[a-f0-9]+ · idle/);
 });
 
-test("Agent Bar appends the redacted args preview to the live tool", () => {
+test("Teammate Rail never exposes tool arguments", () => {
 	const running = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? { ...endpoint, agentRow: { ...row, activeTool: "bash", activeToolArgs: "command=git diff" } }
 		: endpoint);
 	const state = new SessionUiState();
 	state.reconcile("agent", running, "root");
 	const plain = stripAnsi(renderAgentBar(running, state, 120, theme as Theme, { now: 10_000 })[0]);
-	assert.match(plain, /@builder · bash command=git diff/);
+	assert.match(plain, /@builder.* · bash/);
+	assert.doesNotMatch(plain, /command=git diff/);
 });
 
 test("Agent Bar does not show a tool suffix on a sleeping agent", () => {
@@ -272,9 +276,10 @@ test("Agent Bar does not show a tool suffix on a sleeping agent", () => {
 	state.reconcile("agent", sleeping, "root");
 	const plain = stripAnsi(renderAgentBar(sleeping, state, 120, theme as Theme, { now: 10_000 })[0]);
 	assert.doesNotMatch(plain, /· bash/);
+	assert.match(plain, /@builder.* · sleeping/);
 });
 
-test("Agent Bar marks canonically stalled chips with a leading error bang", () => {
+test("Teammate Rail marks canonically stalled chips with an explicit error glyph and state", () => {
 	const stalled = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? {
 			...endpoint,
@@ -292,13 +297,67 @@ test("Agent Bar marks canonically stalled chips with a leading error bang", () =
 		}
 		: endpoint);
 	const state = new SessionUiState();
-	state.reconcile("agent", stalled, "root");
+	state.reconcile("agent", stalled, "agent");
 	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
 		fg: (color, text) => `<${color}>${text}</${color}>`,
 		bold: (text) => text,
 	};
 	const line = renderAgentBar(stalled, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
-	assert.match(line, /<error>!<\/error>.*@builder/);
+	assert.match(line, /<error>!<\/error> <error>@builder<\/error>.* · stalled/);
+});
+
+test("Teammate Rail renders pending, retrying, result-ready, and CLI status explicitly", () => {
+	const cases: Array<{ row: AgentRow; glyph: string; state?: string }> = [
+		{ row: { ...row, status: "pending" }, glyph: "○", state: "pending" },
+		{ row: { ...row, status: "retrying" }, glyph: "↻" },
+		{
+			row: {
+				...row,
+				resolvedModel: "cli/agy",
+				runtime: {
+					lifecycle: "running",
+					health: "healthy",
+					activity: "running",
+					toolActivity: "idle",
+					resultReady: true,
+				},
+			},
+			glyph: "✓",
+			state: "result ready",
+		},
+	];
+	for (const item of cases) {
+		const projected = endpoints.map((endpoint) => endpoint.kind === "agent"
+			? { ...endpoint, agentRow: item.row }
+			: endpoint);
+		const state = new SessionUiState();
+		state.reconcile("agent", projected, "agent");
+		const plain = stripAnsi(renderAgentBar(projected, state, 160, theme as Theme, { now: 10_000 })[0]);
+		assert.match(plain, new RegExp(`▸ ${item.glyph} @builder`));
+		if (item.state) assert.match(plain, new RegExp(`@builder.* · ${item.state}`));
+		else assert.doesNotMatch(plain, /@builder.* · /);
+	}
+	const resultReady = cases.at(-1)!;
+	const projected = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: resultReady.row }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", projected, "agent");
+	assert.match(stripAnsi(renderAgentBar(projected, state, 160, theme as Theme, { now: 10_000 })[0]), /@builder ⌘ cli · result ready/);
+});
+
+test("Teammate Rail localizes the non-live state suffix", () => {
+	const failed = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: { ...row, status: "failed" as const } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", failed, "agent");
+	cockpitTuiLocale.setLocale("zh-CN");
+	try {
+		assert.match(stripAnsi(renderAgentBar(failed, state, 120, theme as Theme, { now: 10_000 })[0]), /@builder · 失败/);
+	} finally {
+		cockpitTuiLocale.setLocale("en");
+	}
 });
 
 test("Agent Bar shows the completed check on a done agent", () => {
@@ -313,17 +372,17 @@ test("Agent Bar shows the completed check on a done agent", () => {
 		}
 		: endpoint);
 	const state = new SessionUiState();
-	state.reconcile("agent", done, "root");
+	state.reconcile("agent", done, "agent");
 	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
 		fg: (color, text) => `<${color}>${text}</${color}>`,
 		bold: (text) => text,
 	};
 	const line = renderAgentBar(done, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
-	assert.match(line, /<success> ✓<\/success>/);
+	assert.match(line, /<success>✓<\/success> <muted>@builder<\/muted>.* · done/);
 	assert.doesNotMatch(line, /<error>!/);
 });
 
-test("Agent Bar shows the failed cross with a truncated reason", () => {
+test("Teammate Rail shows the failed glyph and localized state without the error message", () => {
 	const failed = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? {
 			...endpoint,
@@ -345,10 +404,8 @@ test("Agent Bar shows the failed cross with a truncated reason", () => {
 		bold: (text) => text,
 	};
 	const line = renderAgentBar(failed, state, 200, taggedTheme as Theme, { now: 10_000 })[0];
-	assert.match(line, /<error> ✗ provider timeout:/);
-	assert.match(line, /provider timeout:/);
-	// The reason is bounded; the tail beyond the 24-char window is dropped.
-	assert.doesNotMatch(line, /x{40}/);
+	assert.match(line, /<error>✗<\/error> <error>@builder<\/error>.* · failed/);
+	assert.doesNotMatch(line, /provider timeout|x{10}/);
 });
 
 test("Agent Bar shows the terminated cross without a reason", () => {
@@ -363,13 +420,13 @@ test("Agent Bar shows the terminated cross without a reason", () => {
 		}
 		: endpoint);
 	const state = new SessionUiState();
-	state.reconcile("agent", terminated, "root");
+	state.reconcile("agent", terminated, "agent");
 	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
 		fg: (color, text) => `<${color}>${text}</${color}>`,
 		bold: (text) => text,
 	};
 	const line = renderAgentBar(terminated, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
-	assert.match(line, /<warning> ✗<\/warning>/);
+	assert.match(line, /<warning>✗<\/warning> <muted>@builder<\/muted>.* · terminated/);
 });
 
 test("Agent Bar hides the previous turn outcome while the agent is live again", () => {
@@ -392,23 +449,24 @@ test("Agent Bar hides the previous turn outcome while the agent is live again", 
 		bold: (text) => text,
 	};
 	const line = renderAgentBar(restarted, state, 200, taggedTheme as Theme, { now: 10_000 })[0];
-	assert.doesNotMatch(line, / ✗ old failure/);
-	assert.doesNotMatch(line, /<error> ✗/);
+	assert.doesNotMatch(line, /old failure/);
+	assert.doesNotMatch(line, /<error>✗/);
 	assert.match(line, /@builder/);
 });
 
-test("Agent Bar appends selected-session tool/token metrics when width allows", () => {
+test("Teammate Rail never appends selected-session tool/token metrics", () => {
 	const withMetrics = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? { ...endpoint, agentRow: { ...row, toolCount: 3, tokens: 1_200 } }
 		: endpoint);
 	const state = new SessionUiState();
 	state.reconcile("agent", withMetrics, "agent");
 	const plain = stripAnsi(renderAgentBar(withMetrics, state, 120, theme as Theme, { now: 10_000 })[0]);
-	assert.match(plain, /3 .*tools|3 .*工具/);
-	assert.match(plain, /1\.2k/);
+	assert.doesNotMatch(plain, /tools|工具|1\.2k/);
+	assert.match(plain, /@builder/);
+	assert.doesNotMatch(plain, /@builder.* · /);
 });
 
-test("Agent Bar preserves status, active tool, and metrics for a read-only external chip", () => {
+test("Teammate Rail preserves status and active tool for a read-only external chip without detail telemetry", () => {
 	const external: CockpitEndpoint = {
 		id: "external",
 		logicalKey: "external:ssh-gateway:remote-1",
@@ -437,17 +495,17 @@ test("Agent Bar preserves status, active tool, and metrics for a read-only exter
 	const state = new SessionUiState();
 	state.reconcile("agent", projected, "external");
 	const plain = stripAnsi(renderAgentBar(projected, state, 160, theme as Theme, { now: 10_000 })[0]);
-	assert.match(plain, /!▸ @remote-builder/);
-	assert.doesNotMatch(plain, /command=git status/, "stalled agents do not advertise a live tool");
-	assert.match(plain, /4 .*tools|4 .*工具/);
-	assert.match(plain, /2\.5k/);
+	assert.match(plain, /▸ ! @remote-builder · stalled/);
+	assert.doesNotMatch(plain, /command=git status|tools|2\.5k/);
 
 	const running = [{ ...external, externalAgent: { ...external.externalAgent!, status: "running" as const } }];
 	state.reconcile("agent", running, "external");
-	assert.match(stripAnsi(renderAgentBar(running, state, 160, theme as Theme, { now: 10_000 })[0]), /@remote-builder · bash command=git status/);
+	const runningPlain = stripAnsi(renderAgentBar(running, state, 160, theme as Theme, { now: 10_000 })[0]);
+	assert.match(runningPlain, /@remote-builder · bash/);
+	assert.doesNotMatch(runningPlain, /command=git status/);
 });
 
-test("Agent Bar drops the metrics summary before the chips when width is tight", () => {
+test("Teammate Rail omits metrics at narrow widths while keeping the selected identity", () => {
 	const withMetrics = endpoints.map((endpoint) => endpoint.kind === "agent"
 		? { ...endpoint, agentRow: { ...row, toolCount: 3, tokens: 1_200 } }
 		: endpoint);

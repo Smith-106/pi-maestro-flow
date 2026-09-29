@@ -32,6 +32,13 @@ export interface AgentWidgetDeps {
 	setScroll?: (next: AgentScrollState) => void;
 }
 
+export interface ActiveAgentWidgetDeps {
+	getAgents: () => AgentRow[];
+	getConfig: () => CockpitConfig;
+	/** Optional override for focused tests or hosts with a shared row budget. */
+	getRowBudget?: (terminalRows: number | undefined) => number | undefined;
+}
+
 const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
 // The TUI exposes the live terminal size, but a widget must never fail to render
@@ -62,6 +69,23 @@ export function visibleAgentRows(rows: AgentRow[]): AgentRow[] {
 		}
 		return parent === row.parentCorrelationId ? row : { ...row, parentCorrelationId: parent };
 	});
+}
+
+export function activeAgentTreeRows(rows: AgentRow[]): AgentRow[] {
+	const visible = visibleAgentRows(rows);
+	const byId = new Map(visible.map((row) => [row.correlationId, row]));
+	const required = new Set<string>();
+	for (const row of visible) {
+		if (row.status !== "running" && row.status !== "retrying") continue;
+		let current: AgentRow | undefined = row;
+		const visited = new Set<string>();
+		while (current && !visited.has(current.correlationId)) {
+			visited.add(current.correlationId);
+			required.add(current.correlationId);
+			current = current.parentCorrelationId ? byId.get(current.parentCorrelationId) : undefined;
+		}
+	}
+	return visible.filter((row) => required.has(row.correlationId));
 }
 
 // Todo widget: pinned above the editor (setWidget "cockpit-stack", aboveEditor).
@@ -98,6 +122,56 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 }
 
 // Agent widget: pinned below the editor, near the input box (setWidget "cockpit-agents", belowEditor).
+export function makeActiveAgentWidget(deps: ActiveAgentWidgetDeps) {
+	return (tui: TUI, theme: Theme) => {
+		const paint: PaintTheme = theme;
+		const memo = memoizedLines();
+		return {
+			render(width: number): string[] {
+				const cfg = deps.getConfig();
+				const rawRows = deps.getAgents();
+				const activeRows = activeAgentTreeRows(rawRows);
+				if (activeRows.length === 0) return [];
+
+				const terminalHeight = terminalRows(tui);
+				const requestedBudget = deps.getRowBudget?.(terminalHeight) ?? panelRows(terminalHeight) ?? 3;
+				const rowBudget = Math.max(1, Math.floor(requestedBudget));
+				const liveWidth = Math.max(1, width - 1);
+				const roster = visibleAgentRows(rawRows);
+				const contextRows = cfg.quietMode
+					? roster.map((row) => (row.tail ? { ...row, tail: "" } : row))
+					: roster;
+				const visibleIds = new Set(activeRows.map((row) => row.correlationId));
+				const rows = contextRows.filter((row) => visibleIds.has(row.correlationId));
+				const g = resolveGlyphs(cfg.icons.mode);
+				const projectionNow = contextRows.reduce(
+					(latest, row) => Math.max(latest, row.finishedAt ?? row.lastActivityAt, row.startedAt),
+					0,
+				);
+				const key = [
+					liveWidth, rowBudget, refId(paint), cfg.icons.mode, cfg.quietMode,
+					agentRowsKey(contextRows),
+				].join(";");
+				return memo(key, () => {
+					const lines = renderAgents(rows, "list", liveWidth, paint, UTILS, {
+						glyphs: g,
+						spin: g.dotRunning,
+						now: projectionNow,
+						maxRows: rowBudget,
+						hideLiveDuration: true,
+						agentContextRows: contextRows,
+						withHead: false,
+					});
+					return [...lines, ...Array.from({ length: Math.max(0, rowBudget - lines.length) }, () => "")]
+						.slice(0, rowBudget);
+				});
+			},
+			invalidate(): void {},
+			dispose(): void {},
+		};
+	};
+}
+
 export function makeAgentWidget(deps: AgentWidgetDeps) {
 	return (tui: TUI, theme: Theme) => {
 		const paint: PaintTheme = theme;

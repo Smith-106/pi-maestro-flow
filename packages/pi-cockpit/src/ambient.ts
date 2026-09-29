@@ -23,6 +23,10 @@ export interface AmbientState {
 	hideLiveDuration?: boolean;
 	/** Separator glyph between label and elapsed time (e.g. " · "). */
 	separator?: string;
+	/** Parenthesized suffix appended after the elapsed (e.g. an interrupt hint). */
+	hint?: string;
+	/** Live output-token rate label (e.g. "45 tok/s"), shown while streaming. */
+	tokenRate?: string;
 	/** Session summary — the session_info name, else a short session id. */
 	session?: string;
 	/** Active model short id. */
@@ -59,20 +63,11 @@ export function nextUiPromptDepth(depth: number, event: "start" | "end"): number
 	return event === "start" ? depth + 1 : Math.max(0, depth - 1);
 }
 
-export function shouldHideWorkingDuration(
-	mode: "regular" | "fullscreen" | undefined,
-	staticMode: boolean,
-): boolean {
-	// Pi's regular renderer shares scrollback between the transcript and status
-	// row, so a moving live timer can be preserved as transcript height changes.
-	return staticMode || mode !== "fullscreen";
-}
-
 /**
  * The streaming working line.
  *
- * Cockpit hides the host indicator and renders the active state. Fullscreen may
- * add a live elapsed value; the regular main screen keeps this row stable.
+ * Cockpit hides the host indicator and renders the active state with a live
+ * elapsed value. Static mode keeps the row stable by omitting the timer.
  */
 export function workingMessage(state: AmbientState, now = Date.now()): string | undefined {
 	const label = state.waitingForInput
@@ -80,10 +75,14 @@ export function workingMessage(state: AmbientState, now = Date.now()): string | 
 		: state.activeTool ?? (state.running ? tuiT("ambient.working") : undefined);
 	if (!label) return undefined;
 	const sep = state.separator ?? " ";
-	const text = (state.waitingForInput || state.hideLiveDuration || state.workingStartedAt === undefined)
-		? label
-		: `${label}${sep}${formatThinkingDuration(now - state.workingStartedAt)}`;
-	return `\x1b[3m${text}\x1b[23m`;
+	const parts = [label];
+	if (!state.waitingForInput && !state.hideLiveDuration && state.workingStartedAt !== undefined) {
+		parts.push(formatThinkingDuration(now - state.workingStartedAt));
+		if (state.tokenRate) parts.push(state.tokenRate);
+	}
+	let text = parts.join(sep);
+	if (state.hint) text += ` (${state.hint})`;
+	return text;
 }
 
 /** Composition options for titleFor. */

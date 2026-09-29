@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import { makeAgentWidget, makeTodoWidget } from "../src/stack-widget.ts";
+import { makeActiveAgentWidget, makeAgentWidget, makeTodoWidget } from "../src/stack-widget.ts";
 import { DEFAULT_TOGGLE_HINT } from "../src/render.ts";
 import { makeSessionDetailWidget } from "../src/session-detail.ts";
 import { DEFAULT_CONFIG, type AgentRow, type TodoItem } from "../src/types.ts";
@@ -119,6 +119,106 @@ test("agent-area widget stays hidden when there are no teammates", () => {
 	})(tui, theme);
 	const lines = component.render(100);
 	assert.deepEqual(lines, []);
+});
+
+test("active-agent tree keeps required ancestors, dependency arrows, and a fixed height", () => {
+	const row = (overrides: Partial<AgentRow>): AgentRow => ({
+		correlationId: "parent",
+		agent: "executor",
+		name: "parent",
+		role: "executor",
+		task: "parent task",
+		status: "done",
+		tail: "",
+		startedAt: 1,
+		finishedAt: ACTIVE_AT,
+		lastActivityAt: ACTIVE_AT,
+		...overrides,
+	});
+	const rows = [
+		row({ taskIndex: 0 }),
+		row({ correlationId: "inactive-sibling", name: "sibling", task: "inactive sibling" }),
+		row({
+			correlationId: "child",
+			parentCorrelationId: "parent",
+			name: "child",
+			task: "active child",
+			status: "running",
+			taskIndex: 1,
+			dependencies: [0],
+			finishedAt: undefined,
+			lastActivityAt: ACTIVE_AT + 1,
+		}),
+	];
+	const component = makeActiveAgentWidget({
+		getAgents: () => rows,
+		getConfig: () => ({ ...DEFAULT_CONFIG, icons: { mode: "nerd" } }),
+		getRowBudget: () => 4,
+	})(tui, theme);
+
+	const lines = component.render(120);
+	assert.equal(lines.length, 4, "active panels keep their allocated height");
+	assert.ok(lines.some((line) => line.includes("parent task")), "inactive parent is retained for hierarchy");
+	const childLine = lines.find((line) => line.includes("active child"));
+	assert.ok(childLine);
+	assert.match(childLine, /^  └─/, "active descendant remains nested under its parent");
+	assert.match(childLine, /← @parent/, "dependency flow remains a separate labelled segment");
+	assert.ok(!lines.some((line) => line.includes("inactive sibling")), "unrelated inactive rows are omitted");
+	assert.deepEqual(lines.slice(2), ["", ""], "unused budget is padded rather than collapsed");
+});
+
+test("active-agent tree collapses only when the active set becomes empty", () => {
+	let status: AgentRow["status"] = "done";
+	const component = makeActiveAgentWidget({
+		getAgents: () => [{
+			correlationId: "worker",
+			agent: "executor",
+			name: "worker",
+			role: "executor",
+			task: "work",
+			status,
+			tail: "",
+			startedAt: 1,
+			finishedAt: ACTIVE_AT,
+			lastActivityAt: ACTIVE_AT,
+		}],
+		getConfig: () => DEFAULT_CONFIG,
+		getRowBudget: () => 3,
+	})(tui, theme);
+
+	assert.deepEqual(component.render(80), []);
+	status = "running";
+	assert.equal(component.render(80).length, 3);
+	status = "done";
+	assert.deepEqual(component.render(80), []);
+});
+
+test("active-agent overflow marker counts inside the fixed row budget without reading the clock", () => {
+	const rows: AgentRow[] = Array.from({ length: 5 }, (_, index) => ({
+		correlationId: `worker-${index}`,
+		agent: "executor",
+		name: `worker-${index}`,
+		role: "executor",
+		task: ["alpha", "beta", "gamma", "delta", "epsilon"][index],
+		status: "running",
+		tail: "",
+		startedAt: 1,
+		lastActivityAt: ACTIVE_AT + index,
+	}));
+	const component = makeActiveAgentWidget({
+		getAgents: () => rows,
+		getConfig: () => DEFAULT_CONFIG,
+		getRowBudget: () => 3,
+	})(tui, theme);
+	const originalNow = Date.now;
+	Date.now = () => { throw new Error("active widget must be event-driven"); };
+	try {
+		const lines = component.render(80);
+		assert.equal(lines.length, 3);
+		assert.match(lines[2], /3 more/, "overflow marker consumes the final budget row");
+	} finally {
+		Date.now = originalNow;
+	}
 });
 
 test("live agent rows reserve the terminal's final column", () => {

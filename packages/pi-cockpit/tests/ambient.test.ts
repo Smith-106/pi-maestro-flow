@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
 	AmbientSurfaceCache,
 	nextUiPromptDepth,
-	shouldHideWorkingDuration,
 	statusText,
 	titleFor,
 	workingMessage,
@@ -55,26 +54,26 @@ test("workingMessage shows only the active foreground tool name without a start 
 		activeTool: "edit",
 		todos: [todo({ status: "in_progress", subject: "ship the widget" })],
 		agents: [agent({ role: "reviewer", activeTool: "grep" })],
-	})), "\x1b[3medit\x1b[23m");
+	})), "edit");
 });
 
 test("workingMessage renders the active state with a thinking-style elapsed", () => {
-	assert.equal(workingMessage(state({ running: true, workingStartedAt: 1_000 }), 4_200), "\x1b[3mworking 3.2s\x1b[23m");
+	assert.equal(workingMessage(state({ running: true, workingStartedAt: 1_000 }), 4_200), "working 3.2s");
 	assert.equal(workingMessage(state({
 		running: true,
 		activeTool: "teammate-wait",
 		workingStartedAt: 1_000,
-	}), 66_400), "\x1b[3mteammate-wait 1m05s\x1b[23m");
+	}), 66_400), "teammate-wait 1m 05s");
 });
 
 test("workingMessage uses the separator glyph between label and elapsed", () => {
-	assert.equal(workingMessage(state({ running: true, workingStartedAt: 1_000, separator: " · " }), 4_200), "\x1b[3mworking · 3.2s\x1b[23m");
+	assert.equal(workingMessage(state({ running: true, workingStartedAt: 1_000, separator: " · " }), 4_200), "working · 3.2s");
 	assert.equal(workingMessage(state({
 		running: true,
 		activeTool: "observe",
 		workingStartedAt: 1_000,
 		separator: " · ",
-	}), 37_000), "\x1b[3mobserve · 36s\x1b[23m");
+	}), 37_000), "observe · 36s");
 });
 
 test("workingMessage omits a frozen elapsed in static mode", () => {
@@ -84,27 +83,47 @@ test("workingMessage omits a frozen elapsed in static mode", () => {
 		workingStartedAt: 1_000,
 		hideLiveDuration: true,
 	});
-	assert.equal(workingMessage(staticState, 4_200), "\x1b[3mteammate-wait\x1b[23m");
-	assert.equal(workingMessage(staticState, 66_400), "\x1b[3mteammate-wait\x1b[23m");
+	assert.equal(workingMessage(staticState, 4_200), "teammate-wait");
+	assert.equal(workingMessage(staticState, 66_400), "teammate-wait");
 });
 
-test("regular main-screen working rows stay stable while fullscreen keeps live duration", () => {
-	assert.equal(shouldHideWorkingDuration("regular", false), true);
-	assert.equal(shouldHideWorkingDuration(undefined, false), true);
-	assert.equal(shouldHideWorkingDuration("fullscreen", false), false);
-	assert.equal(shouldHideWorkingDuration("fullscreen", true), true);
-
+test("dynamic working rows show live duration on the regular main screen", () => {
 	const regular = state({
 		running: true,
 		activeTool: "teammate",
 		workingStartedAt: 1_000,
-		hideLiveDuration: shouldHideWorkingDuration("regular", false),
+		hideLiveDuration: false,
 	});
-	assert.equal(workingMessage(regular, 4_200), "\x1b[3mteammate\x1b[23m");
-	assert.equal(workingMessage(regular, 66_400), "\x1b[3mteammate\x1b[23m");
+	assert.equal(workingMessage(regular, 4_200), "teammate 3.2s");
+	assert.equal(workingMessage(regular, 66_400), "teammate 1m 05s");
+});
 
-	const fullscreen = { ...regular, hideLiveDuration: shouldHideWorkingDuration("fullscreen", false) };
-	assert.equal(workingMessage(fullscreen, 66_400), "\x1b[3mteammate 1m05s\x1b[23m");
+test("workingMessage appends the hint in parentheses and the token rate after elapsed", () => {
+	const streaming = state({
+		running: true,
+		workingStartedAt: 1_000,
+		separator: " · ",
+		hint: "esc to interrupt",
+		tokenRate: "45 tok/s",
+	});
+	assert.equal(workingMessage(streaming, 20_000), "working · 19s · 45 tok/s (esc to interrupt)");
+	assert.equal(
+		workingMessage(state({ running: true, workingStartedAt: 1_000, separator: " · ", tokenRate: "45 tok/s" }), 20_000),
+		"working · 19s · 45 tok/s",
+	);
+	assert.equal(
+		workingMessage(state({ running: true, workingStartedAt: 1_000, separator: " · ", hint: "esc to interrupt" }), 20_000),
+		"working · 19s (esc to interrupt)",
+	);
+	// No elapsed (waiting / static / no start) means no rate, but the hint stays.
+	assert.equal(
+		workingMessage(state({ running: true, waitingForInput: true, hint: "esc to interrupt", tokenRate: "9 tok/s" }), 20_000),
+		"WAITING FOR INPUT (esc to interrupt)",
+	);
+	assert.equal(
+		workingMessage(state({ running: true, workingStartedAt: 1_000, hideLiveDuration: true, tokenRate: "9 tok/s" }), 20_000),
+		"working",
+	);
 });
 
 test("UI prompt depth nests, saturates at zero, and projects a waiting state without ending the turn", () => {
@@ -123,7 +142,7 @@ test("UI prompt depth nests, saturates at zero, and projects a waiting state wit
 		workingStartedAt: 1_000,
 		cwd: "~/w",
 	});
-	assert.equal(workingMessage(waiting, 66_400), "\x1b[3mWAITING FOR INPUT\x1b[23m");
+	assert.equal(workingMessage(waiting, 66_400), "WAITING FOR INPUT");
 	assert.equal(titleFor(waiting, MARKS), "pi - ~/w - WAITING FOR INPUT");
 	assert.equal(waiting.running, true, "waiting does not end the agent lifecycle");
 });

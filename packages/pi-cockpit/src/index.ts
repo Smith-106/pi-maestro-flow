@@ -1,7 +1,7 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, keyText, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -17,7 +17,7 @@ import {
 	type MessagePayload,
 	type StartedPayload,
 } from "./agents-store.ts";
-import { AmbientSurfaceCache, nextUiPromptDepth, shouldHideWorkingDuration, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
+import { AmbientSurfaceCache, nextUiPromptDepth, statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
@@ -55,8 +55,7 @@ import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts"
 import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
 import { TodoStore } from "./todo-store.ts";
-import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
-import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
+import { activeAgentTreeRows, makeActiveAgentWidget, makeTodoWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
 import { agentSessionColor, assignedAgentColor, makeAgentBarWidget, SESSION_BAR_WIDGET_KEY } from "./session-bar.ts";
 import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY } from "./session-detail.ts";
 import {
@@ -78,7 +77,7 @@ import {
 	type WindowAutocompleteTarget,
 } from "./window-autocomplete.ts";
 import { makeWindowThreadWidget } from "./window-thread-view.ts";
-import { agentPanelRows, panelRows } from "./viewport.ts";
+import { panelRows } from "./viewport.ts";
 import { createZenBrowseController, type ZenBrowseController } from "./zen-browse.ts";
 import { buildZenStack } from "./zen-render.ts";
 import {
@@ -440,9 +439,6 @@ export default function (pi: ExtensionAPI): void {
 	let activeZenSheet: { finalize(): void } | undefined;
 	let activeBashBgOverlay: BashBgOverlay | undefined;
 	let activeTodoOverlay: TodoOverlay | undefined;
-	/** Agent activity temporarily wins vertical space without rewriting Todo preference. */
-	let agentPriorityActive = false;
-	let todoExpandedOverAgents = false;
 	// Finalizer for the currently open legacy settings overlay, so a session
 	// boundary can tear it down even when the host hides it without calling
 	// component.dispose() (MW-2).
@@ -466,15 +462,18 @@ export default function (pi: ExtensionAPI): void {
 	let todoOverlayShortcutDisposer: (() => void) | undefined;
 	/** Disposer for the session ←/→ navigation hook (per applyUi). */
 	let sessionBarNavDisposer: (() => void) | undefined;
-	/** Disposer for the agent-list Shift+↑/↓ scroll hook (per applyUi). */
-	let agentScrollDisposer: (() => void) | undefined;
-	/** Scroll window over the below-input agent roster (tail-following default). */
-	let agentListScroll: AgentScrollState = { offset: 0, following: true };
 	let lastPublishedInputTarget: string | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
+	let activeAgentWidgetMounted = false;
 	let running = false;
 	let runningStartedAt: number | undefined;
+	/** True while the current assistant message is still streaming. */
+	let assistantStreaming = false;
+	/** Latest measured output-token rate label for the working line. */
+	let tokenRate: string | undefined;
+	/** Last usage sample the rate was computed from. */
+	let ratePrev: { output: number; at: number } | undefined;
 	let uiPromptDepth = 0;
 	// Auto-generated session title from the first turn (the rule-based / LLM
 	// stand-in for Claude Code's Haiku title). Cleared per session.
@@ -563,6 +562,24 @@ export default function (pi: ExtensionAPI): void {
 		}
 		return TITLE_STATIC;
 	};
+	/** Compact tokens/s label for the working line. */
+	function formatTokenRate(perSecond: number): string {
+		if (!Number.isFinite(perSecond) || perSecond <= 0) return "";
+		return perSecond >= 1000 ? `${(perSecond / 1000).toFixed(1)}k tok/s` : `${Math.round(perSecond)} tok/s`;
+	}
+
+	/** "esc to interrupt" hint with the resolved app.interrupt key. */
+	const interruptHint = (): string | undefined => {
+		try {
+			const keys = keyText("app.interrupt");
+			if (!keys) return undefined;
+			const display = keys.split("/").map((key) => (key === "escape" ? "esc" : key)).join("/");
+			return tuiT("ambient.interruptHint", { keys: display });
+		} catch {
+			return undefined;
+		}
+	};
+
 	const refreshAmbient = (now = Date.now()): void => {
 		const ctx = lastCtx;
 		if (!ctx || !isTuiContext(ctx)) return;
@@ -584,8 +601,10 @@ export default function (pi: ExtensionAPI): void {
 				cwd: title.showCwd ? formatCwd(ctx.sessionManager.getCwd()) : undefined,
 				activeTool: activeTool?.name,
 				workingStartedAt: activeTool?.startedAt ?? runningStartedAt,
-				hideLiveDuration: shouldHideWorkingDuration(capturedTui?.mode, config.staticMode),
+				hideLiveDuration: config.staticMode,
 				separator: ` ${g.separator} `,
+				hint: interruptHint(),
+				tokenRate: assistantStreaming ? tokenRate : undefined,
 			};
 			ambientSurfaces.setWorkingMessage((message) => ctx.ui.setWorkingMessage(message), workingMessage(state, now));
 			if (title.enabled) {
@@ -609,27 +628,10 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
-	// Agent presence changes the effective Todo layout, but never the persisted
-	// preference. An explicit Todo toggle during activity temporarily wins.
-	const syncAgentPriorityState = (): boolean => {
-		const next = visibleAgentRows(agents.snapshot()).length > 0;
-		if (next === agentPriorityActive) return false;
-		agentPriorityActive = next;
-		todoExpandedOverAgents = false;
-		if (!next) agentListScroll = { offset: 0, following: true };
-		return true;
-	};
-	const effectiveTodoExpanded = (): boolean =>
-		config.todoExpanded && (!agentPriorityActive || todoExpandedOverAgents);
+	const effectiveTodoExpanded = (): boolean => config.todoExpanded;
 
 	const renderContentKey = (now: number): string => {
-		const agentState = agents.snapshot().map((row) => {
-			const status = effectiveAgentStatus(row, now);
-			const liveElapsed = !config.staticMode && (row.status === "running" || row.status === "retrying")
-				? Math.max(0, Math.floor((now - row.startedAt) / 1000))
-				: undefined;
-			return [row.correlationId, status, liveElapsed];
-		});
+		const agentState = agents.snapshot().map((row) => [row.correlationId, effectiveAgentStatus(row, now)]);
 		const jobs = bashBg.snapshot();
 		const jobState = jobs.map((job) => {
 			const live = job.status === "running" || job.status === "stopping";
@@ -684,10 +686,8 @@ export default function (pi: ExtensionAPI): void {
 			lastRenderContentKey = contentKey ?? renderContentKey(now);
 			const refreshAmbientSurface = ambientRefreshPending;
 			ambientRefreshPending = false;
-			const agentPriorityChanged = syncAgentPriorityState();
 			publishInputTarget();
 			if (refreshAmbientSurface) refreshAmbient(now);
-			if (agentPriorityChanged) publishUiOwnership();
 			try {
 				requestCapturedRender();
 				activeAgentOverlayRender?.();
@@ -751,6 +751,7 @@ export default function (pi: ExtensionAPI): void {
 					req(renderContentKey(now), false);
 				}
 			} else {
+				if (agentsPruned) req();
 				syncTick();
 			}
 		}, ANIMATION_PERIOD_MS);
@@ -769,33 +770,48 @@ export default function (pi: ExtensionAPI): void {
 	const emitMaestroQuery = (): void => {
 		pi.events.emit(COCKPIT_MAESTRO_QUERY_EVENT, { version: MAESTRO_UI_SNAPSHOT_VERSION });
 	};
-	const publishUiOwnership = (): void => {
-		const ownsDock = surfaceState === "dock";
-		const ownership: CockpitUiOwnershipV1 = {
-			todo: config.enabled,
-			agents: config.enabled && config.hideNativeAgents,
-			sessionList: config.enabled,
-			footer: config.enabled,
+	// Config expresses intent; this claim records that Cockpit is actually ready
+	// to own the live UI. Consumers must never suppress their fallback merely
+	// because an enabled config was loaded before Cockpit mounted anything.
+	let uiOwnershipClaimed = false;
+	const uiOwnershipSnapshot = (): CockpitUiOwnershipV1 => {
+		const ownsDock = uiOwnershipClaimed && surfaceState === "dock";
+		return {
+			todo: uiOwnershipClaimed,
+			agents: uiOwnershipClaimed && config.hideNativeAgents,
+			sessionList: uiOwnershipClaimed,
+			footer: uiOwnershipClaimed,
 			sidebar: ownsDock,
 			goal: ownsDock,
 			todoExpanded: effectiveTodoExpanded(),
 			todoDurationChart: config.todoDurationChart,
-			quiet: config.enabled && config.quietMode,
+			quiet: uiOwnershipClaimed && config.quietMode,
 			quietSymbols: config.quietSymbols,
 			static: config.staticMode,
 		};
-		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, ownership);
 	};
+	const publishUiOwnership = (): void => {
+		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, uiOwnershipSnapshot());
+	};
+	// The query responder is extension-lifetime infrastructure, independent from
+	// session data subscriptions. Register it during factory initialization so a
+	// Teammate loaded first can synchronously re-query at session_start.
+	let ownershipQueryDisposer: (() => void) | undefined;
+	const ensureOwnershipQueryResponder = (): void => {
+		ownershipQueryDisposer ??= pi.events.on(COCKPIT_UI_OWNERSHIP_QUERY_EVENT, publishUiOwnership);
+	};
+	const disposeOwnershipQueryResponder = (): void => {
+		try { ownershipQueryDisposer?.(); } catch { /* best effort */ }
+		ownershipQueryDisposer = undefined;
+	};
+	ensureOwnershipQueryResponder();
+	// Factory load does not imply readiness. Advertise the effective released
+	// state immediately so earlier subscribers converge without guessing config.
+	publishUiOwnership();
 	const setTodoExpanded = (expanded: boolean): void => {
-		syncAgentPriorityState();
-		const configChanged = config.todoExpanded !== expanded;
-		const overrideChanged = agentPriorityActive && todoExpandedOverAgents !== expanded;
-		if (!configChanged && !overrideChanged) return;
-		if (agentPriorityActive) todoExpandedOverAgents = expanded;
-		if (configChanged) {
-			config = { ...config, todoExpanded: expanded };
-			saveConfig(config);
-		}
+		if (config.todoExpanded === expanded) return;
+		config = { ...config, todoExpanded: expanded };
+		saveConfig(config);
 		publishUiOwnership();
 		req();
 	};
@@ -839,11 +855,14 @@ export default function (pi: ExtensionAPI): void {
 	const sessionListOverlayActive = (): boolean =>
 		capturingOverlayActive || ambientKeysShouldYield(capturedTui);
 
-	const clearWidgets = (ctx: ExtensionContext): void => {
+	const clearWidgets = (ctx: ExtensionContext, clearAgents = true): void => {
 		zenBrowseController?.end();
 		zenNavRows = [];
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
-		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
+		if (clearAgents) {
+			ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
+			activeAgentWidgetMounted = false;
+		}
 	};
 
 	const sessionRegistry = (): SessionHostRegistryLike | undefined => {
@@ -1121,11 +1140,12 @@ export default function (pi: ExtensionAPI): void {
 		}
 		ctx.ui.setEditorComponent(createCockpitClaudeEditorFactory({
 			doubleEscapeClearInput: config.doubleEscapeClearInput,
-			emitEditorMarkers: config.fullscreenInput,
+			emitEditorMarkers: () => fullscreenController?.isActive() ?? false,
 			isBusy: () => running || Boolean(activeSettingsOverlay),
 			getEntries: config.historyEnabled ? () => historyStore?.list() ?? [] : undefined,
 			record: config.historyEnabled ? (text) => historyStore?.record(text) : undefined,
 			getRouteTarget: () => editorRouteTarget,
+			workingStatusPaint: (text) => ctx.ui.theme.fg("muted", text),
 			onEditor: (editor) => {
 				activeClaudeEditor = editor;
 			},
@@ -1149,34 +1169,6 @@ export default function (pi: ExtensionAPI): void {
 		claudeEditorInstalled = false;
 	};
 
-	// Re-register the agents widget at the placement that fits the current mode:
-	// fullscreen scrolls it with the transcript (aboveEditor); normal mode keeps
-	// it fixed below the editor. Idempotent; safe to call from install/clear.
-	const syncAgentWidgetPlacement = (ctx: ExtensionContext, placement: "aboveEditor" | "belowEditor"): void => {
-		ctx.ui.setWidget(AGENT_WIDGET_KEY, (tui, theme) => {
-			capturedTui = tui;
-			ensureViewportStability(tui);
-			return makeAgentWidget({
-				// The Zen stack absorbs the roster into its ACTORS section; an empty
-				// roster makes makeAgentWidget render zero rows, so the widget slot
-				// stays registered (placement bookkeeping) without duplicating rows.
-				getAgents: () => config.stackStyle === "zen" || sessionUi.mode === "window" ? [] : agents.snapshot(),
-				getConfig: () => config,
-				isRunning: () => running,
-				isAnimating,
-				hasSessionDetail: () => {
-					const endpoint = selectedEndpoint();
-					return sessionUi.mode === "agent" && endpoint?.kind === "agent" && sessionUi.endpoint(endpoint.id).detail;
-				},
-				getScroll: () => agentListScroll,
-				setScroll: (next) => {
-					agentListScroll = next;
-					req();
-				},
-			})(tui, theme);
-		}, { placement });
-	};
-
 	const installFullscreen = (ctx: ExtensionContext): void => {
 		if (fullscreenController || !config.fullscreenInput) return;
 		// Markers are emitted by the Cockpit custom editor; without it fullscreen
@@ -1197,13 +1189,17 @@ export default function (pi: ExtensionAPI): void {
 				"warning",
 			),
 		});
+		// The editor reads this controller's live state before emitting its layout
+		// sentinels, so rejected or lost render wrappers can never leak marker text.
+		fullscreenController = controller;
 		ctx.ui.setWidget(
 			COCKPIT_FULLSCREEN_WIDGET_KEY,
 			(tui) => {
 				capturedTui = tui;
 				try {
 					controller.attach(tui);
-					reportPatch("fullscreen", true);
+					const active = controller.isActive();
+					reportPatch("fullscreen", active, active ? undefined : "attach-inactive");
 				} catch (error) {
 					reportPatch("fullscreen", false, error instanceof Error ? error.message : "attach-error");
 				}
@@ -1211,8 +1207,6 @@ export default function (pi: ExtensionAPI): void {
 			},
 			{ placement: "aboveEditor" },
 		);
-		syncAgentWidgetPlacement(ctx, "aboveEditor");
-		fullscreenController = controller;
 	};
 
 	const clearFullscreen = (ctx: ExtensionContext): void => {
@@ -1220,7 +1214,6 @@ export default function (pi: ExtensionAPI): void {
 		const controller = fullscreenController;
 		fullscreenController = undefined;
 		controller?.dispose();
-		if (config.enabled) syncAgentWidgetPlacement(ctx, "belowEditor");
 	};
 
 	const sessionBarHint = () => {
@@ -1230,6 +1223,14 @@ export default function (pi: ExtensionAPI): void {
 			: tuiT(sessionUi.mode === "agent" ? "session.agentListHint" : "session.listHint");
 	};
 
+	const agentRailEndpoints = (): readonly CockpitEndpoint[] => {
+		const snapshot = endpoints.snapshot();
+		if (config.hideNativeAgents) return snapshot.endpoints;
+		const selectedId = sessionUi.selectedId("agent");
+		const selected = selectedId ? snapshot.endpoints.find((endpoint) => endpoint.id === selectedId) : undefined;
+		return selected ? [selected] : snapshot.endpoints.filter((endpoint) => endpoint.kind === "root").slice(0, 1);
+	};
+
 	const installSessionBar = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			SESSION_BAR_WIDGET_KEY,
@@ -1237,7 +1238,7 @@ export default function (pi: ExtensionAPI): void {
 				capturedTui = tui;
 				ensureViewportStability(tui);
 				const agentWidget = makeAgentBarWidget({
-					getEndpoints: () => endpoints.snapshot().endpoints,
+					getEndpoints: agentRailEndpoints,
 					getState: () => sessionUi,
 					getNow: () => nowSnapshot,
 					isMainRunning: () => running,
@@ -1282,8 +1283,38 @@ export default function (pi: ExtensionAPI): void {
 		return zenBrowseController;
 	};
 
+	const syncActiveAgentWidget = (ctx: ExtensionContext): void => {
+		const shouldMount = uiOwnershipClaimed
+			&& config.enabled
+			&& config.hideNativeAgents
+			&& activeAgentTreeRows(agents.snapshot()).length > 0;
+		if (shouldMount === activeAgentWidgetMounted) return;
+		if (!shouldMount) {
+			ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
+			activeAgentWidgetMounted = false;
+			return;
+		}
+		ctx.ui.setWidget(
+			AGENT_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				ensureViewportStability(tui);
+				return makeActiveAgentWidget({
+					getAgents: () => agents.snapshot(),
+					getConfig: () => config,
+				})(tui, theme);
+			},
+			{ placement: "belowEditor" },
+		);
+		activeAgentWidgetMounted = true;
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
 		const browseController = ensureZenBrowseController(ctx);
+		// Clear any stale roster from an older extension generation before deciding
+		// whether the current active set owns the below-editor slot.
+		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
+		activeAgentWidgetMounted = false;
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
 			(tui, theme) => {
@@ -1304,7 +1335,7 @@ export default function (pi: ExtensionAPI): void {
 							zenNavRows = [];
 							return todoWidget.render(width);
 						}
-						const agentRows = sessionUi.mode === "window" ? [] : visibleAgentRows(agents.snapshot());
+						const agentRows: AgentRow[] = [];
 						const jobs = bashBg.snapshot();
 						const now = Date.now();
 						// The wall clock only feeds live durations; when nothing is live a
@@ -1341,13 +1372,14 @@ export default function (pi: ExtensionAPI): void {
 			},
 			{ placement: "aboveEditor" },
 		);
-		syncAgentWidgetPlacement(ctx, config.fullscreenInput ? "aboveEditor" : "belowEditor");
+		syncActiveAgentWidget(ctx);
 	};
 
 	const reconcileSurface = (ctx: ExtensionContext): void => {
 		const next = resolveCockpitSurfaceState(config.enabled, config.sidebar.mode, dockEffectiveVisible);
 		if (next === surfaceState) return;
-		if (next === "dock" || next === "disabled") clearWidgets(ctx);
+		if (next === "dock") clearWidgets(ctx, false);
+		else if (next === "disabled") clearWidgets(ctx);
 		else {
 			installWidgets(ctx);
 			// Host widget maps preserve insertion order when an existing key is set.
@@ -1367,7 +1399,7 @@ export default function (pi: ExtensionAPI): void {
 			ctx,
 			getMaestroSnapshot: () => maestro.snapshot(),
 			getTodos: () => todos.snapshot(),
-			getAgents: () => agents.snapshot(),
+			getAgents: () => [],
 			getJobs: () => bashBg.snapshot(),
 			getConfig: () => config,
 			getHeight: () => capturedTui?.terminal.rows ?? 12,
@@ -1498,8 +1530,6 @@ export default function (pi: ExtensionAPI): void {
 		todoOverlayShortcutDisposer = undefined;
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = undefined;
-		agentScrollDisposer?.();
-		agentScrollDisposer = undefined;
 		ctx.ui.setFooter(undefined);
 		surfaceState = "disabled";
 		try {
@@ -1699,33 +1729,63 @@ export default function (pi: ExtensionAPI): void {
 			}
 			return { consume: true };
 		});
-		// Shift+↑/↓ scroll the below-input agent roster (plain ↑/↓ stay with the
-		// composer's input-history navigation). Scrolling up pauses the tail
-		// follow; reaching the bottom resumes it.
-		agentScrollDisposer?.();
-		agentScrollDisposer = ctx.ui.onTerminalInput((data) => {
-			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
-			if (ambientKeysShouldYield(capturedTui)) return undefined;
-			const roster = visibleAgentRows(agents.snapshot());
-			// A focused session collapses the roster to its summary line, so there
-			// are no roster rows to scroll — leave the keys to the surface below.
-			const focused = selectedEndpoint();
-			if (sessionUi.mode === "agent" && focused?.kind === "agent" && sessionUi.endpoint(focused.id).detail) return undefined;
-			const terminalHeight = capturedTui?.terminal?.rows;
-			const sharedPanel = agentPanelRows(terminalHeight);
-			const budget = agentListWindowRows(
-				capturedTui?.terminal?.columns,
-				terminalHeight,
-				roster.length,
-				sharedPanel,
-			);
-			const next = scrollBy(agentListScroll, data === "\x1b[1;2A" ? -1 : 1, roster.length, budget);
-			if (next.offset !== agentListScroll.offset || next.following !== agentListScroll.following) {
-				agentListScroll = next;
-				req();
-			}
-			return { consume: true };
-		});
+	};
+
+	const releaseUiOwnership = (ctx: ExtensionContext): void => {
+		let uninstallError: unknown;
+		try {
+			// The outgoing owner must disappear before native consumers observe the
+			// release; otherwise synchronous listeners can briefly mount both.
+			uninstallUi(ctx);
+		} catch (error) {
+			uninstallError = error;
+		} finally {
+			uiOwnershipClaimed = false;
+			publishUiOwnership();
+		}
+		if (uninstallError !== undefined) {
+			configProblem = `Cockpit UI uninstall failed: ${errorMessage(uninstallError)}`;
+			try { ctx.ui.notify(configProblem, "warning"); } catch { /* best effort */ }
+		}
+	};
+
+	const acquireUiOwnership = (ctx: ExtensionContext): boolean => {
+		if (!config.enabled || !isTuiContext(ctx)) {
+			uiOwnershipClaimed = false;
+			publishUiOwnership();
+			return false;
+		}
+		// The host EventBus is synchronous: native owners withdraw in this emit
+		// before Cockpit starts mounting its own surfaces.
+		uiOwnershipClaimed = true;
+		publishUiOwnership();
+		try {
+			applyUi(ctx);
+			return true;
+		} catch (error) {
+			// A partial mount must never strand native UI suppressed. Best-effort
+			// uninstall completes before the released snapshot is published.
+			try { uninstallUi(ctx); } catch { /* retain the original mount failure */ }
+			uiOwnershipClaimed = false;
+			publishUiOwnership();
+			configProblem = `Cockpit UI install failed: ${errorMessage(error)}`;
+			try { ctx.ui.notify(configProblem, "warning"); } catch { /* best effort */ }
+			return false;
+		}
+	};
+
+	const syncActiveAgentSurface = (): boolean => {
+		const ctx = lastCtx;
+		if (!ctx || !isTuiContext(ctx)) return true;
+		try {
+			syncActiveAgentWidget(ctx);
+			return true;
+		} catch (error) {
+			releaseUiOwnership(ctx);
+			configProblem = `Cockpit Agent UI install failed: ${errorMessage(error)}`;
+			try { ctx.ui.notify(configProblem, "warning"); } catch { /* best effort */ }
+			return false;
+		}
 	};
 
 	// --- teammate lifecycle (custom event bus; subscribed once for the extension lifetime) ---
@@ -1803,11 +1863,6 @@ export default function (pi: ExtensionAPI): void {
 	const subscribeBusEvents = (): void => {
 		if (busDisposers.length > 0) return;
 		busDisposers.push(
-			// Ownership handshake: a consumer that subscribed after the session_start
-			// broadcast asks once and gets the current ownership re-emitted.
-			pi.events.on(COCKPIT_UI_OWNERSHIP_QUERY_EVENT, () => {
-				publishUiOwnership();
-			}),
 			cockpitTuiLocale.subscribe(() => {
 				if (config.quietMode && lastCtx) {
 					try { lastCtx.ui.setHiddenThinkingLabel(quietThinkingLabel()); } catch { /* non-TUI */ }
@@ -1826,8 +1881,7 @@ export default function (pi: ExtensionAPI): void {
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
-				// A background agent needs the loop to keep its elapsed/stall repaints
-				// alive even after the foreground turn ended (SB-4).
+				if (!syncActiveAgentSurface()) return;
 				syncTick();
 				req();
 			}),
@@ -1836,6 +1890,7 @@ export default function (pi: ExtensionAPI): void {
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
+				if (!syncActiveAgentSurface()) return;
 				syncTick();
 				req();
 			}),
@@ -1844,6 +1899,7 @@ export default function (pi: ExtensionAPI): void {
 				if (usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
+				if (!syncActiveAgentSurface()) return;
 				// A failure that arrives after the session went idle still needs a loop to
 				// expire it, so the tick is re-evaluated rather than assumed to be running.
 				syncTick();
@@ -1857,6 +1913,7 @@ export default function (pi: ExtensionAPI): void {
 				if (!usingRuntimeV2) return;
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
+				if (!syncActiveAgentSurface()) return;
 				syncTick();
 				req();
 			}),
@@ -1873,6 +1930,7 @@ export default function (pi: ExtensionAPI): void {
 				}
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
+				if (!syncActiveAgentSurface()) return;
 				syncTick();
 				req();
 			}),
@@ -1882,6 +1940,7 @@ export default function (pi: ExtensionAPI): void {
 				agentReads.fallback();
 				agents = agentReads.current;
 				endpoints.refreshLegacy();
+				if (!syncActiveAgentSurface()) return;
 				syncTick();
 				req();
 			}),
@@ -1965,6 +2024,9 @@ export default function (pi: ExtensionAPI): void {
 
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
+		uiOwnershipClaimed = false;
+		ensureOwnershipQueryResponder();
+		publishUiOwnership();
 		lastCtx = ctx;
 		uiPromptDepth = 0;
 		checkHostVersion(ctx);
@@ -1987,9 +2049,6 @@ export default function (pi: ExtensionAPI): void {
 		registerSettingsProvider();
 		configProblem = undefined;
 		activeTools.clear();
-		agentListScroll = { offset: 0, following: true };
-		agentPriorityActive = false;
-		todoExpandedOverAgents = false;
 		thinkingTimer.reset();
 		maestro.clear();
 		aiTitle = undefined;
@@ -2040,13 +2099,8 @@ export default function (pi: ExtensionAPI): void {
 		// through /settings since — including an automatic "light/dark" pair, which
 		// cockpit cannot represent and would silently flatten to a single theme.
 		todos.hydrateFromEntries(ctx.sessionManager.getEntries());
-		if (config.enabled) {
-			publishUiOwnership();
-			applyUi(ctx);
-		} else {
-			applyUi(ctx);
-			publishUiOwnership();
-		}
+		if (config.enabled) acquireUiOwnership(ctx);
+		else releaseUiOwnership(ctx);
 		// applyUi captured the TUI synchronously, so the native toggle is
 		// reachable already; a no-op when cockpit is disabled or non-TUI.
 		if (config.quietMode) ensureThinkingFolded(capturedTui, ctx.cwd, true);
@@ -2069,7 +2123,11 @@ export default function (pi: ExtensionAPI): void {
 				// mid-teardown: best-effort
 			}
 		}
-		if (lastCtx) uninstallUi(lastCtx);
+		if (lastCtx) releaseUiOwnership(lastCtx);
+		else {
+			uiOwnershipClaimed = false;
+			publishUiOwnership();
+		}
 		// A session boundary must tear down an overlay the host hid without
 		// dispose (theme revert, deferred enable, promise settle) (MW-2).
 		try {
@@ -2078,29 +2136,15 @@ export default function (pi: ExtensionAPI): void {
 			// best effort
 		}
 		activeSettingsOverlay = undefined;
-		const released: CockpitUiOwnershipV1 = {
-			todo: false,
-			agents: false,
-			sessionList: false,
-			footer: false,
-			sidebar: false,
-			goal: false,
-			todoExpanded: config.todoExpanded,
-			todoDurationChart: config.todoDurationChart,
-			quiet: false,
-			quietSymbols: config.quietSymbols,
-			static: config.staticMode,
-		};
 		// A session boundary must invalidate any in-flight title request: abort it
 		// and bump the generation so its result is discarded (MW-3).
 		titleAbort?.abort();
 		titleAbort = undefined;
 		titleGeneration += 1;
-		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, released);
-		// Tear down shared-bus subscriptions so a host reload does not leave this
-		// extension instance's listeners accumulating on the same bus. session_start
-		// re-registers them (subscribeBusEvents / registry.start / provider).
+		// Tear down shared-bus subscriptions and the independent query responder so
+		// a host reload cannot accumulate listeners. session_start restores both.
 		unsubscribeBusEvents();
+		disposeOwnershipQueryResponder();
 		settingsRegistry.dispose();
 		try {
 			settingsProviderDisposer?.();
@@ -2124,9 +2168,6 @@ export default function (pi: ExtensionAPI): void {
 		agentReads.clear();
 		agents = agentReads.current;
 		usingRuntimeV2 = false;
-		agentListScroll = { offset: 0, following: true };
-		agentPriorityActive = false;
-		todoExpandedOverAgents = false;
 		bashBg.clear();
 		maestro.clear();
 		usageSubsystem?.stop(ctx);
@@ -2142,6 +2183,9 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("agent_start", () => {
 		running = true;
 		runningStartedAt = Date.now();
+		assistantStreaming = false;
+		tokenRate = undefined;
+		ratePrev = undefined;
 		startTick();
 		req();
 	});
@@ -2149,6 +2193,9 @@ export default function (pi: ExtensionAPI): void {
 		pendingTargetReference = undefined;
 		running = false;
 		runningStartedAt = undefined;
+		assistantStreaming = false;
+		tokenRate = undefined;
+		ratePrev = undefined;
 		activeTools.clear();
 		thinkingTimer.stop();
 		syncTick();
@@ -2167,10 +2214,22 @@ export default function (pi: ExtensionAPI): void {
 
 	// --- live elapsed for folded thinking rows ---
 	pi.on("message_start", (e) => {
-		if (e.message.role === "assistant") thinkingTimer.onAssistantMessageStart();
+		if (e.message.role === "assistant") {
+			thinkingTimer.onAssistantMessageStart();
+			assistantStreaming = true;
+			tokenRate = undefined;
+			ratePrev = undefined;
+		}
 	});
 	pi.on("message_update", (e) => {
 		thinkingTimer.onAssistantMessageEvent(e.assistantMessageEvent);
+		const output = e.message.role === "assistant" ? e.message.usage?.output : undefined;
+		if (output === undefined || output <= 0) return;
+		const now = Date.now();
+		if (ratePrev !== undefined && output > ratePrev.output && now > ratePrev.at) {
+			tokenRate = formatTokenRate(((output - ratePrev.output) * 1000) / (now - ratePrev.at));
+		}
+		ratePrev = { output, at: now };
 	});
 
 	// --- redraw triggers for the footer's live data ---
@@ -2179,6 +2238,9 @@ export default function (pi: ExtensionAPI): void {
 		// failed messages too, while the row is still mounted.
 		if (e.message.role === "assistant") {
 			thinkingTimer.onAssistantMessageEnd();
+			assistantStreaming = false;
+			tokenRate = undefined;
+			ratePrev = undefined;
 			mainOutputRevision += 1;
 			endpoints.setMainOutputRevision(`main:${mainOutputRevision}`);
 		}
@@ -2788,13 +2850,8 @@ export default function (pi: ExtensionAPI): void {
 			const ctx = lastCtx;
 			if (!ctx || !isTuiContext(ctx)) return;
 			if (previous.enabled !== nextConfig.enabled) {
-				if (nextConfig.enabled) {
-					publishUiOwnership();
-					applyUi(ctx);
-				} else {
-					uninstallUi(ctx);
-					publishUiOwnership();
-				}
+				if (nextConfig.enabled) acquireUiOwnership(ctx);
+				else releaseUiOwnership(ctx);
 				return;
 			}
 			if (!nextConfig.enabled) return;
@@ -2804,6 +2861,18 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (previous.quietMode !== nextConfig.quietMode) {
 				applyQuietMode(ctx, previous.quietMode, nextConfig.quietMode);
+			}
+			let ownershipPublished = false;
+			if (previous.hideNativeAgents !== nextConfig.hideNativeAgents) {
+				if (nextConfig.hideNativeAgents) {
+					publishUiOwnership();
+					ownershipPublished = true;
+					if (!syncActiveAgentSurface()) return;
+				} else {
+					if (!syncActiveAgentSurface()) return;
+					publishUiOwnership();
+					ownershipPublished = true;
+				}
 			}
 			if (previous.pinEditorBottom !== nextConfig.pinEditorBottom) {
 				// pinEditorBottom is ignored inside fullscreen (fullscreen owns the fixed
@@ -2830,7 +2899,7 @@ export default function (pi: ExtensionAPI): void {
 					usageSubsystem?.refresh();
 				}
 			}
-			publishUiOwnership();
+			if (!ownershipPublished) publishUiOwnership();
 			req();
 		},
 		getThemeName: () => config.theme || undefined,
@@ -3142,8 +3211,7 @@ export default function (pi: ExtensionAPI): void {
 						enableAfterClose = true;
 					} else {
 						enableAfterClose = false;
-						uninstallUi(ctx);
-						publishUiOwnership();
+						releaseUiOwnership(ctx);
 					}
 				} else {
 					if (config.enabled && wasPinEditorBottom !== config.pinEditorBottom) {
@@ -3243,8 +3311,7 @@ export default function (pi: ExtensionAPI): void {
 				if (enableAfterClose && config.enabled) {
 					queueMicrotask(() => {
 						if (lastCtx !== ctx || !config.enabled) return;
-						publishUiOwnership();
-						applyUi(ctx);
+						acquireUiOwnership(ctx);
 						req();
 					});
 				}

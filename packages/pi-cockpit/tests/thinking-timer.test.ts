@@ -134,8 +134,8 @@ test("formatThinkingDuration formats tenths, seconds and minutes", () => {
 	assert.equal(formatThinkingDuration(9_999), "10.0s");
 	assert.equal(formatThinkingDuration(10_000), "10s");
 	assert.equal(formatThinkingDuration(59_400), "59s");
-	assert.equal(formatThinkingDuration(65_400), "1m05s");
-	assert.equal(formatThinkingDuration(3_600_000), "60m00s");
+	assert.equal(formatThinkingDuration(65_400), "1m 05s");
+	assert.equal(formatThinkingDuration(3_600_000), "60m 00s");
 });
 
 test("target lookup is cached between message boundaries and ticks only across seconds", () => {

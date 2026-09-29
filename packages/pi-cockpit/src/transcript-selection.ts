@@ -79,7 +79,7 @@ function ansiCodeAt(str: string, pos: number): { code: string; length: number } 
 	return null;
 }
 
-function stripAnsi(text: string): string {
+export function stripAnsi(text: string): string {
 	if (!text.includes("\x1b")) return text;
 	let out = "";
 	let i = 0;

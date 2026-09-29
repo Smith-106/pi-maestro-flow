@@ -8,13 +8,12 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import type { CockpitEndpoint } from "./endpoint-store.ts";
-import { formatAgentMetric } from "./render.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
 import { formatUnreadCount, type SessionTab } from "./session-tabs.ts";
 import type { AgentRow } from "./types.ts";
 import { effectiveAgentStatus, isCliAgent, type AgentDisplayStatus } from "./agents-store.ts";
 import { visibleAgentRows } from "./stack-widget.ts";
-import { tuiT } from "./tui-i18n.ts";
+import { tuiStatus, tuiT } from "./tui-i18n.ts";
 import { ownerDisplayToken } from "./window-autocomplete.ts";
 
 export const SESSION_BAR_WIDGET_KEY = "cockpit-session-bar";
@@ -98,46 +97,23 @@ export function statusColor(status: AgentDisplayStatus): ThemeColor {
 	}
 }
 
-function chip(
-	label: string,
-	active: boolean,
-	color: ThemeColor,
-	theme: Theme,
-	unread = 0,
-	activity?: string,
-	attention = false,
-	outcome?: { status: "completed" | "failed" | "terminated"; message?: string },
-	cli = false,
-): string {
+/** Original chip shape retained exclusively for the legacy Session Bar facade. */
+function legacyChip(label: string, active: boolean, color: ThemeColor, theme: Theme): string {
 	const text = `@${label}`;
-	const cliBadge = cli ? theme.fg("accent", ` ${tuiT("widget.agent.cli")}`) : "";
-	const badge = unread > 0 ? theme.fg("warning", ` •${formatUnreadCount(unread)}`) : "";
-	const activitySuffix = activity ? theme.fg("dim", ` · ${activity}`) : "";
-	const attentionPrefix = attention ? theme.fg("error", "!") : "";
-	const outcomeSuffix = outcome
-		? outcome.status === "failed"
-			? theme.fg("error", ` ✗${outcome.message ? ` ${outcome.message}` : ""}`)
-			: outcome.status === "terminated"
-				? theme.fg("warning", " ✗")
-				: theme.fg("success", " ✓")
-		: "";
 	return active
-		? `${attentionPrefix}${theme.fg(color, "▸")} ${theme.fg(color, theme.bold(text))}${cliBadge}${outcomeSuffix}${activitySuffix}${badge}`
-		: `${attentionPrefix}${theme.fg(color, text)}${cliBadge}${outcomeSuffix}${activitySuffix}${badge}`;
+		? `${theme.fg(color, "▸")} ${theme.fg(color, theme.bold(text))}`
+		: theme.fg(color, text);
 }
 
 export type AgentBarStatus = AgentDisplayStatus | "idle";
 
 interface AgentBarTab extends SessionTab {
-	endpoint: CockpitEndpoint;
 	status: AgentBarStatus;
 	color: ThemeColor;
-	/** Current tool name while the agent is live; shown after the chip label. */
-	activity?: string;
-	/** Stalled state beyond the color channel: a leading error `!`. */
-	attention?: boolean;
-	/** Terminal outcome badge: ✓ completed, ✗ failed (with reason) or terminated. */
-	outcome?: { status: "completed" | "failed" | "terminated"; message?: string };
+	/** The rail has one suffix slot: live tool name when present, otherwise localized state. */
+	suffix: string;
+	/** Last terminal outcome selects the status glyph, but never exposes its error message. */
+	outcome?: "completed" | "failed" | "terminated";
 	/** External CLI backend (ACP `cli/<tool>` route): shown as an accent badge after the label. */
 	cli?: boolean;
 }
@@ -151,13 +127,41 @@ function endpointStatus(endpoint: CockpitEndpoint, now: number, mainRunning: boo
 	return "running";
 }
 
-function endpointColor(endpoint: CockpitEndpoint, status: AgentBarStatus, now: number, selected: boolean): ThemeColor {
-	if (selected) return "accent";
+function endpointColor(endpoint: CockpitEndpoint, status: AgentBarStatus, now: number): ThemeColor {
 	if (endpoint.kind === "root") return status === "running" ? "warning" : "muted";
 	if (endpoint.agentRow) return agentSessionColor(endpoint.agentRow, now, status === "idle" ? undefined : status);
 	if (status === "done" || status === "sleeping" || status === "terminated") return "muted";
 	if (status === "failed" || status === "stalled") return "error";
 	return assignedAgentColor(endpoint.correlationId ?? endpoint.id);
+}
+
+function statusVisual(
+	status: AgentBarStatus,
+	outcome?: AgentBarTab["outcome"],
+): { glyph: string; color: ThemeColor } {
+	if (outcome === "completed") return { glyph: "✓", color: "success" };
+	if (outcome === "failed") return { glyph: "✗", color: "error" };
+	if (outcome === "terminated") return { glyph: "✗", color: "warning" };
+	if (status === "failed") return { glyph: "✗", color: "error" };
+	if (status === "stalled") return { glyph: "!", color: "error" };
+	if (status === "terminated") return { glyph: "✗", color: "warning" };
+	if (status === "done" || status === "result-ready") return { glyph: "✓", color: "success" };
+	if (status === "retrying") return { glyph: "↻", color: "warning" };
+	if (status === "running") return { glyph: "●", color: "warning" };
+	if (status === "pending") return { glyph: "○", color: "dim" };
+	return { glyph: "○", color: "muted" };
+}
+
+function railChip(tab: AgentBarTab, active: boolean, theme: Theme): string {
+	const visual = statusVisual(tab.status, tab.outcome);
+	const selected = active ? `${theme.fg("accent", "▸")} ` : "";
+	const status = theme.fg(visual.color, visual.glyph);
+	const identity = theme.fg(tab.color, active ? theme.bold(`@${tab.label}`) : `@${tab.label}`);
+	const cli = tab.cli ? theme.fg("accent", ` ${tuiT("widget.agent.cli")}`) : "";
+	const unreadCount = tab.unread ?? 0;
+	const unread = unreadCount > 0 ? theme.fg("warning", ` •${formatUnreadCount(unreadCount)}`) : "";
+	const suffix = tab.suffix ? theme.fg("dim", ` · ${tab.suffix}`) : "";
+	return `${selected}${status} ${identity}${cli}${unread}${suffix}`;
 }
 
 export interface AgentBarRenderOptions {
@@ -177,21 +181,10 @@ const CHIP_SEPARATOR = "  ";
  * and its context visible no matter how many agents exist.
  */
 function renderAgentChipLine(tabs: AgentBarTab[], selectedId: string, width: number, theme: Theme): string {
-	const w = Math.max(1, width);
+	if (width <= 0 || tabs.length === 0) return "";
+	const w = width;
 	const selectedIndex = Math.max(0, tabs.findIndex((tab) => tab.id === selectedId));
-	const chips = tabs.map((tab) => chip(
-		tab.label,
-		tab.id === selectedId,
-		tab.color,
-		theme,
-		tab.unread,
-		tab.activity,
-		tab.attention,
-		tab.outcome
-			? { status: tab.outcome.status, message: tab.outcome.message ? truncateToWidth(tab.outcome.message, 24, "…") : undefined }
-			: undefined,
-		tab.cli,
-	));
+	const chips = tabs.map((tab) => railChip(tab, tab.id === selectedId, theme));
 	const chipWidths = chips.map((text) => visibleWidth(text));
 	const sepWidth = visibleWidth(CHIP_SEPARATOR);
 	const totalWidth = chipWidths.reduce((sum, chipWidth) => sum + chipWidth + sepWidth, 0) - sepWidth;
@@ -244,7 +237,8 @@ export function renderSessionBarLine(
 ): string {
 	// A live main-screen row must not write the terminal's final column: doing so
 	// arms auto-wrap, while pi-tui still tracks the cursor on the original row.
-	const w = Math.max(1, width - 1);
+	const w = Math.max(0, width - 1);
+	if (w === 0) return "";
 	if (!shortcutHint) return renderContent(w);
 	const hintSpec = typeof shortcutHint === "string" ? { text: shortcutHint, color: "dim" as const } : shortcutHint;
 	const hint = theme.fg(hintSpec.color ?? "dim", hintSpec.text);
@@ -265,7 +259,24 @@ export function renderAgentBar(
 	theme: Theme,
 	options: AgentBarRenderOptions = {},
 ): string[] {
-	if (endpoints.length === 0) return [truncateToWidth(chip(MAIN_SESSION_LABEL, true, "accent", theme), Math.max(1, width - 1), "…")];
+	if (endpoints.length === 0) {
+		const status: AgentBarStatus = options.mainRunning ? "running" : "idle";
+		const fallback: AgentBarTab = {
+			id: "root",
+			label: MAIN_SESSION_LABEL,
+			ordinal: 0,
+			unread: 0,
+			status,
+			color: status === "running" ? "warning" : "muted",
+			suffix: tuiStatus(status),
+		};
+		return [renderSessionBarLine(
+			(availableWidth) => truncateToWidth(railChip(fallback, true, theme), availableWidth, "…"),
+			width,
+			theme,
+			options.shortcutHint,
+		)];
+	}
 	const now = options.now ?? 0;
 	// A stale selection (id no longer in the endpoint list) must not leave the
 	// bar without a highlighted chip: fall back to root / first endpoint.
@@ -275,11 +286,11 @@ export function renderAgentBar(
 		? requestedId
 		: fallbackId;
 	const tabs: AgentBarTab[] = endpoints.map((endpoint) => {
-		const selected = endpoint.id === selectedId;
 		const status = endpointStatus(endpoint, now, options.mainRunning === true);
-		const live = status === "running" || status === "retrying";
+		const liveAgent = endpoint.kind === "agent" && (status === "running" || status === "retrying");
+		const activeTool = liveAgent ? endpoint.agentRow?.activeTool ?? endpoint.externalAgent?.activeTool : undefined;
 		const outcome = status === "done" || status === "failed" || status === "terminated" || status === "sleeping"
-			? endpoint.agentRow?.lastOutcome
+			? endpoint.agentRow?.lastOutcome?.status
 			: undefined;
 		const ownerId = endpoint.kind === "root" ? endpoint.registryEndpoint?.ownerId : undefined;
 		return {
@@ -287,39 +298,17 @@ export function renderAgentBar(
 			label: ownerId ? ownerDisplayToken(endpoint.label, ownerId) : endpoint.label,
 			ordinal: endpoint.ordinal,
 			unread: state.endpoint(endpoint.id).unread,
-			endpoint,
 			status,
-			color: endpointColor(endpoint, status, now, selected),
-			...(live && (endpoint.agentRow?.activeTool || endpoint.externalAgent?.activeTool)
-				? {
-					activity: endpoint.agentRow?.activeTool
-						? endpoint.agentRow.activeToolArgs
-							? `${endpoint.agentRow.activeTool} ${endpoint.agentRow.activeToolArgs}`
-							: endpoint.agentRow.activeTool
-						: endpoint.externalAgent!.activeToolArgs
-							? `${endpoint.externalAgent!.activeTool} ${endpoint.externalAgent!.activeToolArgs}`
-							: endpoint.externalAgent!.activeTool,
-				}
-				: {}),
-			...(status === "stalled" ? { attention: true } : {}),
+			color: endpointColor(endpoint, status, now),
+			suffix: liveAgent
+				? activeTool ? truncateToWidth(activeTool, 18, "…") : ""
+				: tuiStatus(status),
 			...(outcome ? { outcome } : {}),
 			...(endpoint.agentRow && isCliAgent(endpoint.agentRow) ? { cli: true } : {}),
 		};
 	});
-	// Selected-session metrics summary, appended only when the chip line leaves
-	// room for it: telemetry must never squeeze the chips that carry identity.
-	const selectedEndpoint = tabs.find((tab) => tab.id === selectedId)?.endpoint;
-	const selectedMetrics = selectedEndpoint?.agentRow ?? selectedEndpoint?.externalAgent?.metrics;
-	const metricParts: string[] = [];
-	if (selectedMetrics?.toolCount !== undefined) metricParts.push(tuiT("common.tools", { count: selectedMetrics.toolCount }));
-	if (selectedMetrics?.tokens !== undefined) metricParts.push(tuiT("widget.agent.tokens", { count: formatAgentMetric(selectedMetrics.tokens) }));
-	const metrics = metricParts.length > 0 ? theme.fg("muted", ` · ${metricParts.join(" · ")}`) : "";
 	return [renderSessionBarLine(
-		(availableWidth) => {
-			const chipsLine = renderAgentChipLine(tabs, selectedId, availableWidth, theme);
-			if (!metrics || visibleWidth(chipsLine) + visibleWidth(metrics) > availableWidth) return chipsLine;
-			return chipsLine + metrics;
-		},
+		(availableWidth) => renderAgentChipLine(tabs, selectedId, availableWidth, theme),
 		width,
 		theme,
 		options.shortcutHint,
@@ -364,7 +353,7 @@ export function renderSessionBar(
 		}
 	}
 	const chips = [
-		chip(
+		legacyChip(
 			MAIN_SESSION_LABEL,
 			viewingId === undefined,
 			viewingId === undefined ? "accent" : opts.mainRunning ? "warning" : "muted",
@@ -377,7 +366,7 @@ export function renderSessionBar(
 			const stableStatus = previousStatus === nextStatus ? previousStatus : nextStatus;
 			opts.stableStatuses?.set(row.correlationId, stableStatus);
 			const color = agentSessionColor(row, now, stableStatus);
-			return chip(label, row.correlationId === viewingId, color, theme);
+			return legacyChip(label, row.correlationId === viewingId, color, theme);
 		}),
 	];
 	const w = Math.max(1, width);

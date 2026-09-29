@@ -320,7 +320,7 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 
 	return {
 		attach,
-		isActive: () => tui !== undefined && !disposed,
+		isActive: () => tui !== undefined && tui.render === wrappedRender && !disposed,
 		getScrollOffset: () => scrollOffset,
 		scrollBy,
 		jumpToBottom,

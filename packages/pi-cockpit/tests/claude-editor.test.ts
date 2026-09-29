@@ -173,17 +173,25 @@ test("editor: non-Escape input between the pair cancels it", () => {
 	assert.equal(editor.getText(), "");
 });
 
-test("editor: render emits markers only when fullscreen is active", () => {
-	const plain = makeEditor({ doubleEscapeClearInput: false, emitEditorMarkers: false });
-	const plainLines = plain.render(40);
-	assert.equal(plainLines.some((line) => line.includes(EDITOR_START_SENTINEL)), false);
-	assert.equal(plainLines.some((line) => line.includes(EDITOR_END_SENTINEL)), false);
+test("editor: render emits markers only while fullscreen is actually active", () => {
+	let fullscreenActive = false;
+	const editor = makeEditor({
+		doubleEscapeClearInput: false,
+		emitEditorMarkers: () => fullscreenActive,
+	});
+	const inactiveLines = editor.render(40);
+	assert.equal(inactiveLines.some((line) => line.includes(EDITOR_START_SENTINEL)), false);
+	assert.equal(inactiveLines.some((line) => line.includes(EDITOR_END_SENTINEL)), false);
 
-	const fullscreen = makeEditor({ doubleEscapeClearInput: false, emitEditorMarkers: true });
-	const lines = fullscreen.render(40);
-	assert.equal(lines[0], EDITOR_START_SENTINEL);
-	assert.equal(lines[lines.length - 1], EDITOR_END_SENTINEL);
-	assert.ok(lines.length >= 3, "markers surround real editor lines");
+	fullscreenActive = true;
+	const activeLines = editor.render(40);
+	assert.equal(activeLines[0], EDITOR_START_SENTINEL);
+	assert.equal(activeLines[activeLines.length - 1], EDITOR_END_SENTINEL);
+	assert.ok(activeLines.length >= 3, "markers surround real editor lines");
+
+	fullscreenActive = false;
+	const detachedLines = editor.render(40);
+	assert.equal(detachedLines.some((line) => line.includes("cockpit:editor")), false);
 });
 
 test("factory builds a working CockpitClaudeEditor", () => {

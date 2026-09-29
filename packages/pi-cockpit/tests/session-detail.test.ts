@@ -15,6 +15,7 @@ import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 
 /** `altKey` escaped for use inside a regular expression: `+` is a metacharacter. */
 const altRe = (key: string): string => altKey(key).replaceAll("+", "\\+");
+const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 cockpitTuiLocale.setLocale("en");
 
@@ -72,6 +73,43 @@ test("renderSessionDetail: running agent without tail names the thinking state",
 		theme as Theme,
 	);
 	assert.ok(lines.some((line) => line.includes("thinking")));
+});
+
+test("renderSessionDetail: mounted timing mode hides live duration and silence age but keeps settled duration", () => {
+	const now = Date.now();
+	const running = agent({
+		status: "running",
+		tail: "",
+		startedAt: now - 65_000,
+		lastActivityAt: now - 45_000,
+	});
+	const legacy = stripAnsi(renderSessionDetail([running], "c1", 80, theme as Theme).join("\n"));
+	assert.match(legacy, /1m/);
+	assert.match(legacy, /45s/);
+	const mounted = renderSessionDetail(
+		[running],
+		"c1",
+		80,
+		theme as Theme,
+		SESSION_DETAIL_TAIL_LINES + 1,
+		undefined,
+		undefined,
+		{ liveTiming: false },
+	);
+	assert.doesNotMatch(stripAnsi(mounted.join("\n")), /1m|45s/);
+	assert.match(mounted.join("\n"), /thinking/);
+
+	const settled = renderSessionDetail(
+		[agent({ status: "done", startedAt: now - 10_000, finishedAt: now - 4_000 })],
+		"c1",
+		80,
+		theme as Theme,
+		SESSION_DETAIL_TAIL_LINES + 1,
+		undefined,
+		undefined,
+		{ liveTiming: false },
+	);
+	assert.match(settled[0]!, /6s/);
 });
 
 test("renderSessionDetail: running agent with an active tool keeps the working hint", () => {
@@ -227,23 +265,46 @@ test("renderSessionDetail: every line fits the width (crash regression)", () => 
 	}
 });
 
-test("makeSessionDetailWidget: reads live state on every render", () => {
+test("makeSessionDetailWidget: reads live state on every render at a fixed height", () => {
 	let rows: AgentRow[] = [];
-	let viewingId: string | undefined;
+	let viewingId: string | undefined = "c1";
 	let visible = true;
 	const widget = makeSessionDetailWidget({
 		getAgents: () => rows,
 		getViewingId: () => viewingId,
 		getVisible: () => visible,
 	})({} as never, theme as Theme);
-	assert.deepEqual(widget.render(80), []);
+	const missing = widget.render(80);
+	assert.equal(missing.length, 6);
+	assert.match(missing[0]!, /No agents to display/);
+	assert.deepEqual(missing.slice(1), ["", "", "", "", ""]);
+
 	rows = [agent({ tail: "changing session output ".repeat(20) })];
-	viewingId = "c1";
 	const rendered = widget.render(80);
-	assert.deepEqual(rendered, renderSessionDetail(rows, viewingId, 79, theme as Theme, 6));
+	assert.equal(rendered.length, 6);
+	assert.ok(rendered.some((line) => line.includes("changing session output")));
 	assert.ok(rendered.every((line) => visibleWidth(line) <= 79), "live session detail must reserve the final column");
 	visible = false;
 	assert.deepEqual(widget.render(80), []);
+});
+
+test("makeSessionDetailWidget: pads sparse content and suppresses mounted live timing", () => {
+	const now = Date.now();
+	const widget = makeSessionDetailWidget({
+		getAgents: () => [agent({
+			status: "running",
+			tail: "",
+			startedAt: now - 65_000,
+			lastActivityAt: now - 45_000,
+		})],
+		getViewingId: () => "c1",
+		getVisible: () => true,
+	})({ terminal: { rows: 24 } } as never, theme as Theme);
+	const rendered = widget.render(80);
+	assert.equal(rendered.length, 6);
+	assert.match(rendered.join("\n"), /thinking/);
+	assert.doesNotMatch(stripAnsi(rendered.join("\n")), /1m|45s/);
+	assert.deepEqual(rendered.slice(2), ["", "", "", ""]);
 });
 
 test("makeSessionDetailWidget: terminal height bounds the fixed region", () => {
