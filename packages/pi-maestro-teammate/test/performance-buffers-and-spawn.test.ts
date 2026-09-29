@@ -468,6 +468,16 @@ test("transcript, decoder, stderr-adjacent stream limits are byte bounded", () =
   assert.equal(tail, "defghijk");
 });
 
+test("decoder preserves complete lifecycle lines before an oversized stdout line", () => {
+  const decoder = createUtf8LineDecoder(16);
+  const text = 'turn_end\r\n' + 'x'.repeat(32) + '\nagent_end\n' + '界'.repeat(8);
+  const encoded = Buffer.from(text);
+  const split = encoded.length - 1;
+  assert.deepEqual(decoder.write(encoded.subarray(0, split)), ["turn_end", "x".repeat(16), "agent_end"]);
+  assert.deepEqual(decoder.write(encoded.subarray(split)), []);
+  assert.deepEqual(decoder.end(), ["界".repeat(5)]);
+});
+
 test("published turn result can survive while disposable transcript and tool history is released", () => {
   const messages = [{ role: "assistant", content: "published result" }];
   const published = [...messages];
@@ -537,27 +547,55 @@ test("Pi launcher resolution is ordered, shell-free, and rejects a Gateway argv 
   const native = resolvePiLaunchSpec({
     envBinary: null,
     platform: "win32",
-    pathValue: "C:/shim;C:/native",
+    pathValue: "C:/native",
     entryPoint: null,
     appData: null,
     isFile,
   });
-  assert.equal(native.source, "path-native", "a native binary wins even when a shim appears earlier on PATH");
+  assert.equal(native.source, "path-native", "a native binary remains usable without a verified Node entry");
   assert.equal(path.normalize(native.command), path.normalize("C:/native/pi.exe"));
 
   const shimSpec = resolvePiLaunchSpec({
     envBinary: null,
     platform: "win32",
-    pathValue: "C:/shim",
+    pathValue: "C:/native;C:/shim",
     entryPoint: null,
     appData: null,
     execPath: "C:/node.exe",
     isFile,
     readTextFile,
   });
-  assert.equal(shimSpec.source, "windows-shim");
+  assert.equal(shimSpec.source, "windows-shim", "a verified Node entry beats a PATH launcher that may forward IPC");
   assert.equal(path.normalize(shimSpec.command), path.normalize("C:/node.exe"));
   assert.deepEqual(shimSpec.argsPrefix.map(path.normalize), [path.normalize(shimEntry)]);
+
+  const hostSpec = resolvePiLaunchSpec({
+    envBinary: null,
+    platform: "win32",
+    pathValue: "C:/native;C:/shim",
+    entryPoint: shimEntry,
+    appData: null,
+    execPath: "C:/node.exe",
+    isFile,
+    readTextFile,
+  });
+  assert.deepEqual(hostSpec, {
+    command: "C:/node.exe",
+    argsPrefix: [path.resolve(shimEntry)],
+    source: "host-entry",
+  });
+
+  const appDataSpec = resolvePiLaunchSpec({
+    envBinary: null,
+    platform: "win32",
+    pathValue: "C:/native",
+    entryPoint: null,
+    appData: "C:/shim/..",
+    execPath: "C:/node.exe",
+    isFile,
+    readTextFile,
+  });
+  assert.equal(appDataSpec.source, "path-native");
 
   const gatewayEntry = path.resolve("C:/gateway/pi-maestro-gateway.mjs");
   const gateway = resolvePiLaunchSpec({
@@ -1108,6 +1146,77 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
   assert.equal(progress.at(-1)?.status, "completed");
   assert.equal(progress.at(-1)?.resultReadyAt, undefined);
   assert.equal(killed, false, "fresh teammate must remain wakeable after lifecycle confirmation");
+});
+
+test("large valid agent_end history does not turn a published result into failure", async () => {
+  let stdout: PassThrough | undefined;
+  let resolveTerminal!: (result: SingleResult) => void;
+  const terminalResult = new Promise<SingleResult>((resolve) => { resolveTerminal = resolve; });
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
+    const childStdout = new PassThrough();
+    stdout = childStdout;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: childStdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      childStdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "large-history answer" }] },
+      })}\n`);
+      childStdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "large-history answer" }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  });
+
+  const published = await runSingleTeammate(
+    { agent: "general", task: "Return after a large history", context: "fresh", timeoutMs: 2_000 },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      onTurnComplete: resolveTerminal,
+    },
+  );
+  assert.equal(published.lifecyclePending, true);
+  assert.equal(published.messages.at(-1)?.content, "large-history answer");
+
+  const agentEndLine = `${JSON.stringify({
+    type: "agent_end",
+    messages: [
+      { role: "tool", content: "x".repeat(EXECUTION_BUFFER_LIMITS.lineBytes + 1_024) },
+      {
+        role: "assistant",
+        stopReason: "stop",
+        content: [{ type: "text", text: "large-history answer" }],
+      },
+    ],
+  })}\n`;
+  assert.ok(Buffer.byteLength(agentEndLine) > EXECUTION_BUFFER_LIMITS.lineBytes);
+  if (!stdout) throw new Error("fake child stdout was not initialized");
+  stdout.write(agentEndLine);
+
+  const terminal = await Promise.race([
+    terminalResult,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("large agent_end did not settle")), 500)),
+  ]);
+  assert.equal(terminal.exitCode, 0);
+  assert.equal(terminal.terminalStatus, "completed");
+  assert.equal(terminal.messages.at(-1)?.content, "large-history answer");
 });
 
 test("parallel graph settles at result publication and keeps lifecycle running", async () => {
@@ -2922,6 +3031,122 @@ test("parent rejects a schema-invalid structured output file", async () => {
     result.messages.map((message) => message.content).join(" | "),
   );
   assert.match(result.messages.at(-1)?.content ?? "", /schema-valid value/);
+});
+
+test("parent rejects an oversized structured output file before reading and cleans it up", async () => {
+  const schema = {
+    type: "object",
+    required: ["ok"],
+    properties: { ok: { type: "boolean" } },
+  };
+  let outputFile: string | undefined;
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(),
+      connected: false, exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (!outputFile) throw new Error("structured output path was not provided");
+    const target = outputFile;
+    setTimeout(() => {
+      // A valid tool event must not mask an oversized persisted output.
+      stdout.write(`${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "toolCall", name: "structured_output", arguments: { ok: true } }] },
+      })}\n`);
+      // A sparse file exercises the stat guard without allocating the payload.
+      const fd = fs.openSync(target, "w");
+      try { fs.ftruncateSync(fd, 64 * 1024 * 1024); } finally { fs.closeSync(fd); }
+      stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }, 0);
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.structuredOutput, undefined);
+  assert.ok(
+    result.messages.some((message) => /structured_output validation failed: output file exceeds 1048576-byte limit/.test(message.content)),
+    result.messages.map((message) => message.content).join(" | "),
+  );
+  assert.match(result.messages.at(-1)?.content ?? "", /schema-valid value/);
+  assert.ok(outputFile);
+  assert.equal(fs.existsSync(outputFile), false);
+});
+
+test("structured output above 256 KiB survives echoed JSONL arguments and result", async () => {
+  const schema = { type: "object", required: ["value"], properties: { value: { type: "string" } } };
+  const payload = { value: "x".repeat(300_000) };
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(),
+      connected: false, exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    const outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (!outputFile) throw new Error("structured output path was not provided");
+    setTimeout(() => {
+      fs.writeFileSync(outputFile, JSON.stringify(payload));
+      stdout.write(`${JSON.stringify({ type: "assistant", message: { content: [
+        { type: "toolCall", name: "structured_output", arguments: payload },
+      ] } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false,
+        result: { details: payload } })}\n`);
+    }, 0);
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.structuredOutput, payload);
+  assert.equal(result.messages.some((message) => message.content.includes('"details":{"value"')), false);
+});
+
+test("structured output with malformed stdout cannot settle successfully at agent_settled", async () => {
+  const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(),
+      connected: false, exitCode: null, signalCode: null, pid: undefined,
+      kill() {
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+        return true;
+      },
+    });
+    const outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (!outputFile) throw new Error("structured output path was not provided");
+    setTimeout(() => {
+      fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
+      stdout.write("malformed stdout\n");
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+    }, 0);
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.terminalStatus, "failed");
+  assert.ok(result.messages.some((message) => /stdout JSONL protocol violation/.test(message.content)));
 });
 
 test("parent accepts a schema-valid structured output file without an event payload", async () => {

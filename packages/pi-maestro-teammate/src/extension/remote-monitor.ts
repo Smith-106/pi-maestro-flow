@@ -43,6 +43,7 @@ const REMOTE_MONITOR_MAX_DETAIL_BYTES = 32 * 1024;
 const REMOTE_MONITOR_MAX_DETAIL_LINE_BYTES = 8 * 1024;
 const REMOTE_MONITOR_MAX_RESULT_BYTES = 8 * 1024;
 const REMOTE_MONITOR_MAX_STRUCTURED_BYTES = 20 * 1024;
+export const REMOTE_MONITOR_SETTLED_RUN_LIMIT = 128;
 const REMOTE_MONITOR_TRUNCATED = "\n[truncated]";
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -129,6 +130,7 @@ interface RemoteRunRecord {
   objective?: string;
   detail: string[];
   detailBytes: number;
+  pendingOperations: number;
   lastResult?: string;
   structuredOutput?: unknown;
   lastPersistedStatus?: RemoteStatus;
@@ -198,7 +200,7 @@ export class RemoteMonitorSession {
   async create(request: RemoteWorkerStartRequest): Promise<RemoteMonitorRunListing> {
     this.#assertCurrent();
     const capture = await this.#manager.start(request);
-    if (!this.#isCurrent()) {
+    if (this.#shutdown || !this.#isCurrent()) {
       try {
         await this.#manager.cancel(capture, "monitor-session-changed-after-create");
       } catch (cleanupError) {
@@ -257,15 +259,37 @@ export class RemoteMonitorSession {
     this.#assertCurrent();
     const record = this.#requireTarget(target);
     const createdAt = this.#now();
-    let receipt: RemoteRunInputResult;
+    record.pendingOperations += 1;
     try {
-      receipt = mode === "steer"
-        ? await this.#manager.steer(record.capture, message, commandId)
-        : await this.#manager.followUp(record.capture, message, commandId);
-    } catch (error) {
+      let receipt: RemoteRunInputResult;
+      try {
+        receipt = mode === "steer"
+          ? await this.#manager.steer(record.capture, message, commandId)
+          : await this.#manager.followUp(record.capture, message, commandId);
+      } catch (error) {
+        this.#assertCurrentAfterAwait("remote message delivery");
+        this.#requireSameCapture(record.capture);
+        const safeError = sanitizeRemoteMonitorError(error, "message delivery");
+        this.#persistHistory({
+          entryId: commandId,
+          target,
+          runId: record.capture.runId,
+          targetId: record.capture.targetId,
+          kind: "receipt",
+          direction: "outgoing",
+          source: "remote",
+          messageKind,
+          requestedMode,
+          body: safeError,
+          status: failureHistoryStatus(error),
+          createdAt,
+          updatedAt: this.#now(),
+          revision: 1,
+        });
+        throw new Error(safeError, { cause: error });
+      }
       this.#assertCurrentAfterAwait("remote message delivery");
       this.#requireSameCapture(record.capture);
-      const safeError = sanitizeRemoteMonitorError(error, "message delivery");
       this.#persistHistory({
         entryId: commandId,
         target,
@@ -276,49 +300,41 @@ export class RemoteMonitorSession {
         source: "remote",
         messageKind,
         requestedMode,
-        body: safeError,
-        status: failureHistoryStatus(error),
+        effectiveMode: receipt.effectiveMode,
+        body: message,
+        status: receipt.accepted ? receipt.receipt : "rejected",
         createdAt,
         updatedAt: this.#now(),
         revision: 1,
       });
-      throw new Error(safeError, { cause: error });
+      return receipt;
+    } finally {
+      record.pendingOperations -= 1;
+      this.#pruneSettledRuns();
     }
-    this.#assertCurrentAfterAwait("remote message delivery");
-    this.#requireSameCapture(record.capture);
-    this.#persistHistory({
-      entryId: commandId,
-      target,
-      runId: record.capture.runId,
-      targetId: record.capture.targetId,
-      kind: "receipt",
-      direction: "outgoing",
-      source: "remote",
-      messageKind,
-      requestedMode,
-      effectiveMode: receipt.effectiveMode,
-      body: message,
-      status: receipt.accepted ? receipt.receipt : "rejected",
-      createdAt,
-      updatedAt: this.#now(),
-      revision: 1,
-    });
-    return receipt;
   }
 
   async closeRun(target: string, reason = "monitor-remote-worker-close"): Promise<RemoteRunCancelResult> {
     this.#assertCurrent();
     const record = this.#requireTarget(target);
-    const result = await this.#manager.cancel(record.capture, reason, this.#commandIdFactory());
-    this.#assertCurrentAfterAwait("remote close");
-    this.#requireSameCapture(record.capture);
-    this.#persistLifecycle(record, `Remote close ${result.accepted ? "accepted" : "rejected"}; status=${result.status}.`);
-    return result;
+    record.pendingOperations += 1;
+    try {
+      const result = await this.#manager.cancel(record.capture, reason, this.#commandIdFactory());
+      this.#assertCurrentAfterAwait("remote close");
+      this.#requireSameCapture(record.capture);
+      this.#persistLifecycle(record, `Remote close ${result.accepted ? "accepted" : "rejected"}; status=${result.status}.`);
+      return result;
+    } finally {
+      record.pendingOperations -= 1;
+      this.#pruneSettledRuns();
+    }
   }
 
   recordSnapshot(capture: RemoteRunCapture, snapshot: RemoteRunSnapshot): void {
-    if (!this.#captureMatchesOwner(capture)) return;
+    if (this.#shutdown || !this.#captureMatchesOwner(capture)) return;
     this.#assertSnapshotCapture(snapshot, capture);
+    // A late terminal event must not resurrect a record already evicted.
+    if (terminalStatus(snapshot.status) && !this.#runs.has(capture.runId)) return;
     const record = this.#recordFor(capture, snapshot);
     record.snapshot = { ...snapshot };
     if (record.lastPersistedStatus !== snapshot.status || record.lastPersistedSequence !== snapshot.lastSequence) {
@@ -328,10 +344,11 @@ export class RemoteMonitorSession {
         ? `${snapshot.status}: ${snapshot.summary}`
         : `Remote run transitioned to ${snapshot.status}.`);
     }
+    this.#pruneSettledRuns();
   }
 
   recordEvent(capture: RemoteRunCapture, event: RemoteRunEvent): void {
-    if (!this.#captureMatchesOwner(capture)) return;
+    if (this.#shutdown || !this.#captureMatchesOwner(capture)) return;
     if (event.workerId !== capture.workerId
       || event.instanceNonce !== capture.instanceNonce
       || event.runId !== capture.runId
@@ -365,17 +382,23 @@ export class RemoteMonitorSession {
     this.#assertCurrent();
     const record = this.#requireTarget(target);
     const remaining = Math.max(1, options.deadline - this.#now());
-    let snapshot: RemoteRunSnapshot;
+    record.pendingOperations += 1;
     try {
-      snapshot = await this.#manager.wait(record.capture, { timeoutMs: remaining, signal: options.signal });
-    } catch (error) {
+      let snapshot: RemoteRunSnapshot;
+      try {
+        snapshot = await this.#manager.wait(record.capture, { timeoutMs: remaining, signal: options.signal });
+      } catch (error) {
+        this.#assertCurrentAfterAwait("remote observation wait");
+        throw new Error(sanitizeRemoteMonitorError(error, "observation wait"), { cause: error });
+      }
       this.#assertCurrentAfterAwait("remote observation wait");
-      throw new Error(sanitizeRemoteMonitorError(error, "observation wait"), { cause: error });
+      this.#requireSameCapture(record.capture);
+      record.snapshot = { ...snapshot };
+      return this.#observationFor(record, options);
+    } finally {
+      record.pendingOperations -= 1;
+      this.#pruneSettledRuns();
     }
-    this.#assertCurrentAfterAwait("remote observation wait");
-    this.#requireSameCapture(record.capture);
-    record.snapshot = { ...snapshot };
-    return this.#observationFor(record, options);
   }
 
   async shutdown(reason = "monitor-session-shutdown"): Promise<void> {
@@ -384,8 +407,25 @@ export class RemoteMonitorSession {
     const captures = [...this.#runs.values()]
       .filter((record) => !terminalStatus(record.snapshot.status))
       .map((record) => ({ ...record.capture }));
-    await Promise.allSettled(captures.map((capture) => this.#manager.cancel(capture, reason, this.#commandIdFactory())));
-    await this.#manager.close();
+    try {
+      await Promise.allSettled(captures.map((capture) => this.#manager.cancel(capture, reason, this.#commandIdFactory())));
+      await this.#manager.close();
+    } finally {
+      this.#runs.clear();
+    }
+  }
+
+  #pruneSettledRuns(): void {
+    let settled = 0;
+    for (const record of this.#runs.values()) {
+      if (terminalStatus(record.snapshot.status)) settled += 1;
+    }
+    if (settled <= REMOTE_MONITOR_SETTLED_RUN_LIMIT) return;
+    for (const [runId, record] of this.#runs) {
+      if (!terminalStatus(record.snapshot.status) || record.pendingOperations > 0) continue;
+      this.#runs.delete(runId);
+      if (--settled <= REMOTE_MONITOR_SETTLED_RUN_LIMIT) break;
+    }
   }
 
   #recordFor(capture: RemoteRunCapture, snapshot: RemoteRunSnapshot): RemoteRunRecord {
@@ -402,6 +442,7 @@ export class RemoteMonitorSession {
       createdAt: this.#now(),
       detail: [],
       detailBytes: 0,
+      pendingOperations: 0,
       progressRing: createRemoteProgressRing(),
     };
     this.#runs.set(capture.runId, record);

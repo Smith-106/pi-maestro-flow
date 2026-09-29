@@ -11,7 +11,9 @@
  *   - reply_to: result routing (caller | main)
  */
 
-import { Type, type Static } from "typebox";
+import { Type, type Static, type TSchema } from "typebox";
+import { Check, Errors } from "typebox/value";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { TeammatePlacementV1 } from "pi-maestro-fabric-core/v1/placement";
 import { TEAMMATE_THINKING_INPUTS } from "../shared/thinking.ts";
 import {
@@ -876,3 +878,39 @@ export const RemoteWorkerParams = Type.Object({
     },
   ],
 });
+
+// Gemini function declarations cannot contain conditional JSON Schema keywords.
+// Only the advertised copy is flattened; the exported schemas above remain the
+// authoritative runtime contracts, including their if/then/allOf rules.
+const conditionalToolSchemas: ReadonlySet<TSchema> = new Set([
+  TeammateSendParams,
+  TeammateListParams,
+  ObserveParams,
+  LocalObserveParams,
+  MonitorQueryParams,
+  WorkspaceWindowParams,
+  RemoteWorkerParams,
+]);
+
+export function projectConditionalTeammateTool<T extends TSchema, D>(
+  tool: ToolDefinition<T, D>,
+): ToolDefinition<T, D> {
+  const original = tool.parameters;
+  if (!conditionalToolSchemas.has(original)) return tool;
+  const { if: _if, then: _then, allOf: _allOf, ...advertised } = original as T & {
+    if?: unknown; then?: unknown; allOf?: unknown;
+  };
+  return {
+    ...tool,
+    parameters: advertised as T,
+    async execute(id, params, signal, onUpdate, ctx) {
+      if (!Check(original, params)) {
+        const failure = [...Errors(original, params)][0];
+        const message = `Invalid ${tool.name} arguments at ${failure?.instancePath || "/"}: ${failure?.message ?? "schema validation failed"}.`;
+        // Failed tool calls have no successful result details to return.
+        return { content: [{ type: "text", text: message }], isError: true, details: undefined as D };
+      }
+      return tool.execute(id, params, signal, onUpdate, ctx);
+    },
+  };
+}

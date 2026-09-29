@@ -861,14 +861,20 @@ export function createUtf8LineDecoder(
   let buffered = "";
   return {
     write(chunk: Buffer): string[] {
-      buffered = appendUtf8Tail(buffered, decoder.write(chunk), maxBufferedBytes);
-      const lines = buffered.split("\n");
-      buffered = lines.pop() ?? "";
-      return lines.map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+      const text = decoder.write(chunk);
+      const lines: string[] = [];
+      let start = 0;
+      for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
+        const line = appendUtf8Tail(buffered, text.slice(start, newline), maxBufferedBytes);
+        lines.push(line.endsWith("\r") ? line.slice(0, -1) : line);
+        buffered = "";
+        start = newline + 1;
+      }
+      buffered = appendUtf8Tail(buffered, text.slice(start), maxBufferedBytes);
+      return lines;
     },
     end(): string[] {
-      buffered += decoder.end();
-      const tail = buffered;
+      const tail = appendUtf8Tail(buffered, decoder.end(), maxBufferedBytes);
       buffered = "";
       return tail ? [tail.endsWith("\r") ? tail.slice(0, -1) : tail] : [];
     },
@@ -1591,37 +1597,33 @@ function regularFileExists(candidate: string): boolean {
   }
 }
 
-function pathPiCandidate(
+function pathPiCandidates(
   platform: NodeJS.Platform,
   pathValue: string | null | undefined,
   isFile: (candidate: string) => boolean,
-): Pick<PiLaunchSpec, "command" | "source"> | undefined {
-  if (!pathValue) return undefined;
+): Pick<PiLaunchSpec, "command" | "source">[] {
+  if (!pathValue) return [];
   const directories = pathValue.split(platform === "win32" ? ";" : ":").filter(Boolean);
   if (platform !== "win32") {
-    for (const directory of directories) {
-      const candidate = path.join(directory, "pi");
-      if (isFile(candidate)) return { command: candidate, source: "path-native" };
-    }
-    return undefined;
+    return directories
+      .map((directory) => path.join(directory, "pi"))
+      .filter(isFile)
+      .map((command) => ({ command, source: "path-native" }));
   }
 
-  // Prefer a native executable anywhere on PATH before considering cmd/bat
-  // wrappers. Ignore npm's extensionless POSIX shim: cross-spawn follows its
-  // shebang through sh.exe, so the Pi Node process does not own the IPC channel.
-  for (const extension of [".exe", ".com"] as const) {
+  // Ignore npm's extensionless POSIX shim: cross-spawn follows its shebang
+  // through sh.exe, so the Pi Node process does not own the IPC channel.
+  const candidates: Pick<PiLaunchSpec, "command" | "source">[] = [];
+  for (const extension of [".cmd", ".bat", ".exe", ".com"] as const) {
     for (const directory of directories) {
-      const candidate = path.join(directory, `pi${extension}`);
-      if (isFile(candidate)) return { command: candidate, source: "path-native" };
+      const command = path.join(directory, `pi${extension}`);
+      if (isFile(command)) candidates.push({
+        command,
+        source: extension === ".cmd" || extension === ".bat" ? "windows-shim" : "path-native",
+      });
     }
   }
-  for (const extension of [".cmd", ".bat"] as const) {
-    for (const directory of directories) {
-      const candidate = path.join(directory, `pi${extension}`);
-      if (isFile(candidate)) return { command: candidate, source: "windows-shim" };
-    }
-  }
-  return undefined;
+  return candidates;
 }
 
 const WINDOWS_PI_SHIM_ENTRY_PATTERN = /"?%dp0%[\\/]([^"*%\r\n]+?\.(?:js|mjs|cjs))"?/i;
@@ -1708,20 +1710,33 @@ export function resolvePiLaunchSpec(options: PiSpawnCommandOptions = {}): PiLaun
   const isFile = options.isFile ?? regularFileExists;
   const readTextFile = options.readTextFile ?? ((candidate: string) => fs.readFileSync(candidate, "utf-8"));
   const execPath = options.execPath ?? process.execPath;
-  const pathCandidate = pathPiCandidate(
+  const pathCandidates = pathPiCandidates(
     platform,
     options.pathValue === undefined ? process.env.PATH : options.pathValue,
     isFile,
   );
-  if (pathCandidate?.source === "path-native") return { ...pathCandidate, argsPrefix: [] };
-  if (pathCandidate?.source === "windows-shim") {
-    const resolved = resolvedWindowsPiShim(pathCandidate.command, isFile, readTextFile, execPath);
-    if (resolved) return resolved;
-  }
+  const hostEntry = (): string | undefined | null => {
+    if (options.entryPoint !== undefined) return verifiedHostPiEntry(options.entryPoint, isFile, readTextFile);
+    if (options.argv !== undefined) return verifiedHostPiEntry(options.argv[1], isFile, readTextFile);
+    return resolvePiEntryPoint();
+  };
+  const hostLaunch = (entry: string): PiLaunchSpec => ({
+    command: execPath,
+    argsPrefix: [entry],
+    source: "host-entry",
+  });
 
-  // APPDATA/npm is not guaranteed to be present in PATH for service/gateway
-  // processes, so retain an explicit, verified Windows shim fallback.
   if (platform === "win32") {
+    const entry = hostEntry();
+    if (entry) return hostLaunch(entry);
+    for (const candidate of pathCandidates) {
+      if (candidate.source !== "windows-shim") continue;
+      const resolved = resolvedWindowsPiShim(candidate.command, isFile, readTextFile, execPath);
+      if (resolved) return resolved;
+    }
+
+    // APPDATA/npm is not guaranteed to be present in PATH for service/gateway
+    // processes, so retain an explicit, verified Windows shim fallback.
     const appData = options.appData === undefined ? process.env.APPDATA : options.appData;
     if (appData) {
       const shim = path.join(appData, "npm", "pi.cmd");
@@ -1731,20 +1746,11 @@ export function resolvePiLaunchSpec(options: PiSpawnCommandOptions = {}): PiLaun
       }
     }
   }
-  const injectedEntry = options.entryPoint !== undefined
-    ? verifiedHostPiEntry(options.entryPoint, isFile, readTextFile)
-    : options.argv !== undefined
-      ? verifiedHostPiEntry(options.argv[1], isFile, readTextFile)
-      : undefined;
-  const hostEntry = options.entryPoint === undefined && options.argv === undefined
-    ? resolvePiEntryPoint()
-    : injectedEntry;
-  if (hostEntry) {
-    return {
-      command: options.execPath ?? process.execPath,
-      argsPrefix: [hostEntry],
-      source: "host-entry",
-    };
+  const native = pathCandidates.find((candidate) => candidate.source === "path-native");
+  if (native) return { ...native, argsPrefix: [] };
+  if (platform !== "win32") {
+    const entry = hostEntry();
+    if (entry) return hostLaunch(entry);
   }
 
   // Preserve the historical ENOENT failure mode when no resolver candidate is

@@ -727,6 +727,8 @@ Every dispatch uses a non-empty tasks array; prompt is the only required per-tas
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
+Join every dispatched teammate — consume its result or abort it — before reporting the dispatching task done; do not leave agents running when your own task completes.
+
 Nesting, background, structured output, todo binding, and observation semantics are defined in the corresponding parameter descriptions and the observe tool — follow those contracts instead of polling.
 
 ${modelRoutingSection}`;

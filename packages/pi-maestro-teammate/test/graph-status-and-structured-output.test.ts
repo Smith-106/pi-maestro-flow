@@ -14,7 +14,10 @@ import {
   type CompletionDurabilityProvider,
 } from "../src/public/v1/completion-durability.ts";
 import type { CompletionDeliveryEnvelope } from "../src/completion-outbox/coordinator.ts";
-import registerStructuredOutput from "../src/extension/structured-output.ts";
+import registerStructuredOutput, {
+  STRUCTURED_OUTPUT_MAX_BYTES,
+  writeStructuredOutputFile,
+} from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
   applyAgentRetryState,
   applyAgentResultReadyState,
@@ -2188,7 +2191,7 @@ test("root and proxy teammate initialization use their own request params", () =
 
 test("native teammate status widget yields while another surface owns agent display", () => {
   const source = fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
-  assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?cockpitOwnsAgents = .*?\.agents === true/);
+  assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?typeof ownership\.agents !== "boolean"[\s\S]*?cockpitOwnsAgents = nextOwnsAgents/);
   assert.match(source, /const foregroundToolRuns = new Set<string>\(\)/);
   assert.match(source, /if \(params\.background === false\) \{[\s\S]*?foregroundToolRuns\.add\(correlationId\)[\s\S]*?updateAgentWidget\(\)/);
   assert.match(source, /if \(foregroundToolRuns\.delete\(correlationId\)\) scheduleAgentWidgetUpdate\(\)/);
@@ -2210,7 +2213,7 @@ test("native teammate status widget is stable-mounted and renderKey-gated", () =
   assert.match(source, /if \(!agentWidgetInstalled\) \{[\s\S]*?setWidget\("teammate-agents"/);
   assert.match(source, /widgetTui\?\.requestRender\?\.\(\);/);
   // Event bursts coalesce through a single trailing debounce.
-  assert.match(source, /function scheduleAgentWidgetUpdate\(\): void \{\s*\n\s*if \(!widgetCtx \|\| cockpitOwnsAgents \|\| interactivePanelActive \|\| foregroundToolRuns\.size > 0\) return;/);
+  assert.match(source, /function scheduleAgentWidgetUpdate\(\): void \{\s*\n\s*if \(!teammateUiSessionActive \|\| !widgetCtx \|\| cockpitOwnsAgents \|\| interactivePanelActive \|\| foregroundToolRuns\.size > 0\) return;/);
   assert.match(source, /pi\.events\.on\(TEAMMATE_STARTED_EVENT, \(\) => \{[\s\S]*?scheduleAgentWidgetUpdate\(\);/);
   // Locale changes bypass the key cache because labels are not key inputs.
   assert.match(source, /function invalidateAgentWidget\(\): void \{\s*\n\s*lastWidgetRenderKey = undefined;/);
@@ -2224,7 +2227,7 @@ test("Alt+R delegates the active Agent or Window session list to Cockpit ownersh
   const events = fs.readFileSync(new URL("../src/shared/cockpit-events.ts", import.meta.url), "utf-8");
   assert.match(events, /COCKPIT_SESSION_LIST_EVENT = "cockpit:open-session-list"/);
   assert.match(source, /registerShortcut\("alt\+r"[\s\S]*?if \(cockpitOwnsSessionList\) \{[\s\S]*?events\.emit\(COCKPIT_SESSION_LIST_EVENT, \{ version: 1 \}\)[\s\S]*?return;[\s\S]*?showAgentSelector\(ctx\)/);
-  assert.match(source, /cockpitOwnsAgents = ownership\.agents === true;[\s\S]*?cockpitOwnsSessionList = ownership\.sessionList === true/);
+  assert.match(source, /cockpitOwnsAgents = nextOwnsAgents;[\s\S]*?typeof ownership\.sessionList === "boolean"[\s\S]*?cockpitOwnsSessionList = ownership\.sessionList/);
 });
 
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
@@ -2390,6 +2393,45 @@ test("structured_output writes the validated tool payload for field references",
       () => resolveVariables("Check {api}", new Map(), new Set(["api"])),
       /completed without publishing a consumable output/,
     );
+  } finally {
+    if (previousSchema === undefined) delete process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH;
+    else process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = previousSchema;
+    if (previousOutput === undefined) delete process.env.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    else process.env.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = previousOutput;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("structured_output rejects oversized UTF-8 and escaped payloads without touching the file", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-test-"));
+  const schemaPath = path.join(tmpDir, "schema.json");
+  const outputPath = path.join(tmpDir, "output.json");
+  fs.writeFileSync(schemaPath, JSON.stringify({ type: "object" }));
+  fs.writeFileSync(outputPath, "original");
+  const previousSchema = process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH;
+  const previousOutput = process.env.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+  process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = schemaPath;
+  process.env.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = outputPath;
+  let registeredTool: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
+  try {
+    registerStructuredOutput({ registerTool(tool: typeof registeredTool) { registeredTool = tool; } } as unknown as ExtensionAPI);
+    assert.ok(registeredTool);
+    await registeredTool.execute("call-limit", { value: "a".repeat(STRUCTURED_OUTPUT_MAX_BYTES - 12) });
+    assert.equal(fs.statSync(outputPath).size, STRUCTURED_OUTPUT_MAX_BYTES);
+    fs.writeFileSync(outputPath, "original");
+    await assert.rejects(
+      registeredTool.execute("call-large", { value: "界".repeat(STRUCTURED_OUTPUT_MAX_BYTES / 3) }),
+      /structured_output validation failed: output exceeds 1048576-byte limit/,
+    );
+    await assert.rejects(
+      registeredTool.execute("call-escaped", { value: "\u0000".repeat(STRUCTURED_OUTPUT_MAX_BYTES / 5) }),
+      /structured_output validation failed: output exceeds 1048576-byte limit/,
+    );
+    assert.throws(
+      () => writeStructuredOutputFile(outputPath, "界".repeat(Math.ceil(STRUCTURED_OUTPUT_MAX_BYTES / 3))),
+      /output exceeds 1048576-byte limit/,
+    );
+    assert.equal(fs.readFileSync(outputPath, "utf8"), "original");
   } finally {
     if (previousSchema === undefined) delete process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH;
     else process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = previousSchema;

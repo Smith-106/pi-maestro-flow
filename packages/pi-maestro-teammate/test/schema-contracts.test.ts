@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
+import type { TSchema } from "typebox";
 import {
   LocalObserveParams,
   LocalTeammateListParams,
+  MonitorQueryParams,
   ObserveParams,
+  projectConditionalTeammateTool,
   RemoteWorkerParams,
   TeammateListParams,
   TeammateMonitorParams,
@@ -21,6 +24,86 @@ import {
   findStructuredOutputSchemaHazard,
   validateStructuredOutputValue,
 } from "../src/runs/execution-infra.ts";
+
+// ---------------------------------------------------------------------------
+// Gemini-compatible advertised contracts must not change runtime validation.
+// The registered execute wrapper guards before any tool implementation runs.
+// ---------------------------------------------------------------------------
+
+test("conditional tools advertise no if/then/allOf but retain field constraints", () => {
+  for (const [name, schema] of Object.entries({
+    "teammate-send": TeammateSendParams,
+    "teammate-list": TeammateListParams,
+    "observe": ObserveParams,
+    "local-observe": LocalObserveParams,
+    "monitor": MonitorQueryParams,
+    "workspace-window": WorkspaceWindowParams,
+    "remote-worker": RemoteWorkerParams,
+  })) {
+    const projected = projectConditionalTeammateTool({
+      name, label: name, description: name, parameters: schema,
+      async execute() { return { content: [{ type: "text" as const, text: "executed" }], details: {} }; },
+    });
+    const advertised = JSON.stringify(projected.parameters);
+    assert.doesNotMatch(advertised, /"(?:if|then|allOf)"\s*:/, name);
+    assert.notEqual(projected.parameters, schema, name);
+    const originalShape = schema as TSchema & { properties?: unknown; required?: unknown; additionalProperties?: unknown };
+    const advertisedShape = projected.parameters as typeof originalShape;
+    assert.deepEqual(advertisedShape.properties, originalShape.properties, name);
+    assert.deepEqual(advertisedShape.required, originalShape.required, name);
+    assert.equal(advertisedShape.additionalProperties, false, name);
+  }
+  const projected = projectConditionalTeammateTool({
+    name: "teammate-send", label: "send", description: "send", parameters: TeammateSendParams,
+    async execute() { return { content: [{ type: "text" as const, text: "executed" }], details: {} }; },
+  });
+  assert.equal(Check(projected.parameters, { to: "agent" }), true, "advertised contract is intentionally permissive only for cross-field conditions");
+  assert.equal(Check(projected.parameters, { to: 3, mode: "steer" }), false);
+  assert.equal(Check(projected.parameters, { to: "agent", mode: "invalid" }), false);
+  const advertisedObserve = projectConditionalTeammateTool({
+    name: "observe", label: "observe", description: "observe", parameters: LocalObserveParams,
+    async execute() { return { content: [], details: {} }; },
+  }).parameters;
+  assert.equal(Check(advertisedObserve, { action: "status", targets: [] }), false, "minItems stays enforced");
+  assert.equal(Check(advertisedObserve, { action: "status", targets: [{ kind: "remote", id: "r" }] }), false, "local target enum stays enforced");
+  const advertisedMonitor = projectConditionalTeammateTool({
+    name: "monitor", label: "monitor", description: "monitor", parameters: MonitorQueryParams,
+    async execute() { return { content: [], details: {} }; },
+  }).parameters;
+  assert.equal(Check(advertisedMonitor, { action: "wait", timeoutMs: 0 }), false, "numeric bounds stay enforced");
+});
+
+test("registered tool guard rejects original conditional violations before side effects", async () => {
+  const targets = [{ kind: "teammate", id: "worker" }];
+  const cases: Array<{ schema: TSchema; params: unknown }> = [
+    { schema: TeammateSendParams, params: { to: "agent" } },
+    { schema: TeammateListParams, params: { view: "active", scope: "remote" } },
+    { schema: ObserveParams, params: { action: "wait", targets, waitMode: "count" } },
+    { schema: LocalObserveParams, params: { action: "status", targets, timeoutMs: 10 } },
+    { schema: MonitorQueryParams, params: { action: "wait", timeoutMs: 10 } },
+    { schema: WorkspaceWindowParams, params: { action: "create", objective: "work" } },
+    { schema: RemoteWorkerParams, params: { action: "create", targetId: "host" } },
+  ];
+  for (const { schema, params } of cases) {
+    let executed = 0;
+    const tool = projectConditionalTeammateTool({
+      name: "guarded", label: "guarded", description: "guarded", parameters: schema,
+      async execute() { executed++; return { content: [{ type: "text" as const, text: "executed" }], details: {} }; },
+    });
+    const invalid = await tool.execute("call", params as never, undefined, undefined, {} as never);
+    assert.equal((invalid as typeof invalid & { isError?: boolean }).isError, true);
+    assert.match(invalid.content[0]?.type === "text" ? invalid.content[0].text : "", /Invalid guarded arguments at \/.*:/);
+    assert.equal(executed, 0);
+  }
+  let executed = 0;
+  const tool = projectConditionalTeammateTool({
+    name: "workspace-window", label: "window", description: "window", parameters: WorkspaceWindowParams,
+    async execute() { executed++; return { content: [{ type: "text" as const, text: "executed" }], details: {} }; },
+  });
+  const valid = await tool.execute("call", { action: "create", name: "worker", objective: "work" }, undefined, undefined, {} as never);
+  assert.equal((valid as typeof valid & { isError?: boolean }).isError, undefined);
+  assert.equal(executed, 1);
+});
 
 // ---------------------------------------------------------------------------
 // maxNestingDepth bounds (P1/B1): schema rejects out-of-range values at the

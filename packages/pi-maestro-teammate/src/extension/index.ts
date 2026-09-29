@@ -33,6 +33,7 @@ import {
   LocalTeammateListParams,
   MonitorQueryParams,
   ObserveParams,
+  projectConditionalTeammateTool,
   RemoteWorkerParams,
   TeammateListParams,
   TeammateMonitorParams,
@@ -764,26 +765,28 @@ export default function registerTeammateExtension(
   // directory manifest signature.
   invalidateAgentCatalogCache();
 
-  // UCL: expose teammate tools to the GUI sidecar via the shared cross-extension
-  // registry (globalThis symbol). Each extension owns a distinct registerTool, so
-  // this capture is independent of pi-maestro-flow's. Root mode only.
+  // Project the model-facing schema at registration (including Monitor's
+  // later re-registrations), while validating the original contract before
+  // execution. The child proxy must be guarded before it forwards via IPC.
+  // Root mode also exposes the same guarded definition to the GUI sidecar.
   if (!isChild) {
     for (const legacy of ["teammate-watch", "teammate-wait", "teammate-monitor"]) {
       unregisterGuiTool(legacy, "pi-maestro-teammate");
     }
-    const originalRegisterTool = pi.registerTool.bind(pi);
-    (pi as unknown as { registerTool: (tool: unknown) => unknown }).registerTool = (tool: unknown) => {
-      const candidate = tool as { name?: unknown; execute?: unknown };
-      if (candidate && typeof candidate.name === "string" && typeof candidate.execute === "function" && isGuiTeammateToolAllowed(candidate.name, "pi-maestro-teammate")) {
-        try {
-          registerGuiTool(tool as ToolDefinition, "pi-maestro-teammate");
-        } catch {
-          // GUI capture must never break tool registration.
-        }
-      }
-      return originalRegisterTool(tool as ToolDefinition);
-    };
   }
+  const originalRegisterTool = pi.registerTool.bind(pi);
+  (pi as unknown as { registerTool: (tool: unknown) => unknown }).registerTool = (tool: unknown) => {
+    const projected = projectConditionalTeammateTool(tool as ToolDefinition);
+    const candidate = projected as { name?: unknown; execute?: unknown };
+    if (!isChild && candidate && typeof candidate.name === "string" && typeof candidate.execute === "function" && isGuiTeammateToolAllowed(candidate.name, "pi-maestro-teammate")) {
+      try {
+        registerGuiTool(projected, "pi-maestro-teammate");
+      } catch {
+        // GUI capture must never break tool registration.
+      }
+    }
+    return originalRegisterTool(projected);
+  };
   let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
   let monitorInteractionModeActive = false;
   let monitorToolExposure: MonitorToolExposureController | undefined;
@@ -1442,6 +1445,7 @@ export default function registerTeammateExtension(
     readonly projection: SessionProjectionIdentity;
     bridge?: RuntimeReadModelBrokerBridge;
     refreshTimer?: ReturnType<typeof setInterval>;
+    refreshing?: Promise<void>;
     cancelled: boolean;
   }
   let runtimeReadHandle: RuntimeReadHandle | undefined;
@@ -1555,15 +1559,19 @@ export default function registerTeammateExtension(
     logDiagnosticWarn("[pi-maestro-teammate] Runtime V2 canonical read failed; v1 bridge remains active:", error);
   };
 
-  const refreshRuntimeReadModel = async (handle = runtimeReadHandle): Promise<void> => {
+  const refreshRuntimeReadModel = (handle = runtimeReadHandle): Promise<void> => {
     const bridge = handle?.bridge;
-    if (!handle || !bridge || !ownsRuntimeReadHandle(handle)) return;
-    try {
-      const snapshot = await bridge.snapshot();
+    if (!handle || !bridge || !ownsRuntimeReadHandle(handle)) return Promise.resolve();
+    if (handle.refreshing) return handle.refreshing;
+    const refresh = bridge.snapshot().then((snapshot) => {
       if (ownsRuntimeReadHandle(handle) && handle.bridge === bridge) applyRuntimeReadSnapshot(handle, snapshot);
-    } catch (error) {
+    }).catch((error) => {
       if (ownsRuntimeReadHandle(handle) && handle.bridge === bridge) failRuntimeReadModel(handle, error);
-    }
+    }).finally(() => {
+      if (handle.refreshing === refresh) handle.refreshing = undefined;
+    });
+    handle.refreshing = refresh;
+    return refresh;
   };
 
   const publishRuntimeReadSnapshot = (): void => {
@@ -1792,6 +1800,7 @@ export default function registerTeammateExtension(
   /** Completed teammate sessions recovered from disk (post-restart history). */
   let historyScans: WorkspaceSessionScan[] = [];
   const historyByKey = new Map<string, WorkspaceSessionScan>();
+  let historyScanned = false;
 
   function rebuildHistory(ctx: ExtensionContext): void {
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
@@ -10060,6 +10069,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   }
 
   async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
+    if (!historyScanned) {
+      rebuildHistory(ctx);
+      historyScanned = true;
+    }
     const activeRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
     const allRows = [...activeRows, ...buildHistoryRows(historyScans)];
     if (allRows.length === 0) {
@@ -10885,6 +10898,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   let cockpitOwnsAgents = false;
   let cockpitOwnsSessionList = false;
+  let cockpitQuiet = false;
+  let cockpitQuietSymbols: unknown;
+  // Fences deferred widget work across async session teardown. Ownership events
+  // may still arrive while shutdown awaits publishers, but they cannot remount.
+  let teammateUiSessionActive = false;
 
   pi.registerShortcut("alt+r", {
     description: "Open the teammate session list",
@@ -10968,16 +10986,21 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   /** Coalesce event bursts into one update ~100ms later (completion-batcher pattern). */
   function scheduleAgentWidgetUpdate(): void {
-    if (!widgetCtx || cockpitOwnsAgents || interactivePanelActive || foregroundToolRuns.size > 0) return;
+    if (!teammateUiSessionActive || !widgetCtx || cockpitOwnsAgents || interactivePanelActive || foregroundToolRuns.size > 0) return;
     if (widgetUpdateTimer) return;
     widgetUpdateTimer = setTimeout(() => {
       widgetUpdateTimer = null;
+      if (!teammateUiSessionActive) return;
       updateAgentWidget();
     }, 100);
     widgetUpdateTimer.unref?.();
   }
 
   function updateAgentWidget(): void {
+    if (!teammateUiSessionActive) {
+      clearAgentWidget();
+      return;
+    }
     if (!widgetCtx) {
       agentWidgetInstalled = false;
       widgetTui = null;
@@ -11181,10 +11204,23 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       quiet?: unknown;
       quietSymbols?: unknown;
     };
-    cockpitOwnsAgents = ownership.agents === true;
-    cockpitOwnsSessionList = ownership.sessionList === true;
-    setQuietMode(ownership.quiet === true, ownership.quietSymbols);
-    updateAgentWidget();
+    // `agents` is the handoff authority bit. Missing/non-boolean values are a
+    // malformed snapshot, not an implicit release of the native roster.
+    if (typeof ownership.agents !== "boolean") return;
+    const nextOwnsAgents = ownership.agents;
+    const nextQuiet = ownership.quiet === true;
+    const agentsChanged = nextOwnsAgents !== cockpitOwnsAgents;
+    const quietChanged = nextQuiet !== cockpitQuiet || ownership.quietSymbols !== cockpitQuietSymbols;
+    cockpitOwnsAgents = nextOwnsAgents;
+    cockpitQuiet = nextQuiet;
+    cockpitQuietSymbols = ownership.quietSymbols;
+    if (typeof ownership.sessionList === "boolean") {
+      cockpitOwnsSessionList = ownership.sessionList;
+    }
+    setQuietMode(nextQuiet, ownership.quietSymbols);
+    // Replayed ownership is write-free; a real quiet-mode transition still
+    // repaints the native fallback when Cockpit intentionally leaves it visible.
+    if (agentsChanged || quietChanged) updateAgentWidget();
   }));
   // Handshake: this subscription may have been registered after Cockpit's
   // session_start broadcast; ask once instead of waiting for the next
@@ -11240,8 +11276,18 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   pi.on("session_start", (event, ctx) => {
     backgroundStatusHeartbeat.setIntervalMs(getGlobalBackgroundStatusHeartbeatMs());
     backgroundStatusHeartbeat.reset();
-    // Re-ask ownership on every session boundary: a reload re-runs extension
-    // factories and Cockpit's broadcast may have landed before we subscribed.
+    // Reset stale local ownership and widget state before asking. The EventBus
+    // delivers local listeners synchronously, so the answer is settled before
+    // widgetCtx is rebound and any native roster can mount.
+    teammateUiSessionActive = false;
+    clearAgentWidget();
+    widgetCtx = null;
+    cockpitOwnsAgents = false;
+    cockpitOwnsSessionList = false;
+    cockpitQuiet = false;
+    cockpitQuietSymbols = undefined;
+    setQuietMode(false, undefined);
+    teammateUiSessionActive = true;
     pi.events.emit(COCKPIT_UI_OWNERSHIP_QUERY_EVENT, undefined);
     registerTeammateSettings();
     state.settlementOwner = undefined;
@@ -11285,6 +11331,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       });
     }
     widgetCtx = ctx;
+    updateAgentWidget();
     exitMonitorInteractionMode();
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui, true);
@@ -11346,7 +11393,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     // update is cached even if the async workspace publisher is still starting.
     pi.events.emit("bash-bg:query", undefined);
     pi.events.emit("loop:query", undefined);
-    rebuildHistory(ctx);
+    historyScans = [];
+    historyByKey.clear();
+    historyScanned = false;
   });
 
   pi.on("message_end", (event) => {
@@ -11512,6 +11561,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("session_shutdown", async (event) => {
     backgroundStatusHeartbeat.reset();
+    // Fence and cancel deferred roster work before any async publication/drain.
+    // Ownership releases received during those awaits cannot remount the widget.
+    teammateUiSessionActive = false;
+    clearAgentWidget();
+    widgetCtx = null;
     const shutdownReason = event?.reason ?? "quit";
     const outgoingFence = captureRootSessionFence();
     state.settlementOwner = projectionForRootFence(outgoingFence);

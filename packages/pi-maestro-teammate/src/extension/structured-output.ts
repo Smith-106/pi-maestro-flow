@@ -9,8 +9,31 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 export const STRUCTURED_OUTPUT_FILE_MODE = 0o600;
+export const STRUCTURED_OUTPUT_MAX_BYTES = 1024 * 1024;
+
+function oversizedOutputError(): Error {
+  return new Error(`structured_output validation failed: output exceeds ${STRUCTURED_OUTPUT_MAX_BYTES}-byte limit.`);
+}
+
+/** Stop serialization as soon as the JSON payload cannot fit the file budget. */
+function serializeStructuredOutput(params: unknown): string {
+  let minimumBytes = 0;
+  const content = JSON.stringify(params, function (key, value: unknown) {
+    // Count every visit (including omitted properties) to bound serialization
+    // work. JSON escapes can only increase string size, so unescaped strings
+    // also let us stop before stringify builds a huge escaped value.
+    // Array indexes are visited by the replacer but are not JSON keys.
+    minimumBytes += 1 + (key && !Array.isArray(this) ? Buffer.byteLength(key, "utf8") : 0);
+    if (typeof value === "string") minimumBytes += Buffer.byteLength(value, "utf8");
+    if (minimumBytes > STRUCTURED_OUTPUT_MAX_BYTES) throw oversizedOutputError();
+    return value;
+  });
+  if (Buffer.byteLength(content, "utf8") > STRUCTURED_OUTPUT_MAX_BYTES) throw oversizedOutputError();
+  return content;
+}
 
 export function writeStructuredOutputFile(outputPath: string, content: string): void {
+  if (Buffer.byteLength(content, "utf8") > STRUCTURED_OUTPUT_MAX_BYTES) throw oversizedOutputError();
   const fd = openStructuredOutputFile(outputPath);
   try {
     if (!fs.fstatSync(fd).isFile()) {
@@ -108,7 +131,7 @@ export default function registerStructuredOutput(pi: ExtensionAPI): void {
     parameters: Type.Unsafe(schema),
 
     async execute(_toolCallId, params) {
-      writeStructuredOutputFile(outputPath, JSON.stringify(params));
+      writeStructuredOutputFile(outputPath, serializeStructuredOutput(params));
       return {
         content: [{ type: "text", text: "Structured output saved." }],
         details: params,

@@ -100,7 +100,6 @@ import {
   getTeammateSessionRoot,
   isPiResultReadyTurn,
   piLaunchDiagnostic,
-  readRegularTextFile,
   releasePublishedTurnHistory,
   resetUsage,
   setUsageSnapshot,
@@ -136,6 +135,31 @@ interface AttemptRecoveryFacts {
 
 export const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
 const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
+// Keep in sync with STRUCTURED_OUTPUT_MAX_BYTES in extension/structured-output.ts.
+const STRUCTURED_OUTPUT_MAX_BYTES = 1024 * 1024;
+
+class StructuredOutputTooLargeError extends Error {}
+
+/** Check the opened file before reading, and cap the read if it grows after fstat. */
+function readBoundedStructuredOutputFile(filePath: string): string {
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`Structured output path is not a regular file: ${filePath}`);
+    if (stat.size > STRUCTURED_OUTPUT_MAX_BYTES) throw new StructuredOutputTooLargeError();
+    const bytes = Buffer.allocUnsafe(STRUCTURED_OUTPUT_MAX_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = fs.readSync(fd, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > STRUCTURED_OUTPUT_MAX_BYTES) throw new StructuredOutputTooLargeError();
+    return bytes.toString("utf8", 0, length);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 /**
  * Deadline for Pi to acknowledge an in-process model switch (`set_model`).
@@ -1064,8 +1088,10 @@ export async function runSingleAttempt(
       termination.terminate();
     }, options.firstActivityTimeoutMs ?? FIRST_ACTIVITY_TIMEOUT_MS);
 
-    // Parse JSON lines from stdout
-    const stdoutLines = createUtf8LineDecoder();
+    // Parse JSON lines from stdout. Pi's agent_end event can repeat the full
+    // message history even without structured output, so framing must allow the
+    // bounded transcript plus JSON escaping and event metadata in every lane.
+    const stdoutLines = createUtf8LineDecoder(EXECUTION_BUFFER_LIMITS.transcriptBytes * 4);
     const processStdoutLine = (line: string) => {
       const trimmed = line.trim();
       if (!trimmed) {
@@ -1235,9 +1261,10 @@ export async function runSingleAttempt(
 
     function readStructuredOutput(cleanup: boolean): unknown | undefined {
       let structuredOutput: unknown;
+      let oversized = false;
       if (outputFile) {
         try {
-          const serialized = readRegularTextFile(outputFile);
+          const serialized = readBoundedStructuredOutputFile(outputFile);
           if (serialized.trim().length > 0) {
             try {
               const candidate = JSON.parse(serialized);
@@ -1254,12 +1281,19 @@ export async function runSingleAttempt(
                 `structured_output validation failed: output file is not valid JSON (${error instanceof Error ? error.message : String(error)}).`;
             }
           }
-        } catch {
-          // The structured_output tool has not persisted a result yet.
+        } catch (error) {
+          if (error instanceof StructuredOutputTooLargeError) {
+            oversized = true;
+            state.structuredOutputValidationFailure =
+              `structured_output validation failed: output file exceeds ${STRUCTURED_OUTPUT_MAX_BYTES}-byte limit.`;
+            state.capturedStructuredOutput = undefined;
+            state.pendingStructuredOutput = undefined;
+          }
+          // Other read errors mean the tool has not persisted a result yet.
         }
         if (cleanup) cleanupFile(outputFile);
       }
-      return structuredOutput ?? state.capturedStructuredOutput;
+      return oversized ? undefined : structuredOutput ?? state.capturedStructuredOutput;
     }
 
     function completeTurn(
@@ -1269,6 +1303,17 @@ export async function runSingleAttempt(
       terminalStatus: AgentTerminalStatus = exitCode === 0 ? "completed" : "failed",
     ): void {
       if (state.terminal || state.turnLifecycleSettled) return;
+      if (state.stdoutProtocolViolation && exitCode === 0) {
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Teammate stdout JSONL protocol violation (agent=${params.agent}, `
+            + `correlationId=${correlationId}); a malformed or oversized event was rejected.`,
+        });
+        exitCode = 1;
+        terminalStatus = "failed";
+        terminateChild = true;
+      }
       releaseRetryPersistenceGuard();
       state.turnLifecycleSettled = true;
       progress.status = terminalStatus;

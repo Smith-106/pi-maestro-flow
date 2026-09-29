@@ -9,6 +9,7 @@ import {
 } from "../src/remote/types.ts";
 import type { RemoteWorkerStartRequest, RemoteWorkerWaitOptions } from "../src/remote/worker-manager.ts";
 import {
+  REMOTE_MONITOR_SETTLED_RUN_LIMIT,
   RemoteMonitorSession,
   type RemoteWorkerManagerLike,
 } from "../src/extension/remote-monitor.ts";
@@ -58,7 +59,9 @@ class FakeManager implements RemoteWorkerManagerLike {
   startGate?: Promise<void>;
   sendError?: Error;
   sendGate?: Promise<void>;
+  cancelGate?: Promise<void>;
   waitError?: Error;
+  waitGate?: Promise<void>;
 
   async start(request: RemoteWorkerStartRequest): Promise<RemoteRunCapture> {
     await this.startGate;
@@ -86,6 +89,7 @@ class FakeManager implements RemoteWorkerManagerLike {
   }
 
   async wait(capture: RemoteRunCapture, _options?: RemoteWorkerWaitOptions): Promise<RemoteRunSnapshot> {
+    await this.waitGate;
     if (this.waitError) throw this.waitError;
     return this.snapshot(capture);
   }
@@ -106,6 +110,7 @@ class FakeManager implements RemoteWorkerManagerLike {
 
   async cancel(capture: RemoteRunCapture): Promise<RemoteRunCancelResult> {
     this.cancelled.push({ ...capture });
+    await this.cancelGate;
     return { accepted: true, status: "cancelled" };
   }
 
@@ -414,6 +419,92 @@ test("remote observations bound multibyte detail, result, and structured output 
   assert.match(persisted.find((entry) => entry.kind === "result")?.body ?? "", /Remote run failed \(Error\)\./);
 });
 
+test("remote observation wait survives terminal pruning before manager completion", async () => {
+  const { manager, session } = harness();
+  const waiting = await session.create({ targetId: "linux/pi", name: "waiting", objective: "Wait for result" });
+  const waitingCapture = session.capture(waiting.target)!;
+  let release!: () => void;
+  manager.waitGate = new Promise<void>((resolve) => { release = resolve; });
+  const pending = session.waitObservation(waiting.target, {
+    detail: "summary",
+    lines: 20,
+    deadline: Date.now() + 1_000,
+    signal: new AbortController().signal,
+  });
+  const completed = snapshot(waitingCapture, "completed", 1);
+  manager.state.set(waiting.runId, completed);
+  session.recordSnapshot(waitingCapture, completed);
+  for (let index = 0; index < REMOTE_MONITOR_SETTLED_RUN_LIMIT; index += 1) {
+    const run = await session.create({ targetId: "linux/pi", name: `finished-${index}`, objective: "Finished" });
+    const capture = session.capture(run.target)!;
+    session.recordSnapshot(capture, snapshot(capture, "completed", 1));
+  }
+  assert.equal(session.capture(waiting.target)?.runId, waiting.runId);
+  assert.equal(session.list().length, REMOTE_MONITOR_SETTLED_RUN_LIMIT);
+  release();
+  const observation = await pending;
+  assert.equal(observation.phase, "settled");
+  assert.equal(observation.terminalStatus, "completed");
+});
+
+test("remote send and close retain ownership through terminal pruning", async () => {
+  for (const operation of ["accepted", "rejected", "close"] as const) {
+    const { manager, session, persisted } = harness();
+    const run = await session.create({ targetId: "linux/pi", name: operation, objective: "Do work" });
+    const capture = session.capture(run.target)!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    if (operation === "close") manager.cancelGate = gate;
+    else manager.sendGate = gate;
+    if (operation === "rejected") manager.sendError = new Error("transport unavailable");
+    const commandId = `message-${operation}`;
+    const pending = operation === "close"
+      ? session.closeRun(run.target)
+      : session.send(run.target, "follow_up", "Continue", "coordination", commandId);
+    session.recordSnapshot(capture, snapshot(capture, "completed", 1));
+    for (let index = 0; index < REMOTE_MONITOR_SETTLED_RUN_LIMIT; index += 1) {
+      const finished = await session.create({ targetId: "linux/pi", name: `finished-${index}`, objective: "Finished" });
+      const finishedCapture = session.capture(finished.target)!;
+      session.recordSnapshot(finishedCapture, snapshot(finishedCapture, "completed", 1));
+    }
+    assert.equal(session.capture(run.target)?.runId, run.runId);
+    assert.equal(session.list().length, REMOTE_MONITOR_SETTLED_RUN_LIMIT);
+    release();
+    if (operation === "rejected") {
+      await assert.rejects(pending, /Remote message delivery failed/);
+      assert.equal(persisted.find((entry) => entry.entryId === commandId)?.status, "rejected");
+    } else if (operation === "close") {
+      assert.equal((await pending).accepted, true);
+      assert.ok(persisted.some((entry) => entry.runId === run.runId && /Remote close accepted/.test(entry.body)));
+    } else {
+      assert.equal((await pending).accepted, true);
+      assert.equal(persisted.find((entry) => entry.entryId === commandId)?.status, "queued");
+    }
+  }
+});
+
+test("remote Monitor evicts only oldest settled runs and ignores late terminal snapshots", async () => {
+  const { manager, session } = harness();
+  const active = await session.create({ targetId: "linux/pi", name: "active", objective: "Still running" });
+  let firstCapture: RemoteRunCapture | undefined;
+  for (let index = 0; index <= REMOTE_MONITOR_SETTLED_RUN_LIMIT; index += 1) {
+    const run = await session.create({ targetId: "linux/pi", name: `finished-${index}`, objective: `Finished ${index}` });
+    const capture = session.capture(run.target)!;
+    firstCapture ??= capture;
+    const completed = snapshot(capture, "completed", 1);
+    manager.state.set(capture.runId, completed);
+    session.recordSnapshot(capture, completed);
+  }
+  assert.equal(session.list().length, REMOTE_MONITOR_SETTLED_RUN_LIMIT + 1);
+  assert.equal(session.capture(active.target)?.runId, active.runId);
+  assert.equal(session.capture(`remote:${firstCapture!.runId}`), undefined);
+  session.recordSnapshot(firstCapture!, snapshot(firstCapture!, "completed", 2));
+  assert.equal(session.list().length, REMOTE_MONITOR_SETTLED_RUN_LIMIT + 1);
+  const newest = session.list()[0]!;
+  assert.equal((await session.closeRun(newest.target)).accepted, true);
+  assert.equal(manager.cancelled.at(-1)?.runId, newest.runId);
+});
+
 test("remote session shutdown cancels only active captured runs before closing its manager", async () => {
   const { manager, session } = harness();
   const active = await session.create({ targetId: "linux/pi", name: "active", objective: "Active" });
@@ -424,7 +515,8 @@ test("remote session shutdown cancels only active captured runs before closing i
   session.recordSnapshot(terminalCapture, completed);
 
   await session.shutdown();
-  assert.deepEqual(manager.cancelled.map((capture) => capture.runId), [session.capture(active.target)?.runId]);
+  assert.deepEqual(manager.cancelled.map((capture) => capture.runId), [active.runId]);
+  assert.equal(session.capture(active.target), undefined);
   assert.equal(manager.closed, true);
   await assert.rejects(session.send(active.target, "steer", "late", "coordination"), /closed/);
 });

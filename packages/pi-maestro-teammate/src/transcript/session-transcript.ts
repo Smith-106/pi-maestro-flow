@@ -134,6 +134,10 @@ export function findLatestSessionFile(dir: string): string | null {
  * valid older session in the same directory.
  */
 export function findValidSessionFile(dir: string): string | null {
+  return findValidSessionSummary(dir)?.sessionFile ?? null;
+}
+
+function findValidSessionSummary(dir: string): WorkspaceSessionScan | null {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -153,7 +157,7 @@ export function findValidSessionFile(dir: string): string | null {
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file));
   for (const { file } of candidates) {
     const summary = summarizeSessionFile(file);
-    if (summary) return file;
+    if (summary) return summary;
   }
   return null;
 }
@@ -520,9 +524,7 @@ export function scanWorkspaceSessionDirs(parentSessionFile: string): WorkspaceSe
   }
   const scans: WorkspaceSessionScan[] = [];
   for (const dir of dirs) {
-    const file = findValidSessionFile(dir);
-    if (!file) continue;
-    const summary = summarizeSessionFile(file);
+    const summary = findValidSessionSummary(dir);
     if (summary) scans.push(summary);
   }
   return scans.sort(
