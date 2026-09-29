@@ -35,26 +35,21 @@ Exemptions: conversation, arithmetic, current time, and commands with no project
 - **Learn from existing code** — find 3 similar patterns, map dependencies, follow existing style, imports, and conventions; minimize changes to what the request requires.
 - **Clear intent over clever code** — be boring and obvious; no premature abstractions.
 - **No unsolicited documentation** — never generate reports, summaries, or doc files without an explicit user request; when a command requires a report, write it only to the current Run's `report.md` or declared output.
-- **Fix, don't hide** — never suppress failures (`@ts-ignore`, empty catch, `as any`, skipped tests, excessive timeouts); plan complex tasks before implementing, verify with the project's own tooling, commit incrementally, and stop after 3 failed attempts to reassess.
+- **Fix, don't hide** — never suppress failures (`@ts-ignore`, empty catch, `as any`, skipped tests, excessive timeouts); plan complex tasks before implementing, verify with the project's own tooling, and commit incrementally.
 - **Content uniqueness** — each layer owns its abstraction level; reference, don't duplicate; avoid implementation creep.
 
 # Engineering
 
-- Match existing architecture, style, libraries, build system, tests, formatter, and lint rules.
-- Prefer simple data structures and explicit code over clever abstractions.
-- Make the smallest change that fully satisfies the request.
-- Preserve backward compatibility and user changes unless replacement is explicit.
-- Study existing implementations and integration points before editing.
+- Preserve user changes and unrelated worktree edits unless replacement is explicit.
 - Validate at system boundaries; do not add impossible-case guards or speculative fallbacks.
-- Fix root causes. Do not hide failures with skipped tests, suppressions, empty catches, broad casts, or excessive timeouts.
 - Delete code only after verifying no static, dynamic, plugin, or external consumer can reach it.
-- Do not create reports or documentation unless requested. Workflow-required reports belong only in the current Run's declared output.
 - Add comments only for a non-obvious reason, invariant, or workaround. Keep them short and do not narrate the code or task.
 - Stop after three failed attempts on the same problem. Report evidence and suspected cause, then ask for direction or delegate a fresh investigation.
 
 ## Scope
 
 - Deliver the requested scope without silently narrowing, expanding, or transforming it.
+- If the only remaining gaps require human approval, credentials, or resources outside your control, surface that as the deliverable — do not build substitutes around the gap.
 - If a better approach exists, state it briefly and continue with the requested task unless it is unsafe.
 - Inspect dirty-worktree changes before editing. Preserve unrelated changes; ask only when overlapping changes make safe progress impossible.
 - Keep verification proportional to the requested scope and follow Verification Discipline.
@@ -192,7 +187,7 @@ Role selection: when the project registers `general-executor`, implementation wo
 
 Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when an active Workflow Session already tracks its Runs. Follow the goal tool description for create/get/update/complete semantics.
 
-The user owns stop, resume, and clear lifecycle controls. Do not create a competing Goal.
+The user owns stop, resume, and clear lifecycle controls. Do not create a competing Goal. If the user's objective changes materially, surface that the active Goal should be stopped or updated rather than continuing the old objective alongside the new one.
 
 # Shell Execution
 

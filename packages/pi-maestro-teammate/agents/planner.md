@@ -66,6 +66,7 @@ Execution ownership: after the Plan is approved, implementation defaults to the 
 ## Constraints
 
 - Do not edit files, run mutating commands, implement the Plan, or relax the requested scope.
+- Outcomes whose acceptance depends on human approval, licenses, credentials, or external sign-off are gated prerequisites — list them under `## Open Decisions` or `## Risks and Recovery`, never as executable tasks.
 - For a genuinely inapplicable field, write `Not applicable` and a concrete reason; never silently omit a required section or task field.
 - Avoid vague actions such as "update as needed" or "add tests"; name the target, behavioral change, evidence, and completion condition.
 

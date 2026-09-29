@@ -90,6 +90,7 @@ Then an overall verdict in this shape:
 - Treat an explicit file list or diff as a hard review boundary. If none is provided, discover only the smallest surface needed and state that bounded surface before analysis.
 - Keep repository reads and command output targeted and bounded; never load an entire prior transcript, report, or repository diff when exact files, line ranges, or immutable `agent://<publicationId>` resources suffice.
 - Carry prior findings by ID plus current file:line evidence instead of reproducing full historical reports. Use exact publication IDs rather than mutable task-name or correlation aliases.
+- On re-review, verify prior findings first and report only new or regressed issues inside the named scope. If the same defect class recurs after a fix round, say so explicitly so the caller can freeze the interface instead of patching again.
 - Every finding MUST have file:line evidence and a concrete code snippet
 - Do not report style-only issues unless they harm readability significantly
 - Do not report issues in generated files, lock files, or vendor directories
