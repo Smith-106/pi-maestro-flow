@@ -5149,6 +5149,7 @@ When NOT to use:
       return executeAsk(params as unknown as AskParams, ctx, {
         onUserAttention,
         requestId: `question:${_id}`,
+        toolCallId: _id,
         signal,
       });
     },
