@@ -318,9 +318,85 @@ test("benchmark-equivalent routes are visible but do not produce an arbitrary re
     assert.equal(view.candidates.length, 1);
     assert.deepEqual(view.candidates[0]?.equivalent_registration_ids, ["route-a/model", "route-b/model"]);
     assert.equal(view.recommendation, null);
-    assert.equal(view.selection.recommendation_reason, "equivalent-route-tie");
-    assert.equal(view.selection.coverage.matched_models, 2);
-    assert.equal(view.selection.coverage.distinct_benchmarks, 1);
+    assert.equal(view.selection?.recommendation_reason, "equivalent-route-tie");
+    assert.equal(view.selection?.coverage.matched_models, 2);
+    assert.equal(view.selection?.coverage.distinct_benchmarks, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate output limit does not change material-tie abstention", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-limit-tie-"));
+  const ranking = [
+    { id: "provider/first" },
+    { id: "provider/second" },
+    ...Array.from({ length: 98 }, (_, index) => ({ id: `filler/model-${index}` })),
+  ];
+  const fetchFn: typeof fetch = async () => new Response(JSON.stringify({ data: ranking }), { status: 200 });
+  try {
+    const view = await loadModelIntelligence("development", [
+      { registrationId: "provider/first" },
+      { registrationId: "provider/second" },
+    ], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+      limit: 1,
+    });
+    assert.equal(view.candidates.length, 1);
+    assert.equal(view.recommendation, null);
+    assert.equal(view.selection?.recommendation_reason, "material-tie");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("aborting one single-flight waiter does not cancel another waiter", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-waiter-abort-"));
+  const controller = new AbortController();
+  let hits = 0;
+  const fetchFn: typeof fetch = async () => {
+    hits++;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return new Response(JSON.stringify({ data: [{ id: "provider/model" }] }), { status: 200 });
+  };
+  const baseOptions = {
+    cachePath: join(root, "cache.json"),
+    baseUrl: "https://rankings.example/models",
+    fetchFn,
+  };
+  try {
+    const first = loadModelIntelligence("development", [{ registrationId: "provider/model" }], {
+      ...baseOptions,
+      signal: controller.signal,
+    });
+    const second = loadModelIntelligence("development", [{ registrationId: "provider/model" }], baseOptions);
+    setTimeout(() => controller.abort(), 5);
+    await assert.rejects(first, /abort/i);
+    assert.equal((await second).status, "available");
+    assert.equal(hits, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("date-suffixed model ids keep exact identity before alias fallback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-date-id-"));
+  const fetchFn: typeof fetch = async () => new Response(JSON.stringify({
+    data: [{ id: "provider/model" }, { id: "provider/model-2025-01-01" }],
+  }), { status: 200 });
+  try {
+    const view = await loadModelIntelligence("development", [
+      { registrationId: "provider/model-2025-01-01" },
+    ], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.equal(view.candidates[0]?.benchmark_model_id, "provider/model-2025-01-01");
+    assert.equal(view.candidates[0]?.matched_via, "exact");
+    assert.equal(view.candidates[0]?.ranks.coding?.rank, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

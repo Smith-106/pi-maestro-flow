@@ -55,12 +55,12 @@ export interface ModelIntelligenceRank {
 export interface ModelIntelligenceCandidate {
   registration_id: string;
   benchmark_model_id: string;
-  equivalent_registration_ids: string[];
-  matched_via: "exact" | "unambiguous-alias";
+  equivalent_registration_ids?: string[];
+  matched_via?: "exact" | "unambiguous-alias";
   strengths: string[];
   ranks: Partial<Record<ModelIntelligenceDimension, ModelIntelligenceRank>>;
-  missing_dimensions: ModelIntelligenceDimension[];
-  selection_score: number;
+  missing_dimensions?: ModelIntelligenceDimension[];
+  selection_score?: number;
   reference_pricing_usd_per_million?: {
     input: number;
     output: number;
@@ -84,7 +84,7 @@ export interface ModelIntelligenceView {
   task_type: TeammateTaskType;
   preference: ModelIntelligencePreference;
   recommendation: string | null;
-  selection: {
+  selection?: {
     method: "weighted-normalized-rank";
     dimension_weights: Array<{ dimension: ModelIntelligenceDimension; weight: number }>;
     materiality_threshold: number;
@@ -110,6 +110,11 @@ export interface ModelIntelligenceView {
   }>;
   note: string;
 }
+
+type ScoredCandidate = ModelIntelligenceCandidate & Required<Pick<
+  ModelIntelligenceCandidate,
+  "equivalent_registration_ids" | "matched_via" | "missing_dimensions" | "selection_score"
+>>;
 
 export interface LoadModelIntelligenceOptions {
   cachePath?: string;
@@ -157,7 +162,14 @@ const TASK_DIMENSION_POLICIES: Record<string, TaskDimensionPolicy> = {
   testing: { balanced: ["coding", "agentic", "price"], sota: ["coding", "agentic", "intelligence"] },
 };
 
-const inFlightRefreshes = new Map<string, Promise<ModelIntelligenceCacheFile>>();
+interface SharedRefresh {
+  promise: Promise<ModelIntelligenceCacheFile>;
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+}
+
+const inFlightRefreshes = new Map<string, SharedRefresh>();
 
 function selectionDimensions(
   taskType: TeammateTaskType,
@@ -292,6 +304,28 @@ async function fetchLists(
   return Object.fromEntries(entries) as ModelIntelligenceCacheFile["lists"];
 }
 
+async function waitForRefresh(
+  refresh: SharedRefresh,
+  signal: AbortSignal | undefined,
+): Promise<ModelIntelligenceCacheFile> {
+  signal?.throwIfAborted();
+  refresh.waiters++;
+  let onAbort: (() => void) | undefined;
+  try {
+    if (!signal) return await refresh.promise;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new Error("Model intelligence request aborted"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    return await Promise.race([refresh.promise, aborted]);
+  } finally {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    refresh.waiters--;
+    if (refresh.waiters === 0 && !refresh.settled) refresh.controller.abort();
+  }
+}
+
 async function loadCache(options: LoadModelIntelligenceOptions): Promise<{
   cache?: ModelIntelligenceCacheFile;
   stale: boolean;
@@ -307,27 +341,34 @@ async function loadCache(options: LoadModelIntelligenceOptions): Promise<{
   const refreshKey = `${path}\0${baseUrl}`;
   let refresh = inFlightRefreshes.get(refreshKey);
   if (!refresh) {
-    refresh = (async () => {
+    const controller = new AbortController();
+    const state: SharedRefresh = {
+      controller,
+      waiters: 0,
+      settled: false,
+      promise: undefined as unknown as Promise<ModelIntelligenceCacheFile>,
+    };
+    state.promise = (async () => {
       const lists = await fetchLists(
         baseUrl,
         options.timeoutMs ?? FETCH_TIMEOUT_MS,
         options.fetchFn ?? fetch,
-        options.signal,
+        controller.signal,
       );
-      options.signal?.throwIfAborted();
+      controller.signal.throwIfAborted();
       const next: ModelIntelligenceCacheFile = { version: 1, fetchedAt: Date.now(), lists };
       await writeCache(path, next);
       return next;
-    })();
-    inFlightRefreshes.set(refreshKey, refresh);
-    void refresh.finally(() => {
-      if (inFlightRefreshes.get(refreshKey) === refresh) inFlightRefreshes.delete(refreshKey);
-    }).catch(() => undefined);
+    })().finally(() => {
+      state.settled = true;
+      if (inFlightRefreshes.get(refreshKey) === state) inFlightRefreshes.delete(refreshKey);
+    });
+    refresh = state;
+    inFlightRefreshes.set(refreshKey, state);
   }
 
   try {
-    const cache = await refresh;
-    options.signal?.throwIfAborted();
+    const cache = await waitForRefresh(refresh, options.signal);
     return { cache, stale: false };
   } catch {
     if (options.signal?.aborted) throw new Error("Model intelligence request aborted");
@@ -336,7 +377,7 @@ async function loadCache(options: LoadModelIntelligenceOptions): Promise<{
 }
 
 function qualifiedId(value: string): string {
-  return value.trim().toLowerCase().replace(/-\d{4}-\d{2}-\d{2}$/, "").replace(/[:_]/g, "-");
+  return value.trim().toLowerCase().replace(/[:_]/g, "-");
 }
 
 function qualifiedAliases(model: AvailableModelIdentity): string[] {
@@ -389,7 +430,7 @@ function candidateFor(
   models: readonly AvailableModelIdentity[],
   lists: ModelIntelligenceCacheFile["lists"],
   weights: readonly { dimension: ModelIntelligenceDimension; weight: number }[],
-): ModelIntelligenceCandidate | undefined {
+): ScoredCandidate | undefined {
   const matches = new Map<ModelIntelligenceDimension, ModelMatch | undefined>();
   for (const dimension of MODEL_INTELLIGENCE_DIMENSIONS) {
     matches.set(dimension, rankFor(lists[dimension], model, models));
@@ -444,7 +485,7 @@ function candidateFor(
   };
 }
 
-function compareCandidates(left: ModelIntelligenceCandidate, right: ModelIntelligenceCandidate): number {
+function compareCandidates(left: ScoredCandidate, right: ScoredCandidate): number {
   const leftLow = left.confidence === "low" ? 1 : 0;
   const rightLow = right.confidence === "low" ? 1 : 0;
   if (leftLow !== rightLow) return leftLow - rightLow;
@@ -452,8 +493,8 @@ function compareCandidates(left: ModelIntelligenceCandidate, right: ModelIntelli
   return left.registration_id.localeCompare(right.registration_id);
 }
 
-function distinctBenchmarkCandidates(candidates: readonly ModelIntelligenceCandidate[]): ModelIntelligenceCandidate[] {
-  const grouped = new Map<string, ModelIntelligenceCandidate[]>();
+function distinctBenchmarkCandidates(candidates: readonly ScoredCandidate[]): ScoredCandidate[] {
+  const grouped = new Map<string, ScoredCandidate[]>();
   for (const candidate of candidates) {
     const group = grouped.get(candidate.benchmark_model_id) ?? [];
     group.push(candidate);
@@ -466,7 +507,7 @@ function distinctBenchmarkCandidates(candidates: readonly ModelIntelligenceCandi
 }
 
 function recommendationFor(
-  candidates: readonly ModelIntelligenceCandidate[],
+  candidates: readonly ScoredCandidate[],
   stale: boolean,
   primaryDimension: ModelIntelligenceDimension,
 ): { recommendation: string | null; reason: ModelIntelligenceRecommendationReason } {
@@ -495,7 +536,7 @@ export async function loadModelIntelligence(
   const preference = options.preference ?? "balanced";
   const dimensions = selectionDimensions(taskType, preference);
   const weights = dimensionWeights(dimensions);
-  const emptySelection = (reason: ModelIntelligenceRecommendationReason): ModelIntelligenceView["selection"] => ({
+  const emptySelection = (reason: ModelIntelligenceRecommendationReason): NonNullable<ModelIntelligenceView["selection"]> => ({
     method: "weighted-normalized-rank",
     dimension_weights: weights,
     materiality_threshold: MATERIALITY_THRESHOLD,
@@ -524,7 +565,7 @@ export async function loadModelIntelligence(
     };
   }
 
-  const candidates: ModelIntelligenceCandidate[] = [];
+  const candidates: ScoredCandidate[] = [];
   const unmatched: string[] = [];
   for (const model of models) {
     const candidate = candidateFor(model, models, loaded.cache.lists, weights);
@@ -533,9 +574,9 @@ export async function loadModelIntelligence(
   }
   candidates.sort(compareCandidates);
   const distinct = distinctBenchmarkCandidates(candidates);
+  const selected = recommendationFor(distinct, loaded.stale, dimensions[0]!);
   const limit = Math.max(1, Math.min(10, options.limit ?? 5));
   const visible = distinct.slice(0, limit);
-  const selected = recommendationFor(visible, loaded.stale, dimensions[0]!);
   const fetchedAt = loaded.cache.fetchedAt;
   const ttlMs = options.ttlMs ?? CACHE_TTL_MS;
   const loadedDimensions = MODEL_INTELLIGENCE_DIMENSIONS.filter((dimension) => loaded.cache?.lists[dimension]);

@@ -149,11 +149,12 @@ test("taskType adds advisory model intelligence for session-available candidates
       };
     },
   });
+  const updates: Array<AgentToolResult> = [];
   const result = await tool.execute("smart", {
     taskType: "development",
     preference: "economy",
     limit: 1,
-  }, undefined, undefined, mockContext([
+  }, undefined, (partial) => updates.push(partial), mockContext([
     { provider: "openai", id: "gpt-5.6-sol" },
     { provider: "google", id: "gemini-3.1-pro" },
   ]));
@@ -170,6 +171,7 @@ test("taskType adds advisory model intelligence for session-available candidates
   assert.equal(result.details?.model_intelligence?.preference, "economy");
   assert.equal(result.details?.model_intelligence?.recommendation, "google/gemini-3.1-pro");
   assert.equal(result.details?.model_intelligence?.candidates.length, 1);
+  assert.equal(updates.at(-1)?.details?.model_intelligence?.task_type, "development");
   const text = result.content[0].type === "text" ? result.content[0].text : "";
   assert.equal(JSON.parse(text).model_intelligence.task_type, "development");
 });
