@@ -111,18 +111,38 @@ test("taskType adds advisory model intelligence for session-available candidates
   const tool = modelAvailabilityTool({
     loadModelIntelligence: async (taskType, models, options) => {
       requests.push({ taskType, models, preference: options.preference, limit: options.limit });
+      const candidates = models.slice(0, options.limit).map((model, index) => ({
+        registration_id: model.registrationId,
+        benchmark_model_id: model.modelId ?? model.registrationId,
+        equivalent_registration_ids: [model.registrationId],
+        matched_via: "exact" as const,
+        strengths: ["coding"],
+        ranks: { coding: { rank: index + 1, total: models.length } },
+        missing_dimensions: [],
+        selection_score: index / Math.max(1, models.length),
+        confidence: "high" as const,
+      }));
       return {
         status: "available",
         task_type: taskType,
         preference: options.preference ?? "balanced",
         recommendation: models[0]?.registrationId ?? null,
-        candidates: models.slice(0, options.limit).map((model, index) => ({
-          registration_id: model.registrationId,
-          benchmark_model_id: model.modelId ?? model.registrationId,
-          strengths: ["coding"],
-          ranks: { coding: { rank: index + 1, total: models.length } },
-          confidence: "high",
-        })),
+        selection: {
+          method: "weighted-normalized-rank",
+          dimension_weights: [{ dimension: "coding", weight: 1 }],
+          materiality_threshold: 0.02,
+          recommendation_reason: "materially-better",
+          loaded_dimensions: ["coding"],
+          missing_dimensions: [],
+          coverage: {
+            available_models: models.length,
+            matched_models: models.length,
+            unmatched_models: 0,
+            distinct_benchmarks: models.length,
+            returned_candidates: candidates.length,
+          },
+        },
+        candidates,
         unmatched_models: [],
         sources: [],
         note: "test intelligence",

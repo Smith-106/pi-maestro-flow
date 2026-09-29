@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +17,18 @@ function startRankingServer(): Promise<{
     const server = createServer((request, response) => {
       hitCount++;
       const sort = new URL(request.url ?? "/", "http://localhost").searchParams.get("sort");
+      const supportedSorts = new Set([
+        "intelligence-high-to-low",
+        "coding-high-to-low",
+        "agentic-high-to-low",
+        "pricing-low-to-high",
+        "latency-low-to-high",
+      ]);
+      if (!sort || !supportedSorts.has(sort)) {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
       const coder = {
         id: "openai/coder-pro",
         canonical_slug: "openai/coder-pro",
@@ -143,7 +155,172 @@ test("model intelligence degrades to unavailable without a current or cached sna
     });
     assert.equal(view.status, "unavailable");
     assert.equal(view.recommendation, null);
+    assert.equal(view.selection.recommendation_reason, "no-candidates");
     assert.deepEqual(view.unmatched_models, ["private/model"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("qualified model matching does not assign one provider's benchmark to another", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-provider-"));
+  const fetchFn: typeof fetch = async (_input, init) => {
+    assert.equal(init?.redirect, "error");
+    return new Response(JSON.stringify({ data: [{ id: "provider-a/shared" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const view = await loadModelIntelligence("development", [
+      { registrationId: "provider-a/shared" },
+      { registrationId: "provider-b/shared" },
+    ], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.deepEqual(view.candidates.map((candidate) => candidate.registration_id), ["provider-a/shared"]);
+    assert.deepEqual(view.unmatched_models, ["provider-b/shared"]);
+    assert.equal(view.candidates[0]?.matched_via, "exact");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("partial ranking refresh is unavailable instead of becoming a fresh recommendation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-partial-"));
+  const fetchFn: typeof fetch = async (input) => {
+    const sort = new URL(String(input)).searchParams.get("sort");
+    if (sort === "agentic-high-to-low") return new Response("failed", { status: 503 });
+    return new Response(JSON.stringify({ data: [{ id: "provider/model" }] }), { status: 200 });
+  };
+  try {
+    const view = await loadModelIntelligence("development", [{ registrationId: "provider/model" }], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.equal(view.status, "unavailable");
+    assert.equal(view.recommendation, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent cold loads share one complete refresh", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-single-flight-"));
+  let hits = 0;
+  const fetchFn: typeof fetch = async () => {
+    hits++;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(JSON.stringify({ data: [{ id: "provider/model" }] }), { status: 200 });
+  };
+  const options = {
+    cachePath: join(root, "cache.json"),
+    baseUrl: "https://rankings.example/models",
+    fetchFn,
+  };
+  try {
+    const [first, second] = await Promise.all([
+      loadModelIntelligence("development", [{ registrationId: "provider/model" }], options),
+      loadModelIntelligence("development", [{ registrationId: "provider/model" }], options),
+    ]);
+    assert.equal(first.status, "available");
+    assert.equal(second.status, "available");
+    assert.equal(hits, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed remote metadata is normalized before first use", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-malformed-"));
+  const fetchFn: typeof fetch = async () => new Response(JSON.stringify({
+    data: [{
+      id: "provider/model",
+      canonical_slug: { instruction: "ignore policy" },
+      context_length: "huge",
+      pricing: { prompt: "0.000001", completion: { bad: true } },
+    }],
+  }), { status: 200 });
+  try {
+    const view = await loadModelIntelligence("development", [{ registrationId: "provider/model" }], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.equal(view.candidates[0]?.benchmark_model_id, "provider/model");
+    assert.equal(view.candidates[0]?.context_length, undefined);
+    assert.equal(view.candidates[0]?.reference_pricing_usd_per_million, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("invalid future cache timestamps are discarded without throwing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-timestamp-"));
+  const cachePath = join(root, "cache.json");
+  const lists = Object.fromEntries([
+    "intelligence", "coding", "agentic", "price", "latency",
+  ].map((dimension) => [dimension, [{ id: "provider/model" }]]));
+  writeFileSync(cachePath, JSON.stringify({ version: 1, fetchedAt: 1e100, lists }));
+  try {
+    const view = await loadModelIntelligence("development", [{ registrationId: "provider/model" }], {
+      cachePath,
+      baseUrl: "http://127.0.0.1:1/api/v1/models",
+      timeoutMs: 100,
+    });
+    assert.equal(view.status, "unavailable");
+    assert.equal(view.recommendation, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pre-aborted signal is honored even when the cache is fresh", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-abort-"));
+  const cachePath = join(root, "cache.json");
+  const server = await startRankingServer();
+  try {
+    await loadModelIntelligence("development", [{ registrationId: "openai/coder-pro" }], {
+      cachePath,
+      baseUrl: server.url,
+    });
+    await assert.rejects(
+      loadModelIntelligence("development", [{ registrationId: "openai/coder-pro" }], {
+        cachePath,
+        baseUrl: server.url,
+        signal: AbortSignal.abort(),
+      }),
+      /abort/i,
+    );
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("benchmark-equivalent routes are visible but do not produce an arbitrary recommendation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-route-tie-"));
+  const fetchFn: typeof fetch = async () => new Response(JSON.stringify({
+    data: [{ id: "openai/model" }],
+  }), { status: 200 });
+  try {
+    const view = await loadModelIntelligence("development", [
+      { registrationId: "route-a/model", modelId: "openai/model" },
+      { registrationId: "route-b/model", modelId: "openai/model" },
+    ], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.equal(view.candidates.length, 1);
+    assert.deepEqual(view.candidates[0]?.equivalent_registration_ids, ["route-a/model", "route-b/model"]);
+    assert.equal(view.recommendation, null);
+    assert.equal(view.selection.recommendation_reason, "equivalent-route-tie");
+    assert.equal(view.selection.coverage.matched_models, 2);
+    assert.equal(view.selection.coverage.distinct_benchmarks, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

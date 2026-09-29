@@ -325,6 +325,14 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
           ? "No benchmark snapshot is available; configured routing remains authoritative."
           : `Loaded ${modelIntelligence.status} intelligence for ${modelIntelligence.candidates.length} candidate(s).`);
         if (signal?.aborted) throw new Error("Tool execution aborted.");
+        emit({
+          teammate_models: filteredTeammate,
+          delegate_tools: filteredDelegate,
+          delegate_fallback: filteredFallback,
+          delegate_config_path: configPath,
+          model_registry: filteredModelRegistry,
+          model_intelligence: modelIntelligence,
+        });
       }
 
       const details: ModelAvailabilityDetails = {
