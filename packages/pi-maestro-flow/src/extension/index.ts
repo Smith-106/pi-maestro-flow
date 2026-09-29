@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { registerCompanionPackages } from "../../scripts/register-companion-packages.mjs";
+import { Check } from "typebox/value";
 
 import type {
   ExtensionAPI,
@@ -48,6 +49,7 @@ import {
   GoalToolParams,
   AskUserQuestionParams,
   TodoToolParams,
+  TodoModelParams,
   OcrReviewParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
@@ -1934,7 +1936,7 @@ Only request completion after all work is done; the extension verifies it indepe
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
       "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
       "Use goal complete only after all requirements are met and provide concise verification evidence; the extension owns the done transition.",
-      "Prefer focused, cross-platform acceptance commands; they run from the workspace with the platform system shell and are rerun during verification.",
+      "Prefer focused, cross-platform acceptance commands whenever completion is mechanically checkable — declared commands rerun during verification and decide the result directly, skipping the agent verifier's bounded-evidence fallback.",
       "If a Workflow-bound Goal is gate-paused or reports a canonical authority mismatch, do not resume it with goal update. Continue through run-control and let Workflow reconciliation replace or retire the stale Goal.",
     ],
 
@@ -1985,25 +1987,25 @@ Only request completion after all work is done; the extension verifies it indepe
 
   pi.registerTool(goalTool);
 
-  // === OCR Code Review Tool ===
-  const ocrReviewTool: ToolDefinition<typeof OcrReviewParams> = {
-    name: "ocr-review",
-    label: "OCR Review",
+  // === OpenCodeReview Tool ===
+  const openCodeReviewTool: ToolDefinition<typeof OcrReviewParams> = {
+    name: "open-code-review",
+    label: "OpenCodeReview",
     description: `Run OpenCodeReview (ocr CLI) on Git changes. Actions:
 
 - preview: { action: "preview" } — deterministic reviewable-file selection + mode/ref metadata (merge_base for range mode). No LLM. Always the first step of a self-driven review.
-- rules: { action: "rules", paths: [...] } — per-file review rule groups resolved by OCR's rule engine. No LLM.
-- review: { action: "review" } — full OCR-managed review; the session's current model is injected via OCR_LLM_* env, no separate ocr config needed. Returns structured line-level findings (severity/category/path/start_line/end_line). Model selection: { model: "provider/modelId" } per call, or pin api-manager.json "ocr.modelRef"; default follows the session model.
-- health: { action: "health" } — ocr version + injected-model connectivity check.
+- rules: { action: "rules", paths: [...] } — per-file review rule groups resolved by OpenCodeReview's rule engine. No LLM.
+- review: { action: "review" } — full OpenCodeReview-managed review; the session's current model and runtime-resolved API manager gateway authentication are injected via OCR_LLM_* env, so no separate ocr config is needed. Returns structured line-level findings (severity/category/path/start_line/end_line). Model selection: { model: "provider/modelId" } per call, or pin api-manager.json "ocr.modelRef"; default follows the session model.
+- health: { action: "health" } — OpenCodeReview version + injected-model connectivity check.
 
 Scope: default reviews workspace changes (staged+unstaged+untracked); { commit } for one commit; { from, to } for a branch range; { resume } continues an interrupted review; { exclude } filters paths; { background } adds business context.
 
 Self-driven review (delegate mode): preview → collect diffs per returned refs → rules → review each file → report by severity with file:line evidence. Every reviewable_files entry must end reviewed or explicitly skipped (coverage is mandatory).`,
-    promptSnippet: "Review Git changes via the ocr CLI — deterministic scope/rules (delegate) or full managed review with the injected current model",
+    promptSnippet: "Review Git changes via OpenCodeReview — deterministic scope/rules (delegate) or full managed review with the injected current gateway model",
     promptGuidelines: [
       "Requires the ocr binary on PATH (npm i -g @alibaba-group/open-code-review); health action reports install/model problems.",
       "For self-driven reviews run preview first, then rules, then review every listed file — coverage is mandatory, report skipped files with reasons.",
-      "review action injects the current session model; if the provider api is unsupported (non-anthropic/openai), fall back to preview+rules and review yourself.",
+      "review action injects the current session model through Pi's runtime model registry, including the API manager gateway URL, credentials, and headers; if the provider api is unsupported (non-anthropic/openai), fall back to preview+rules and review yourself.",
     ],
 
     parameters: OcrReviewParams,
@@ -2023,7 +2025,7 @@ Self-driven review (delegate mode): preview → collect diffs per returned refs 
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = String(args.action ?? "review");
       const target = String(args.commit ?? (args.from ? `${args.from}..${args.to ?? "?"}` : "") ?? "");
-      return toolCallLine(theme, "ocr", target ? `${action} ${target}` : action);
+      return toolCallLine(theme, "open-code-review", target ? `${action} ${target}` : action);
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
@@ -2031,27 +2033,32 @@ Self-driven review (delegate mode): preview → collect diffs per returned refs 
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "review");
-      return toolResultLine(theme, { name: "ocr", ok: !isError, arg: action, summary: resultSummary(result), expanded: opts.expanded, detail: message });
+      return toolResultLine(theme, { name: "open-code-review", ok: !isError, arg: action, summary: resultSummary(result), expanded: opts.expanded, detail: message });
     },
   };
-  pi.registerTool(ocrReviewTool);
+  pi.registerTool(openCodeReviewTool);
 
-  pi.registerCommand("ocr-review", {
+  const openCodeReviewCommand = {
     description: "Review code changes with OpenCodeReview — workspace (default), --commit, or --from/--to range",
-    async handler(args, ctx) {
+    async handler(args: string, ctx: ExtensionContext) {
       if (ctx.isIdle?.() === false) {
-        ctx.ui.notify("Agent is busy; run /ocr-review when idle.", "warning");
+        ctx.ui.notify("Agent is busy; run /open-code-review when idle.", "warning");
         return;
       }
       const trimmed = args.trim();
       pi.sendUserMessage([
-        "Run a code review with the ocr-review tool (OpenCodeReview CLI).",
+        "Run a code review with the open-code-review tool (OpenCodeReview CLI).",
         trimmed
           ? `User intent/target/background: ${trimmed}`
           : "Target: current workspace changes (workspace mode, default).",
-        "Prefer action=review (OCR-managed, current model auto-injected). If it reports the model cannot be injected, fall back to delegate mode: action=preview, then action=rules for the listed files, review each diff yourself, and report findings grouped by severity with file:line evidence.",
+        "Prefer action=review (OpenCodeReview-managed, current API manager gateway model auto-injected). If it reports the model cannot be injected, fall back to delegate mode: action=preview, then action=rules for the listed files, review each diff yourself, and report findings grouped by severity with file:line evidence.",
       ].join("\n"));
     },
+  };
+  pi.registerCommand("open-code-review", openCodeReviewCommand);
+  pi.registerCommand("ocr-review", {
+    ...openCodeReviewCommand,
+    description: "Compatibility alias for /open-code-review",
   });
 
   // === Ask User Question Tool ===
@@ -2087,7 +2094,7 @@ Self-driven review (delegate mode): preview → collect diffs per returned refs 
     }
   }));
 
-  const todoTool: ToolDefinition<typeof TodoToolParams> = {
+  const todoTool: ToolDefinition<typeof TodoModelParams> = {
     name: "todo",
     label: "Todo",
     description: `Task management with progressive reads. Store full task state, return small indexes and execution briefs, and fetch details only when needed.
@@ -2120,7 +2127,7 @@ Completion-form advance may request transition=keep_context|new_context. A singl
       "Advance is actor-scoped and only completes or activates tasks assigned to the caller. Use update immediately instead when work becomes blocked, is paused, or must be completed without activating another task.",
     ],
 
-    parameters: TodoToolParams,
+    parameters: TodoModelParams,
 
     async execute(
       _id: string,
@@ -2129,6 +2136,9 @@ Completion-form advance may request transition=keep_context|new_context. A singl
       _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
     ): Promise<FlowToolResult> {
+      if (!Check(TodoToolParams, params)) {
+        return { content: [{ type: "text", text: "Invalid todo arguments." }], isError: true, details: {} };
+      }
       const todoParams = params as unknown as TodoParams;
       const result = await executeTodo(todoParams, ctx);
       const details = result.details as TodoResultDetails | undefined;
@@ -4976,7 +4986,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   pi.registerTool(createLspTool() as never);
   pi.registerTool(createTeammateChildBrowserTool());
   pi.registerTool(createTeammateChildComputerUseTool());
-  const todoProxyTool: ToolDefinition<typeof TodoToolParams> = {
+  const todoProxyTool: ToolDefinition<typeof TodoModelParams> = {
     name: "todo",
     label: "Todo",
     description: `Manage the shared root Todo list from this teammate.
@@ -4996,8 +5006,11 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
       "When a completed todo advance result includes [context-pressure-advisory], inspect the task activated in that same result. Dynamic reminders exist only at this Todo completion checkpoint: late auto-prune recommends new_context, while critical makes it a priority before beginning the next Todo. Call the standalone new_context tool only if a next phase exists, persisted state is sufficient, the boundary is loosely coupled, and no messages are pending; otherwise continue or settle. During active Todo work, automatic compaction remains the capacity fallback. The advisory cannot change the completed advance retroactively and must not be carried to an unrelated Todo; never infer a pressure reminder without a Todo completion checkpoint.",
       "Advance is actor-scoped. Complete, block, or pause your active Todo before activating another task assigned to you; a final-answer Todo check is recovery only, not the normal update boundary.",
     ],
-    parameters: TodoToolParams,
+    parameters: TodoModelParams,
     async execute(_id, params, signal, _onUpdate, ctx) {
+      if (!Check(TodoToolParams, params)) {
+        return { content: [{ type: "text", text: "Invalid todo arguments." }], isError: true, details: {} };
+      }
       const result = await proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
       const todoParams = params as unknown as TodoParams;
       const details = result.details as BrokeredTodoResultDetails | undefined;

@@ -5,7 +5,12 @@ import { existsSync, statSync } from "node:fs";
 import test from "node:test";
 import { Check } from "typebox/value";
 import { OcrReviewParams } from "../src/extension/schemas.ts";
-import { encodeExtraHeaders, executeOcrReview, scopeArgs } from "../src/tools/ocr-review.ts";
+import {
+  encodeExtraHeaders,
+  executeOcrReview,
+  resolveOpenCodeReviewLlmEnv,
+  scopeArgs,
+} from "../src/tools/ocr-review.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 function ocrOnPath(): boolean {
@@ -46,13 +51,48 @@ test("ocr-review scopeArgs maps flags and rejects conflicts", () => {
   assert.throws(() => scopeArgs({ resume: "s1", commit: "x" }), /resume/i);
 });
 
-test("ocr-review encodeExtraHeaders quotes comma values", () => {
+test("open-code-review encodeExtraHeaders quotes comma values", () => {
   assert.equal(encodeExtraHeaders({}), "");
   assert.equal(encodeExtraHeaders({ "X-A": "1", "X-B": "v2" }), "X-A=1,X-B=v2");
   assert.equal(encodeExtraHeaders({ "X-C": "a,b" }), 'X-C="a,b"');
+  assert.equal(encodeExtraHeaders({ "X-Keep": "yes", "X-Removed": null }), "X-Keep=yes");
 });
 
-test("ocr-review preview returns JSON file selection (requires ocr)", { skip: !ocrOnPath(), timeout: 120_000 }, async () => {
+test("open-code-review inherits runtime-resolved API manager gateway auth", async () => {
+  const model = {
+    provider: "managed-gateway",
+    id: "review-model",
+    api: "openai-responses",
+    baseUrl: "https://stale.example/v1",
+    contextWindow: 128_000,
+    maxTokens: 16_384,
+  };
+  const ctx = {
+    cwd: process.cwd(),
+    model,
+    modelRegistry: {
+      async getApiKeyAndHeaders(received: unknown) {
+        assert.equal(received, model);
+        return {
+          ok: true as const,
+          apiKey: "runtime-token",
+          baseUrl: "https://gateway.example/v1",
+          headers: { "X-Gateway": "active", "X-Route": "review" },
+        };
+      },
+    },
+  } as unknown as ExtensionContext;
+
+  assert.deepEqual(await resolveOpenCodeReviewLlmEnv(ctx, "session"), {
+    OCR_LLM_URL: "https://gateway.example/v1",
+    OCR_LLM_TOKEN: "runtime-token",
+    OCR_LLM_MODEL: "review-model",
+    OCR_LLM_PROTOCOL: "openai-responses",
+    OCR_LLM_EXTRA_HEADERS: "X-Gateway=active,X-Route=review",
+  });
+});
+
+test("open-code-review preview returns JSON file selection (requires ocr)", { skip: !ocrOnPath(), timeout: 120_000 }, async () => {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
   const ctx = { cwd: repo, model: undefined } as unknown as ExtensionContext;
   const result = await executeOcrReview({ action: "preview" }, undefined, ctx);

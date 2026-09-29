@@ -1,6 +1,6 @@
 # OpenCodeReview（ocr CLI）安装（AI 可执行）
 
-本文档面向 AI agent，安装 Alibaba OpenCodeReview 的 `ocr` CLI，供 `ocr-review` 工具与 reviewer agent 使用。
+本文档面向 AI agent，安装 Alibaba OpenCodeReview 的 `ocr` CLI，供 `open-code-review` 工具与 reviewer agent 使用。
 
 ## PURPOSE
 
@@ -14,7 +14,7 @@
 
 - Node.js ≥ 18 与 npm。`ocr` 经 npm 全局分发（`@alibaba-group/open-code-review`），按 os/cpu 自动安装匹配平台的二进制（win32-x64 / linux-x64 / darwin-x64 / darwin-arm64）。
 - 网络可访问 npm registry。
-- **不需要**配置 OCR 侧 LLM provider：pi 调用 `ocr-review` 时把 api-manager 当前模型经 `OCR_LLM_URL` / `OCR_LLM_TOKEN` / `OCR_LLM_MODEL` / `OCR_LLM_PROTOCOL` / `OCR_LLM_EXTRA_HEADERS` 环境变量注入，换模型即时生效；模型钉选见 `/api-manager ocr`。
+- **不需要**配置 OpenCodeReview 侧 LLM provider：pi 调用 `open-code-review` 时通过运行时 model registry 解析 api-manager 当前模型的网关 URL、凭据与 headers，再经 `OCR_LLM_URL` / `OCR_LLM_TOKEN` / `OCR_LLM_MODEL` / `OCR_LLM_PROTOCOL` / `OCR_LLM_EXTRA_HEADERS` 环境变量注入，换模型即时生效；模型钉选见 `/api-manager open-code-review`。
 
 ## TASK
 
@@ -38,7 +38,7 @@ npm install -g @alibaba-group/open-code-review@1.12.9
 
 ### 3. 明确不做的事
 
-- 不写 `~/.opencodereview/config.json`，不运行 `ocr config provider`——模型注入走每次调用的环境变量，持久化 OCR provider 反而会与 api-manager 钉选语义冲突。
+- 不写 `~/.opencodereview/config.json`，不运行 `ocr config provider`——模型注入走每次调用的环境变量，持久化 OpenCodeReview provider 反而会与 api-manager 钉选语义冲突。
 - 不把 OCR 加为插件 npm 依赖——本项设计为「检测 + 指引」。
 
 ## INTERACTIVE INPUTS
@@ -49,7 +49,7 @@ npm install -g @alibaba-group/open-code-review@1.12.9
 
 1. `ocr version` → 输出 `open-code-review v<version>`。
 2. 在任一 git 仓库内运行 `ocr delegate preview --format json` → 返回含 `schema_version` 与 `reviewable_files` 数组的 JSON（无 LLM 需求）。
-3. 在 pi 会话中调用 `ocr-review` 工具 `action=health`：`version` 必须成功；`llm` 连通性依赖当前 api-manager 模型配置，失败只影响 `review` action，`preview`/`rules` 委派模式仍可用。
+3. 在 pi 会话中调用 `open-code-review` 工具 `action=health`：`version` 必须成功；`llm` 连通性依赖当前 api-manager 模型及运行时网关认证，失败只影响 `review` action，`preview`/`rules` 委派模式仍可用。
 
 ## ROLLBACK
 

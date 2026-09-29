@@ -106,6 +106,17 @@ test("API model form replaces secrets without rendering plaintext", () => {
   assert.equal(result?.values.apiKey, "replacement-secret");
 });
 
+test("redacted form secrets never show credential prefixes or suffixes", () => {
+  const overlay = createOverlay([{ id: "password", label: "SSH password", kind: "secret", value: "prefix-credential-suffix", redact: true }]);
+  overlay.render(80);
+  assert.doesNotMatch(overlay.render(80).join("\n"), /prefix|suffix|credential/);
+  overlay.handleInput("\r");
+  overlay.handleInput("new-private-credential");
+  assert.doesNotMatch(overlay.render(80).join("\n"), /new-private|credential/);
+  overlay.handleInput("\r");
+  assert.doesNotMatch(overlay.render(80).join("\n"), /new-private|credential/);
+});
+
 test("API model form cancels a pending secret clear", async () => {
   let result: ApiModelEditorResult | undefined;
   const overlay = createOverlay([

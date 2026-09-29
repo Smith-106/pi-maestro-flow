@@ -118,7 +118,7 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
   {
     id: "ocr",
     title: "OpenCodeReview 代码评审 CLI",
-    description: "安装 ocr CLI，为 ocr-review 工具与 reviewer agent 提供确定性 diff 范围/规则与托管评审；模型由 api-manager 注入，无需单独配置 OCR provider。",
+    description: "安装 ocr CLI，为 open-code-review 工具与 reviewer agent 提供确定性 diff 范围/规则与托管评审；模型由 api-manager 的运行时网关配置注入，无需单独配置 OpenCodeReview provider。",
     docFile: "OCR-SETUP.md",
     category: "external",
     promptIntro:

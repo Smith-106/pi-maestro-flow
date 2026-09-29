@@ -465,6 +465,8 @@ test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway c
   assert.ok(names.includes("browser"));
   assert.ok(names.includes("computer_use"));
   assert.ok(names.includes("search_tool_bm25"));
+  assert.ok(names.includes("open-code-review"));
+  assert.equal(names.includes("ocr-review"), false, "ambiguous optical-character-recognition tool name stays hidden");
   assert.equal(names.filter((name) => name === "board").length, 1);
   assert.equal(names.filter((name) => name === "lsp").length, 1);
   assert.equal(names.filter((name) => name === "browser").length, 1);
@@ -485,6 +487,8 @@ test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway c
   assert.ok(commands.includes("maestro-keybindings"));
   assert.ok(commands.includes("export-session-info"));
   assert.ok(commands.includes("gateway"));
+  assert.ok(commands.includes("open-code-review"));
+  assert.ok(commands.includes("ocr-review"), "legacy slash command remains as a compatibility alias");
   assert.ok(commands.includes("new_context_without_llm"));
   assert.equal(commands.includes("mcpx"), false);
   assert.equal(commands.includes("swarm"), false);

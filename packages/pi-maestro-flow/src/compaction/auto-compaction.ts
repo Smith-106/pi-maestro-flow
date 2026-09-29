@@ -931,7 +931,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     try {
       // ExtensionAPI is fire-and-forget. Synchronous return is deliberately not
       // promoted to queued/consumed and never clears the durable obligation.
-      pi.sendUserMessage(recoveryDeliveryPrompt(wake.prompt, wake.wakeId), { deliverAs: "followUp" });
+      // A compaction callback can run after the agent has already become idle;
+      // followUp has no future stop boundary to drain in that state.
+      const delivery = ctx.isIdle?.() === true ? undefined : { deliverAs: "followUp" as const };
+      pi.sendUserMessage(recoveryDeliveryPrompt(wake.prompt, wake.wakeId), delivery);
       return true;
     } catch (error) {
       dispatchedWakeThisLifecycle = undefined;

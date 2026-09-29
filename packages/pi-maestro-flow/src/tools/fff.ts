@@ -24,7 +24,7 @@ export const SearchToolParameters = Type.Object({
   path: Type.Optional(
     Type.String({
       description:
-        "Directory or file to search, relative to the session working directory or absolute; must resolve inside the workspace (default: workspace root)",
+        "Directory or file inside the workspace (default: workspace root). On large projects, specify a subdirectory or file to avoid a broad root scan.",
     }),
   ),
   mode: Type.Optional(
@@ -105,6 +105,7 @@ const MAX_DRAIN_PAGES = 200;
 const MAX_DRAIN_MATCHES = 50_000;
 const MAX_GLOB_FILES = 20_000;
 const MAX_CACHED_FINDERS = 4;
+const MAX_FAILED_ROOTS = 32;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 1000;
 
@@ -126,6 +127,16 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     return null;
   };
 
+  const rememberFailedRoot = (root: string): void => {
+    failedRoots.delete(root);
+    failedRoots.add(root);
+    while (failedRoots.size > MAX_FAILED_ROOTS) {
+      const oldest = failedRoots.values().next().value;
+      if (oldest === undefined) break;
+      failedRoots.delete(oldest);
+    }
+  };
+
   const ensureFinder = async (root: string): Promise<FileFinderApi> => {
     const denied = unsafeBasePathReason(root);
     if (denied) throw new Error(`search does not index ${denied}; start Pi from a specific project directory`);
@@ -138,32 +149,30 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     if (pending) return pending;
 
     const generation = lifecycleGeneration;
-    let initPromise: Promise<FileFinderApi> | undefined;
-    initPromise = (async () => {
+    let initPromise!: Promise<FileFinderApi>;
+    initPromise = Promise.resolve().then(async () => {
       const created = createFinder({ basePath: root });
       if (!created.ok) {
         throw new Error(`search index unavailable (${created.error})`);
       }
       const finder = created.value;
+      let published = false;
       initializingFinders.set(root, finder);
       try {
         const scan = await finder.waitForScan(scanTimeoutMs);
-        if (finder.isDestroyed) throw new Error("search session ended");
-        if (generation !== lifecycleGeneration) {
-          finder.destroy();
+        if (finder.isDestroyed || generation !== lifecycleGeneration) {
           throw new Error("search session ended");
         }
         if (!scan.ok) {
-          finder.destroy();
-          failedRoots.add(root);
+          rememberFailedRoot(root);
           throw new Error(`search failed to scan ${root} (${scan.error}); use rg in bash instead for deterministic fallback`);
         }
         if (!scan.value) {
-          finder.destroy();
-          failedRoots.add(root);
+          rememberFailedRoot(root);
           throw new Error(`search timed out scanning ${root}; use rg in bash instead for deterministic fallback`);
         }
         finders.set(root, finder);
+        published = true;
         if (finders.size > MAX_CACHED_FINDERS) {
           const oldest = finders.keys().next().value;
           if (oldest && oldest !== root) {
@@ -173,10 +182,12 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
         }
         return finder;
       } finally {
-        initializingFinders.delete(root);
-        if (initializing.get(root) === initPromise) initializing.delete(root);
+        if (initializingFinders.get(root) === finder) initializingFinders.delete(root);
+        if (!published && !finder.isDestroyed) finder.destroy();
       }
-    })();
+    }).finally(() => {
+      if (initializing.get(root) === initPromise) initializing.delete(root);
+    });
     initializing.set(root, initPromise);
     return initPromise;
   };
@@ -340,7 +351,7 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     reason: string | undefined,
     signal?: AbortSignal,
   ): Promise<AgentToolResult<unknown>> => {
-    const result = await runRg({
+    const request = {
       pattern: input.pattern,
       regex: mode === "regex",
       path: scopePath,
@@ -350,12 +361,20 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
       output,
       limit,
       signal,
+    };
+    let regexFallback = false;
+    const result = await runRg(request).catch((error: unknown) => {
+      if (mode !== "regex" || !(error instanceof Error) || !error.message.includes("regex parse error")) throw error;
+      regexFallback = true;
+      return runRg({ ...request, regex: false });
     });
     const notes = [`engine: rg${reason ? ` (${reason})` : ""}`];
+    if (regexFallback) notes.push("invalid regex — matched literally");
     if (result.limitReached) notes.push(`${limit} ${output === "lines" ? "matches" : "rows"} limit reached — refine the pattern or raise limit`);
+    if (result.timedOut) notes.push("search timed out — results may be incomplete; narrow path, glob, or pattern");
     return {
       content: [{ type: "text", text: `${result.text}\n\n[${notes.join("; ")}]` }],
-      details: { engine: "rg", truncated: result.limitReached },
+      details: { engine: "rg", truncated: result.limitReached || result.timedOut },
     };
   };
 
@@ -378,6 +397,17 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
       throw new Error(
         "search mode=fuzzy requires the FFF index and does not support forced ignoreCase or negated globs",
       );
+    }
+
+    // Root-wide native grep can monopolize the event loop; rg streams from a
+    // child process instead. Retain the index as a fallback when rg is absent.
+    if (scopePrefix === "" && mode !== "fuzzy") {
+      try {
+        return await rgSearch(input, scopePath, mode, output, limit, context, "workspace-root search", signal);
+      } catch (error) {
+        if (forcedInsensitive || globNeedsRg || !(error instanceof Error)
+          || !error.message.startsWith("ripgrep (rg) is not available")) throw error;
+      }
     }
 
     let finder: FileFinderApi | undefined;
@@ -409,14 +439,14 @@ export function registerFff(pi: ExtensionAPI, options: RegisterFffOptions = {}):
     name: "search",
     label: "Search",
     description:
-      "Search workspace file contents via a shared, prewarmed index — literal, regex, or fuzzy matching with lines/files/count output; ripgrep takes over automatically when the index cannot serve a query. Subsumes grep: literal text is the default, mode=\"regex\" covers patterns, and ignoreCase/context/glob/output mirror -i/-C/-g/-l/-c. Prefer this over running grep or rg through bash.",
-    promptSnippet: "Search workspace file contents (literal/regex/fuzzy) via the shared index.",
+      "Search workspace contents: scoped searches use the shared FFF index; root-wide plain/regex searches use time-bounded ripgrep (rg) to avoid blocking on large indexes. Fuzzy matching requires the index. Supports literal/regex/fuzzy and lines/files/count output; does not invoke GNU grep. Specify path or glob for large projects. Prefer this over running grep or rg through bash.",
+    promptSnippet: "Search contents (literal/regex/fuzzy); narrow path for large projects.",
     promptGuidelines: [
       "output=\"lines\" (default) returns file:line match text with optional context lines; output=\"files\" lists candidate paths before reading them; output=\"count\" shows per-file match totals to gauge how widespread a pattern is.",
       "mode=\"plain\" is literal substring matching for exact identifiers. mode=\"regex\" uses Rust regex syntax — look-around and backreferences are not supported; an invalid regex falls back to literal matching with a note. mode=\"fuzzy\" is approximate matching when the exact spelling is unknown.",
       "Omit ignoreCase for smart case (insensitive only when the pattern is all-lowercase); set true to force insensitivity or false for always-sensitive.",
-      "path scopes to a directory or a single file inside the workspace; glob filters file names at any depth and supports '!' negation.",
-      "Truncated results end with a bracketed note; narrow with a more specific pattern, path, or glob before raising limit.",
+      "path scopes to a directory or a single file inside the workspace; omit it only for intentional root-wide search (rg, with an 8-second scan budget). glob filters file names at any depth and supports '!' negation.",
+      "Limited or timed-out results end with a bracketed note; narrow with a more specific pattern, path, or glob before raising limit. Root search may return partial results on timeout.",
       "Typical calls: {pattern: \"handleRequest\", output: \"files\"} to locate; {pattern: \"class \\w+Service\", mode: \"regex\", glob: \"*.ts\"} for typed patterns; {pattern: \"TODO\", ignoreCase: true, context: 2} for annotated hits; {pattern: \"getUsr\", mode: \"fuzzy\"} when the spelling is unknown.",
       "Use fffind for file-path search instead of content search.",
     ],

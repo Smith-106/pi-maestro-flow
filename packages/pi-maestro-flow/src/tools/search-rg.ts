@@ -16,14 +16,18 @@ export interface RgSearchRequest {
   output: SearchOutputMode;
   limit: number;
   signal?: AbortSignal;
+  /** Maximum wall time for the child process, including a root-wide traversal. */
+  timeBudgetMs?: number;
 }
 
 export interface RgSearchResult {
   text: string;
   /** true when collection stopped early because the limit was reached. */
   limitReached: boolean;
+  timedOut?: boolean;
 }
 
+const RG_TIME_BUDGET_MS = 8_000;
 const RG_MAX_FILESIZE = "10M";
 const RG_BINARIES = ["rg", "rg.exe"];
 
@@ -80,8 +84,10 @@ async function collectRows(args: string[], request: RgSearchRequest): Promise<Rg
       const rows: string[] = [];
       let stderr = "";
       let killedForLimit = false;
+      let timedOut = false;
       let aborted = false;
       const cleanup = () => {
+        clearTimeout(timer);
         rl.close();
         signal?.removeEventListener("abort", onAbort);
       };
@@ -94,12 +100,16 @@ async function collectRows(args: string[], request: RgSearchRequest): Promise<Rg
         killChild(false);
       };
       signal?.addEventListener("abort", onAbort, { once: true });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killChild(false);
+      }, request.timeBudgetMs ?? RG_TIME_BUDGET_MS);
       child.stderr?.on("data", (chunk) => {
-        stderr += chunk.toString();
+        if (stderr.length < 8192) stderr += chunk.toString().slice(0, 8192 - stderr.length);
       });
       let counted = 0;
       rl.on("line", (line) => {
-        if (!line.trim()) return;
+        if (killedForLimit || timedOut || !line.trim()) return;
         const mapped = mapLine(line, request);
         if (!mapped) return;
         rows.push(mapped.row);
@@ -127,13 +137,14 @@ async function collectRows(args: string[], request: RgSearchRequest): Promise<Rg
           settle(() => rejectPromise(rgAbortError()));
           return;
         }
-        if (!killedForLimit && code !== 0 && code !== 1) {
+        if (!killedForLimit && !timedOut && code !== 0 && code !== 1) {
           settle(() => rejectPromise(new Error(stderr.trim() || `ripgrep exited with code ${code}`)));
           return;
         }
         settle(() => resolvePromise({
           text: rows.length ? rows.join("\n") : "No matches found",
           limitReached: killedForLimit,
+          timedOut,
         }));
       });
     };

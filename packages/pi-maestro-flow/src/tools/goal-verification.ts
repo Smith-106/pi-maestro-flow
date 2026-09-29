@@ -132,6 +132,10 @@ export const MAX_ACCEPTANCE_COMMAND_CHARS = 500;
 /** @internal */
 export const GOAL_VERIFIER_TIMEOUT_MS = 600_000;
 const MAX_VERIFICATION_FAILURES = 3;
+// Fail verdicts carry actionable `unmet` feedback, so they earn a wider bound
+// than inconclusive results — but an unbroken run of fails is a treadmill, not
+// convergence; pause and hand the decision back to the user.
+const MAX_FAIL_VERDICTS = 6;
 const MAX_VERIFIER_EVIDENCE_ITEMS = 24;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
 const MAX_VERIFIER_EVIDENCE_CHARS = 12_000;
@@ -576,7 +580,8 @@ function normalizeVerifierVerdict(value: unknown): VerifierVerdict {
   if (verdict.pass && unmet.length > 0) {
     // A pass that still lists unmet requirements is treated as an actionable
     // fail (not a structural inconclusive) so the model receives the concrete
-    // gaps and the failure budget is reset rather than consumed.
+    // gaps; the inconclusive budget stays untouched — fails are bounded by
+    // their own streak instead.
     return {
       status: "fail",
       pass: false,
@@ -1295,7 +1300,22 @@ export async function verifyGoalCompletion(
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
-    bridge.activeGoal = { ...bridge.activeGoal, verificationFailures: 0, infraErrorStreak: 0, lastVerificationFailure: boundedSecretText(verdict.reasoning + (verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}` : ""), 1_000) };
+    const failStreak = (bridge.activeGoal.failStreak ?? 0) + 1;
+    const failureDetail = boundedSecretText(verdict.reasoning + (verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}` : ""), 1_000);
+    if (failStreak >= MAX_FAIL_VERDICTS) {
+      bridge.activeGoal = bridge.pauseGoal({
+        ...bridge.activeGoal,
+        verificationFailures: 0,
+        infraErrorStreak: 0,
+        failStreak,
+        lastVerificationFailure: failureDetail,
+      }, "verification");
+      bridge.persistGoal(bridge.activeGoal);
+      bridge.updateStatusLine(ctx, bridge.activeGoal);
+      ctx.ui.notify(`Goal verification blocked after ${failStreak} failed verdicts. Use /goal resume to retry or /goal stop to end it.`, "warning");
+      return { status: "hold", reason: verdict.reasoning };
+    }
+    bridge.activeGoal = { ...bridge.activeGoal, verificationFailures: 0, infraErrorStreak: 0, failStreak, lastVerificationFailure: failureDetail };
     bridge.updateUsage(bridge.activeGoal, ctx);
     bridge.persistGoal(bridge.activeGoal);
     bridge.updateStatusLine(ctx, bridge.activeGoal);
@@ -1308,7 +1328,7 @@ export async function verifyGoalCompletion(
       : "";
     const acceptanceHint = bridge.activeGoal.acceptance?.length
       ? ""
-      : " Provide concrete verification evidence (run the relevant checks and include their output) before re-requesting completion.";
+      : " Provide concrete verification evidence (run the relevant checks and include their output) before re-requesting completion. If the remaining gap needs approvals or actions outside your control, report that to the user instead of re-requesting completion.";
     return { status: "continue", reason: `${verdict.reasoning}${unmet}${evidenceDetail}${acceptanceHint}` };
   }
 
@@ -1357,6 +1377,7 @@ export async function verifyGoalCompletion(
     status: "done" as const,
     pauseReason: undefined,
     infraErrorStreak: 0,
+    failStreak: 0,
     lastVerificationFailure: undefined,
     updatedAt: Date.now(),
   };

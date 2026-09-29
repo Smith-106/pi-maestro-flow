@@ -26,7 +26,7 @@ import {
   type TodoActorRef,
   type TodoContext,
 } from "../src/tools/todo.ts";
-import { TodoToolParams } from "../src/extension/schemas.ts";
+import { TodoModelParams, TodoToolParams } from "../src/extension/schemas.ts";
 import { TODO_GET_FIELDS, TODO_GET_MAX_LIMIT, type TodoHandoffInput } from "../src/tools/todo-contract.ts";
 import {
   TODO_CONTENT_ENTRY_TYPE,
@@ -74,6 +74,16 @@ function todoText(result: Awaited<ReturnType<typeof executeTodo>>): string {
 function todoPageBody(text: string): string {
   return text.slice(text.indexOf("\n") + 1, text.lastIndexOf("\n"));
 }
+
+test("todo model declaration omits Gemini-incompatible conditionals while host validation keeps them", () => {
+  const serialized = JSON.stringify(TodoModelParams);
+  assert.doesNotMatch(serialized, /"(?:if|then|allOf)"\s*:/);
+  assert.equal(Check(TodoModelParams, { action: "get", id: "1", field: "context" }), true);
+  assert.equal(Check(TodoToolParams, { action: "list", field: "context" }), false);
+  assert.equal(Check(TodoModelParams, { action: "list", field: "context" }), true);
+  assert.equal(Check(TodoModelParams, { action: "list", limit: 51 }), true);
+  assert.equal(Check(TodoToolParams, { action: "list", limit: 51 }), false);
+});
 
 test("todo get provides bounded overviews and lossless Unicode field pages without mutating state", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-pages-"));

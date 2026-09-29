@@ -1191,10 +1191,11 @@ export async function manageNextSuggestSettings(
 }
 
 /**
- * OCR review settings panel inside the API manager.
+ * OpenCodeReview settings panel inside the API manager.
  *
- * The managed-review model pin is persisted in the api-manager.json `ocr`
- * section and consumed by the ocr-review tool's `review`/`health` actions.
+ * The managed-review model pin is persisted in the backward-compatible
+ * api-manager.json `ocr` section and consumed by the open-code-review tool's
+ * `review`/`health` actions.
  */
 export async function manageOcrSettings(
   ctx: ExtensionCommandContext,
@@ -1204,7 +1205,7 @@ export async function manageOcrSettings(
   const modelLabel = (value: string): string => value === "session" ? "跟随会话模型" : value;
   if (!ctx.hasUI) {
     const current = await loadOcrConfig(defaultsPath);
-    ctx.ui.notify(`OCR 评审模型：${modelLabel(current.modelRef)}`, "info");
+    ctx.ui.notify(`OpenCodeReview 评审模型：${modelLabel(current.modelRef)}`, "info");
     return;
   }
 
@@ -1215,7 +1216,7 @@ export async function manageOcrSettings(
   ];
 
   for (;;) {
-    const choice = await ctx.ui.select("OCR 评审设置（/api-manager ocr）", options());
+    const choice = await ctx.ui.select("OpenCodeReview 评审设置（/api-manager open-code-review）", options());
     if (choice === undefined) return;
 
     if (choice.startsWith("评审模型")) {
@@ -1226,7 +1227,7 @@ export async function manageOcrSettings(
           `${entry.label}${entry.pick.kind === "model" && config.modelRef === `${entry.pick.providerId}/${entry.pick.modelId}` ? "（当前）" : ""}`
         ),
       ];
-      const pick = await ctx.ui.select("选择 OCR 评审模型（独立于会话模型）", labels);
+      const pick = await ctx.ui.select("选择 OpenCodeReview 评审模型（独立于会话模型）", labels);
       if (pick === undefined) continue;
       if (pick === labels[0]) {
         config.modelRef = "session";
@@ -1239,19 +1240,19 @@ export async function manageOcrSettings(
         }
       }
       await saveOcrConfig(config, defaultsPath);
-      ctx.ui.notify(`OCR 评审模型已设为：${modelLabel(config.modelRef)}。`, "info");
+      ctx.ui.notify(`OpenCodeReview 评审模型已设为：${modelLabel(config.modelRef)}。`, "info");
       continue;
     }
 
     if (choice.startsWith("重置")) {
       const confirmed = await ctx.ui.confirm(
-        "确认重置 OCR 评审设置为默认值？",
+        "确认重置 OpenCodeReview 评审设置为默认值？",
         "将恢复为：跟随会话模型",
       );
       if (!confirmed) continue;
       config = { ...DEFAULT_OCR_CONFIG };
       await saveOcrConfig(config, defaultsPath);
-      ctx.ui.notify("OCR 评审设置已重置为默认。", "info");
+      ctx.ui.notify("OpenCodeReview 评审设置已重置为默认。", "info");
       continue;
     }
   }

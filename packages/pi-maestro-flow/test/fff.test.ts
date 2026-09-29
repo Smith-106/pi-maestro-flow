@@ -56,27 +56,36 @@ test("FFF refuses home-directory workspace roots", async () => {
 test("FFF destroys an initializing finder when the session shuts down", async () => {
   const tools: ToolDefinition[] = [];
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
-  let finishScan!: (result: { ok: true; value: boolean }) => void;
-  let destroyCount = 0;
+  let finishFirstScan!: (result: { ok: true; value: boolean }) => void;
+  let finishReplacementScan!: (result: { ok: true; value: boolean }) => void;
+  let firstDestroyCount = 0;
+  let replacementDestroyCount = 0;
   let createCount = 0;
   const finder = {
     isDestroyed: false,
     destroy() {
       if (finder.isDestroyed) return;
       finder.isDestroyed = true;
-      destroyCount += 1;
+      firstDestroyCount += 1;
     },
     waitForScan() {
       return new Promise<{ ok: true; value: boolean }>((resolve) => {
-        finishScan = resolve;
+        finishFirstScan = resolve;
       });
     },
   };
   const replacementFinder = {
     isDestroyed: false,
-    destroy() { replacementFinder.isDestroyed = true; },
-    async waitForScan() { return { ok: true as const, value: true }; },
-    grep() { return { ok: true as const, value: { items: [] } }; },
+    destroy() {
+      if (replacementFinder.isDestroyed) return;
+      replacementFinder.isDestroyed = true;
+      replacementDestroyCount += 1;
+    },
+    waitForScan() {
+      return new Promise<{ ok: true; value: boolean }>((resolve) => {
+        finishReplacementScan = resolve;
+      });
+    },
   };
   const register = {
     registerTool(tool: ToolDefinition) { tools.push(tool); },
@@ -101,7 +110,7 @@ test("FFF destroys an initializing finder when the session shuts down", async ()
   const ctx = { cwd: root } as unknown as ExtensionContext;
   const execution = grep.execute(
     "fff-shutdown",
-    { pattern: "needle", limit: 5 },
+    { pattern: "needle", path: "src", limit: 5 },
     new AbortController().signal,
     undefined,
     ctx,
@@ -109,28 +118,27 @@ test("FFF destroys an initializing finder when the session shuts down", async ()
   await new Promise<void>((resolve) => setImmediate(resolve));
 
   for (const handler of handlers.get("session_shutdown") ?? []) await handler();
-  assert.equal(destroyCount, 1);
-  const replacement = await grep.execute(
+  assert.equal(firstDestroyCount, 1);
+  const replacement = grep.execute(
     "fff-replacement",
-    { pattern: "needle", limit: 5 },
+    { pattern: "needle", path: "src", limit: 5 },
     new AbortController().signal,
     undefined,
     ctx,
   );
-  assert.equal(replacement.content[0]?.text, "No matches found");
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(createCount, 2);
 
-  finishScan({ ok: true, value: true });
+  finishFirstScan({ ok: true, value: true });
   await assert.rejects(execution, /session ended/);
-  await grep.execute(
-    "fff-cached-replacement",
-    { pattern: "needle", limit: 5 },
-    new AbortController().signal,
-    undefined,
-    ctx,
+  for (const handler of handlers.get("session_shutdown") ?? []) await handler();
+  assert.equal(
+    replacementDestroyCount,
+    1,
+    "the stale initializer must not remove the replacement initializing finder",
   );
-  assert.equal(createCount, 2, "the old initializer must not delete the replacement reservation");
-  assert.equal(destroyCount, 1);
+  finishReplacementScan({ ok: true, value: true });
+  await assert.rejects(replacement, /session ended/);
 });
 
 test("FFF loads its native index and searches a selected workspace subdirectory", async () => {
@@ -195,6 +203,123 @@ function fakeRegister(): {
   return { tools, register: register as unknown as ExtensionAPI };
 }
 
+test("FFF destroys finders whose scan promise rejects and permits same-root retries", async () => {
+  const { tools, register } = fakeRegister();
+  let createCount = 0;
+  let destroyCount = 0;
+  registerFff(register, {
+    createFinder: () => {
+      createCount += 1;
+      const finder = {
+        isDestroyed: false,
+        destroy() {
+          if (finder.isDestroyed) return;
+          finder.isDestroyed = true;
+          destroyCount += 1;
+        },
+        async waitForScan() { throw new Error("scan rejected"); },
+      };
+      return { ok: true, value: finder } as never;
+    },
+    runRg: async () => ({ text: "No matches found", limitReached: false }),
+  });
+  const search = tools.find((tool) => tool.name === "search");
+  assert.ok(search);
+  const ctx = { cwd: join(tmpdir(), "pi-fff-rejected-scan") } as unknown as ExtensionContext;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await search.execute(
+      `fff-rejected-scan-${attempt}`,
+      { pattern: "needle", path: "src" },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+  }
+
+  assert.equal(createCount, 2, "a rejected scan must not leave a same-root initializer cached");
+  assert.equal(destroyCount, 2, "every unpublished finder must be destroyed after scan rejection");
+});
+
+test("FFF retries after createFinder throws synchronously without caching the rejected reservation", async () => {
+  const { tools, register } = fakeRegister();
+  let createCount = 0;
+  let fallbackCount = 0;
+  registerFff(register, {
+    createFinder: () => {
+      createCount += 1;
+      throw new Error("synchronous create failure");
+    },
+    runRg: async () => {
+      fallbackCount += 1;
+      return { text: `fallback ${fallbackCount}`, limitReached: false };
+    },
+  });
+  const search = tools.find((tool) => tool.name === "search");
+  assert.ok(search);
+  const ctx = { cwd: join(tmpdir(), "pi-fff-sync-create-failure") } as unknown as ExtensionContext;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const result = await search.execute(
+      `fff-sync-create-failure-${attempt}`,
+      { pattern: "needle", path: "src" },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    assert.match(result.content[0]?.text ?? "", new RegExp(`fallback ${attempt}`));
+  }
+
+  assert.equal(createCount, 2, "each same-root attempt must execute createFinder");
+  assert.equal(fallbackCount, 2, "each failed initialization must fall back independently");
+});
+
+test("FFF bounds the failed-root cache and retries the oldest root after 33 failures", async () => {
+  const { tools, register } = fakeRegister();
+  const createdRoots: string[] = [];
+  let destroyCount = 0;
+  registerFff(register, {
+    createFinder: (options) => {
+      createdRoots.push(options.basePath);
+      const finder = {
+        isDestroyed: false,
+        destroy() {
+          if (finder.isDestroyed) return;
+          finder.isDestroyed = true;
+          destroyCount += 1;
+        },
+        async waitForScan() { return { ok: true as const, value: false }; },
+      };
+      return { ok: true, value: finder } as never;
+    },
+    runRg: async () => ({ text: "No matches found", limitReached: false }),
+  });
+  const search = tools.find((tool) => tool.name === "search");
+  assert.ok(search);
+  const roots = Array.from({ length: 33 }, (_, index) => join(tmpdir(), `pi-fff-failed-root-${index}`));
+
+  for (const [index, root] of roots.entries()) {
+    await search.execute(
+      `fff-timeout-${index}`,
+      { pattern: "needle", path: "src" },
+      new AbortController().signal,
+      undefined,
+      { cwd: root } as unknown as ExtensionContext,
+    );
+  }
+  await search.execute(
+    "fff-timeout-oldest-retry",
+    { pattern: "needle", path: "src" },
+    new AbortController().signal,
+    undefined,
+    { cwd: roots[0] } as unknown as ExtensionContext,
+  );
+
+  assert.equal(createdRoots.length, 34);
+  assert.equal(createdRoots.at(-1), createdRoots[0], "the oldest failed root must be evicted and retryable");
+  assert.equal(destroyCount, 34);
+});
+
 test("search falls back to ripgrep when the index cannot initialize", async () => {
   const { tools, register } = fakeRegister();
   const rgCalls: Array<{ pattern: string; output: string }> = [];
@@ -210,7 +335,7 @@ test("search falls back to ripgrep when the index cannot initialize", async () =
   const ctx = { cwd: join(tmpdir(), "pi-fff-rg-fallback") } as unknown as ExtensionContext;
   const result = await search.execute(
     "search-rg",
-    { pattern: "needle", limit: 5 },
+    { pattern: "needle", path: "src", limit: 5 },
     new AbortController().signal,
     undefined,
     ctx,
@@ -219,6 +344,75 @@ test("search falls back to ripgrep when the index cannot initialize", async () =
   assert.equal(rgCalls[0]?.output, "lines");
   assert.match(result.content[0]?.text ?? "", /src\/a\.ts:3: hit/);
   assert.match(result.content[0]?.text ?? "", /engine: rg/);
+});
+
+test("root-wide plain search uses bounded rg without waiting for an index", async () => {
+  const { tools, register } = fakeRegister();
+  let finderCreated = false;
+  let rgCalls = 0;
+  registerFff(register, {
+    createFinder: () => {
+      finderCreated = true;
+      return { ok: false, error: "should not be created" } as never;
+    },
+    runRg: async () => {
+      rgCalls += 1;
+      return { text: "src/a.ts:1: hit", limitReached: false, timedOut: true };
+    },
+  });
+  const search = tools.find((tool) => tool.name === "search");
+  assert.ok(search);
+  const ctx = { cwd: join(tmpdir(), "pi-fff-root-rg") } as unknown as ExtensionContext;
+  const result = await search.execute("search-root", { pattern: "hit" }, new AbortController().signal, undefined, ctx);
+  assert.equal(finderCreated, false);
+  assert.equal(rgCalls, 1);
+  assert.match(result.content[0]?.text ?? "", /search timed out.*narrow path/);
+  assert.equal(result.details?.truncated, true);
+  assert.match(search.description, /root-wide.*ripgrep/);
+  assert.match(search.parameters.properties.path.description, /subdirectory/);
+});
+
+test("root-wide search retains the index when rg is unavailable", async () => {
+  const { tools, register } = fakeRegister();
+  let finderCreated = false;
+  const finder = {
+    isDestroyed: false,
+    destroy() { finder.isDestroyed = true; },
+    async waitForScan() { return { ok: true as const, value: true }; },
+    grep() { return { ok: true as const, value: { items: [{ relativePath: "src/a.ts", lineNumber: 1, lineContent: "hit" }] } }; },
+  };
+  registerFff(register, {
+    createFinder: () => {
+      finderCreated = true;
+      return { ok: true, value: finder } as never;
+    },
+    runRg: async () => { throw new Error("ripgrep (rg) is not available on PATH; install ripgrep or restore the FFF index"); },
+  });
+  const search = tools.find((tool) => tool.name === "search");
+  assert.ok(search);
+  const ctx = { cwd: join(tmpdir(), "pi-fff-root-index-fallback") } as unknown as ExtensionContext;
+  const result = await search.execute("search-root", { pattern: "hit" }, new AbortController().signal, undefined, ctx);
+  assert.equal(finderCreated, true);
+  assert.match(result.content[0]?.text ?? "", /src\/a\.ts:1: hit/);
+  assert.equal(result.details?.engine, "fff");
+});
+
+test("root-wide regex preserves invalid-regex literal fallback", async () => {
+  const { tools, register } = fakeRegister();
+  const modes: boolean[] = [];
+  registerFff(register, {
+    runRg: async (request) => {
+      modes.push(request.regex);
+      if (request.regex) throw new Error("regex parse error: unclosed group");
+      return { text: "src/a.ts:1: foo(", limitReached: false };
+    },
+  });
+  const search = tools.find((tool) => tool.name === "search");
+  assert.ok(search);
+  const ctx = { cwd: join(tmpdir(), "pi-fff-root-regex") } as unknown as ExtensionContext;
+  const result = await search.execute("search-root-regex", { pattern: "foo(", mode: "regex" }, new AbortController().signal, undefined, ctx);
+  assert.deepEqual(modes, [true, false]);
+  assert.match(result.content[0]?.text ?? "", /invalid regex — matched literally/);
 });
 
 test("search mode=fuzzy reports an explicit error when the index is unavailable", async () => {
@@ -363,7 +557,7 @@ test("search surfaces the index's regex-to-literal fallback as a note", async ()
   const ctx = { cwd: join(tmpdir(), "pi-fff-regex-fallback") } as unknown as ExtensionContext;
   const result = await search.execute(
     "search-regex-fallback",
-    { pattern: "foo(", mode: "regex", limit: 5 },
+    { pattern: "foo(", path: "src", mode: "regex", limit: 5 },
     new AbortController().signal,
     undefined,
     ctx,

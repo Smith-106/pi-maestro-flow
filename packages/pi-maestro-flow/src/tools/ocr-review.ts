@@ -1,5 +1,5 @@
 /**
- * OCR (open-code-review) tool — wraps the `ocr` CLI.
+ * OpenCodeReview tool — wraps the `ocr` CLI.
  *
  * Actions:
  * - preview / rules: `ocr delegate …` — deterministic file selection and rule
@@ -17,11 +17,6 @@ import { statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-  isApiKeyPolicy,
-  loadApiProviderSettings,
-} from "../providers/api-provider-config.ts";
-import { resolveApiKey } from "../providers/api-provider-ops.ts";
 import { loadOcrConfig } from "../ocr-review/config.ts";
 import type { FlowToolResult } from "./tool-result.ts";
 
@@ -227,40 +222,15 @@ const API_TO_OCR_PROTOCOL: Record<string, string> = {
   "openai-responses": "openai-responses",
 };
 
-/** Resolve apiKey material stored as literal, $ENV/${ENV} reference, or !command. */
-async function resolveKeyMaterial(raw: string, cwd: string): Promise<string> {
-  const envRef = /^\$(\w+)$/.exec(raw) ?? /^\$\{(\w+)\}$/.exec(raw);
-  if (envRef) {
-    const value = process.env[envRef[1]!];
-    if (!value) throw new OcrError(`apiKey references $${envRef[1]} which is not set`);
-    return value;
-  }
-  if (raw.startsWith("!")) {
-    const command = raw.slice(1);
-    const result = await new Promise<{ code: number | null; out: string }>((res) => {
-      const shell = process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : "sh";
-      const shellArgs = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
-      const child = spawn(shell, shellArgs, { cwd, stdio: ["ignore", "pipe", "ignore"] });
-      const chunks: Buffer[] = [];
-      child.stdout.on("data", (c: Buffer) => chunks.push(c));
-      child.on("close", (code) => res({ code, out: Buffer.concat(chunks).toString("utf8") }));
-      child.on("error", () => res({ code: null, out: "" }));
-    });
-    if (result.code !== 0 || !result.out.trim()) {
-      throw new OcrError(`apiKey !command produced no output (exit ${result.code ?? "?"})`);
-    }
-    return result.out.trim();
-  }
-  return raw;
-}
-
 /** Exported for tests: encodes a header map into OCR_LLM_EXTRA_HEADERS format. */
-export function encodeExtraHeaders(headers: Record<string, string>): string {
+export function encodeExtraHeaders(headers: Record<string, string | null>): string {
   // OCR splits on unquoted commas; quote values that contain commas/quotes.
+  // Pi uses null to remove a configured header, so it must not reach the CLI.
   return Object.entries(headers)
-    .map(([key, value]) => {
+    .flatMap(([key, value]) => {
+      if (value === null) return [];
       const safe = /[",\n]/.test(value) ? `"${value.replace(/"/g, "")}"` : value;
-      return `${key}=${safe}`;
+      return [`${key}=${safe}`];
     })
     .join(",");
 }
@@ -296,7 +266,7 @@ async function resolveReviewModel(
   );
 }
 
-async function resolveOcrLlmEnv(
+export async function resolveOpenCodeReviewLlmEnv(
   ctx: ExtensionContext,
   modelOverride?: string,
 ): Promise<Record<string, string>> {
@@ -304,37 +274,37 @@ async function resolveOcrLlmEnv(
   const protocol = API_TO_OCR_PROTOCOL[model.api];
   if (!protocol) {
     throw new OcrError(
-      `Model api "${model.api}" is not supported by ocr (needs anthropic|openai|openai-responses). ` +
+      `Model api "${model.api}" is not supported by OpenCodeReview (needs anthropic|openai|openai-responses). ` +
       `Use action=preview + action=rules and review with the host agent instead.`,
     );
   }
-  const modelsPath = join(getAgentDir(), "models.json");
-  const settings = await loadApiProviderSettings(model.provider, modelsPath, model.id);
-  const key = resolveApiKey(
-    {
-      apiKey: settings.apiKey,
-      apiKeys: settings.apiKeys,
-      keyPolicy: settings.keyPolicy,
-      activeKeyId: settings.activeKeyId,
-    },
-    isApiKeyPolicy(settings.keyPolicy) ? settings.keyPolicy : "sticky",
-  );
-  if (!key) {
+
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
     throw new OcrError(
-      `No API key configured for provider "${model.provider}". ` +
-      `Configure one via /api-manager, or use action=preview + action=rules (no LLM needed).`,
+      `Authentication for review model "${model.provider}/${model.id}" is unavailable: ${auth.error}`,
     );
   }
-  const token = await resolveKeyMaterial(key.key, ctx.cwd);
+  if (!auth.apiKey) {
+    throw new OcrError(
+      `No API key resolved for review model "${model.provider}/${model.id}". ` +
+      `Configure it via /api-manager, or use action=preview + action=rules (no LLM needed).`,
+    );
+  }
+  const baseUrl = auth.baseUrl || model.baseUrl;
+  if (!baseUrl) {
+    throw new OcrError(`No gateway URL resolved for review model "${model.provider}/${model.id}".`);
+  }
 
   const env: Record<string, string> = {
-    OCR_LLM_URL: model.baseUrl || settings.baseUrl,
-    OCR_LLM_TOKEN: token,
+    OCR_LLM_URL: baseUrl,
+    OCR_LLM_TOKEN: auth.apiKey,
     OCR_LLM_MODEL: model.id,
     OCR_LLM_PROTOCOL: protocol,
   };
-  const headers = { ...settings.headers, ...model.headers };
-  if (Object.keys(headers).length > 0) env.OCR_LLM_EXTRA_HEADERS = encodeExtraHeaders(headers);
+  if (auth.headers && Object.keys(auth.headers).length > 0) {
+    env.OCR_LLM_EXTRA_HEADERS = encodeExtraHeaders(auth.headers);
+  }
   return env;
 }
 
@@ -404,7 +374,7 @@ export async function executeOcrReview(
 
       case "health": {
         let envError: string | undefined;
-        const env = await resolveOcrLlmEnv(ctx, params.model).catch((error: unknown) => {
+        const env = await resolveOpenCodeReviewLlmEnv(ctx, params.model).catch((error: unknown) => {
           envError = error instanceof Error ? error.message : String(error);
           return undefined;
         });
@@ -429,7 +399,7 @@ export async function executeOcrReview(
       }
 
       case "review": {
-        const env = await resolveOcrLlmEnv(ctx, params.model);
+        const env = await resolveOpenCodeReviewLlmEnv(ctx, params.model);
         const tmp = await mkdtemp(join(tmpdir(), "ocr-review-"));
         const outputPath = join(tmp, "result.json");
         try {

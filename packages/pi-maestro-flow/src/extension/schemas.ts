@@ -5,7 +5,7 @@
  * Auxiliary tools: goal, ask-user-question, todo
  */
 
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
 import {
   TODO_ADVANCE_TRANSITIONS,
@@ -147,12 +147,12 @@ export const GoalToolParams = Type.Object({
   ),
 }, { additionalProperties: false });
 
-// === OCR Code Review Schema ===
+// === OpenCodeReview Schema ===
 
 export const OcrReviewParams = Type.Object({
   action: StringEnum(
     ["review", "preview", "rules", "health"],
-    "review = full OCR-managed review (current model injected via env); preview/rules = delegate mode, deterministic, no LLM; health = version + LLM connectivity check",
+    "review = full OpenCodeReview-managed review (current API manager gateway model injected via env); preview/rules = delegate mode, deterministic, no LLM; health = version + LLM connectivity check",
   ),
   commit: Type.Optional(Type.String({ description: "Review one commit against its parent" })),
   from: Type.Optional(Type.String({ description: "Base ref for a range review; must be paired with 'to'" })),
@@ -170,7 +170,7 @@ export const OcrReviewParams = Type.Object({
   overallTimeoutMinutes: Type.Optional(Type.Integer({ minimum: 1, description: "Wall-clock cap for the whole ocr process (review; default 45)" })),
   model: Type.Optional(
     Type.String({
-      description: "Review model override: 'provider/modelId' pins a registered model, 'session' follows the current session model (default). Falls back to the api-manager.json ocr.modelRef pin.",
+      description: "Review model override: 'provider/modelId' pins a registered model, 'session' follows the current session model and its runtime-resolved gateway auth (default). Falls back to the api-manager.json ocr.modelRef pin.",
     }),
   ),
 }, { additionalProperties: false });
@@ -442,3 +442,8 @@ export const TodoToolParams = Type.Object({
     },
   }],
 });
+
+// The host validates against TodoToolParams; the model-facing declaration must
+// omit conditionals that Gemini function declarations do not support.
+const { allOf: _todoConditions, ...todoModelSchema } = TodoToolParams as typeof TodoToolParams & { allOf?: unknown };
+export const TodoModelParams = Type.Unsafe<Static<typeof TodoToolParams>>(todoModelSchema);

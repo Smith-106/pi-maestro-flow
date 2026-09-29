@@ -4863,7 +4863,7 @@ test("native completion clears a preempted output-limit owner", async () => {
 
 // --- P1: loop-critical interruption of sustained tool loops ---
 
-function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {}) {
+function loopCriticalFixture(options: { hasPendingMessages?: () => boolean; isIdle?: () => boolean } = {}) {
   let aborted = 0;
   const compactCalls: Array<{ customInstructions?: string; onComplete(): void; onError(error: Error): void }> = [];
   const sent: string[] = [];
@@ -4892,6 +4892,7 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
     abort() { aborted++; },
     compact(options: { customInstructions?: string; onComplete(): void; onError(error: Error): void }) { compactCalls.push(options); },
     hasPendingMessages: options.hasPendingMessages ?? (() => false),
+    isIdle: options.isIdle,
     sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ type: "message" }] },
     ui: {
       setStatus() {},
@@ -4941,6 +4942,23 @@ test("sustained critical-band pressure inside a tool loop aborts once and settle
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
   await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
   assert.equal(fx.aborted(), 1, "a fresh run counts the critical streak from zero");
+});
+
+test("idle compaction recovery starts immediately instead of stranding a follow-up", async () => {
+  const fx = loopCriticalFixture({ isIdle: () => true });
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+  assert.equal(fx.guard.onToolCall(fx.ctx)?.block, true);
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+  fx.compactCalls[0].onComplete();
+
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/);
+  assert.equal(
+    fx.sendOptions.at(-1),
+    undefined,
+    "an idle session needs an immediate prompt because followUp has no active stop boundary to drain it",
+  );
 });
 
 test("tool-boundary compaction publishes typed teammate recovery phases", async () => {

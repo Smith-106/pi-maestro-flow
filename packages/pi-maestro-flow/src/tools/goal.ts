@@ -63,6 +63,7 @@ export interface GoalCompactionEntry {
   tokenBudget?: number;
   verificationFailures?: number;
   infraErrorStreak?: number;
+  failStreak?: number;
   lastVerificationFailure?: string;
   acceptance?: string[];
   planHandoffKey?: string;
@@ -99,6 +100,13 @@ export interface ActiveGoal {
    * out of the verifier, and by resume.
    */
   infraErrorStreak?: number;
+  /**
+   * Fail verdicts since the last resume, bounded separately from
+   * verificationFailures (which tracks inconclusive results): a fail carries
+   * actionable unmet feedback, so it earns a wider bound — but not an unbounded
+   * one.
+   */
+  failStreak?: number;
   lastVerificationFailure?: string;
   acceptance?: string[];
   prevTokensUsed?: number;
@@ -780,7 +788,7 @@ export function switchCurrentGoal(
   const target = goalRegistry.find((goal) => goal.id === goalId);
   if (!target || isSupersededWorkflowProjection(target)) return undefined;
   const nextGoal = opts.resume && target.status === "paused"
-    ? { ...target, status: "active" as const, pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, updatedAt: Date.now() }
+    ? { ...target, status: "active" as const, pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, failStreak: 0, updatedAt: Date.now() }
     : target;
   persistGoal(nextGoal);
   if (ctx) updateStatusLine(ctx, nextGoal);
@@ -1048,6 +1056,7 @@ function activateResumedGoal(goal: ActiveGoal): ActiveGoal {
     pauseReason: undefined,
     verificationFailures: 0,
     infraErrorStreak: 0,
+    failStreak: 0,
     lowProgressCount: 0,
     prevTokensUsed: goal.tokensUsed,
     updatedAt: Date.now(),
@@ -1445,6 +1454,7 @@ function isGoal(v: unknown): v is ActiveGoal {
     (g.supersededByGoalId === undefined || typeof g.supersededByGoalId === "string")
     && (g.verificationFailures === undefined || (typeof g.verificationFailures === "number" && g.verificationFailures >= 0))
     && (g.infraErrorStreak === undefined || (typeof g.infraErrorStreak === "number" && g.infraErrorStreak >= 0))
+    && (g.failStreak === undefined || (typeof g.failStreak === "number" && g.failStreak >= 0))
     && (g.acceptance === undefined || (Array.isArray(g.acceptance) && g.acceptance.every((item) => typeof item === "string")))
     && (g.lastVerificationFailure === undefined || typeof g.lastVerificationFailure === "string")
     && (g.prevTokensUsed === undefined || typeof g.prevTokensUsed === "number")
@@ -1491,7 +1501,7 @@ function goalBlock(goal: ActiveGoal): string {
 }
 
 function rules(label: string): string {
-  return `Keep going until ${label} is completely resolved end-to-end. Do not redefine ${label} into a smaller task. Do not stop at analysis, a plan, TODO list, partial fixes, or suggested next steps. Autonomously perform implementation and verification. Treat the current worktree, command output, tests, and external state as authoritative. If a tool call fails, try reasonable alternatives. Before requesting completion, audit ${label} requirement by requirement, then call goal complete with a concise evidence summary. An independent verifier owns the done transition.`;
+  return `Keep going until ${label} is completely resolved end-to-end. Do not redefine ${label} into a smaller task. Do not stop at analysis, a plan, TODO list, partial fixes, or suggested next steps. Autonomously perform implementation and verification. Treat the current worktree, command output, tests, and external state as authoritative. If a tool call fails, try reasonable alternatives. If the only remaining gaps require human approval, credentials, or actions outside your control, say so plainly in your next message and pause the gated parts instead of building substitutes around them. Before requesting completion, audit ${label} requirement by requirement, then call goal complete with a concise evidence summary. An independent verifier owns the done transition.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,6 +1828,7 @@ export function getGoalCompactionSnapshot(): GoalCompactionSnapshot {
       ...(goal.tokenBudget === undefined ? {} : { tokenBudget: goal.tokenBudget }),
       ...(goal.verificationFailures ? { verificationFailures: goal.verificationFailures } : {}),
       ...(goal.infraErrorStreak ? { infraErrorStreak: goal.infraErrorStreak } : {}),
+      ...(goal.failStreak ? { failStreak: goal.failStreak } : {}),
       ...(goal.lastVerificationFailure ? { lastVerificationFailure: goal.lastVerificationFailure } : {}),
       ...(goal.acceptance?.length ? { acceptance: [...goal.acceptance] } : {}),
       ...(goal.planHandoffKey ? { planHandoffKey: goal.planHandoffKey } : {}),

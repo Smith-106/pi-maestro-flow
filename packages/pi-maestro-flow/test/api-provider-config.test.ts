@@ -348,6 +348,8 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.equal(commands.has("thinking"), false, "official /thinking remains the only top-level thinking command");
   assert.equal(commands.has("effort"), false);
   assert.equal(actionFromArg("effort"), undefined);
+  assert.equal(actionFromArg("open-code-review"), "ocr");
+  assert.equal(actionFromArg("ocr-review"), "ocr", "legacy API manager alias remains compatible");
   const movedNotices: Array<{ message: string; type: string }> = [];
   await commands.get("api-manager").handler("effort", {
     hasUI: true,

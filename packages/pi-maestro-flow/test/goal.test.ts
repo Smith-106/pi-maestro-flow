@@ -2001,6 +2001,59 @@ test("contradictory verdict is normalized to an actionable fail that does not co
   }
 });
 
+test("Goal pauses after six consecutive failed verdicts without spending the inconclusive budget", async () => {
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "Structured output saved." }],
+    structuredOutput: {
+      pass: false,
+      reasoning: "A requirement remains unmet.",
+      unmet: ["Close the remaining gap"],
+      evidence: ["focused check"],
+    },
+  }));
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const notices: string[] = [];
+  const ctx = createContext({
+    isIdle: () => false,
+    sessionManager: { getEntries: () => [] },
+    ui: { notify(message: string) { notices.push(message); }, setStatus() {} },
+  });
+  onSessionStart(ctx);
+  try {
+    await executeGoal({ action: "create", objective: "Bound failed verdict retries" }, ctx);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const result = await executeGoal({
+        action: "complete",
+        summary: `Completion attempt ${attempt + 1}.`,
+      }, ctx);
+      assert.match(result.text, /Unmet: Close the remaining gap\./);
+      assert.equal(getActiveGoal()?.status, "active");
+      // A fail verdict is actionable feedback: the inconclusive budget is not
+      // consumed, but the bounded fail streak still accrues.
+      assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
+      assert.equal(getActiveGoal()?.failStreak, attempt + 1);
+    }
+
+    await executeGoal({ action: "complete", summary: "Sixth completion attempt." }, ctx);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "verification");
+    assert.equal(getActiveGoal()?.failStreak, 6);
+    assert.ok(
+      notices.some((message) => /6 failed verdicts/.test(message)),
+      `expected a fail-streak notice, got ${JSON.stringify(notices)}`,
+    );
+
+    await executeGoalCommand({ action: "resume" }, ctx);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.failStreak, 0);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
 test("verifier infrastructure error exposes bounded child diagnostics without consuming the Goal's failure budget", async () => {
   setGoalVerifierRunnerForTest(async () => ({
     exitCode: 1,
@@ -3087,7 +3140,7 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
       "id", "text", "status", "pauseReason", "startedAt", "updatedAt", "iteration",
       "tokenBudget", "tokensUsed", "timeUsedSeconds", "baselineTokens", "workflowSessionId",
       "planHandoffKey", "workflowSessionGeneration", "supersededByGoalId", "verificationFailures",
-      "infraErrorStreak", "lastVerificationFailure", "acceptance",
+      "infraErrorStreak", "failStreak", "lastVerificationFailure", "acceptance",
       "prevTokensUsed", "lowProgressCount",
     ]);
     assert.ok(Object.keys(getActiveGoal() ?? {}).every((key) => allowedGoalFields.has(key)));

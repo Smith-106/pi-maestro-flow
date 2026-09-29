@@ -40,6 +40,8 @@ export interface ApiModelFormField {
   value: string | boolean;
   choices?: readonly ApiModelFormChoice[];
   help?: string;
+  /** Never reveal a prefix or suffix of this secret in the form. */
+  redact?: boolean;
   /** Text fields only: Ctrl+D opens the gateway model picker when discoverModels is provided. */
   discoverable?: boolean;
 }
@@ -597,13 +599,13 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   private renderEditValue(field: ApiModelFormField): string {
     if (field.kind === "secret") {
       if (this.secretClearOnCommit) return this.params.theme.fg("warning", this.t("secret.clearConfirm"));
-      return this.editValue ? maskSecret(this.editValue) : this.params.theme.fg("dim", this.t("secret.keepPlaceholder"));
+      return this.editValue ? maskSecret(this.editValue, field.redact) : this.params.theme.fg("dim", this.t("secret.keepPlaceholder"));
     }
     return this.editValue || this.params.theme.fg("dim", this.t("value.empty"));
   }
 
   private renderFieldValue(field: ApiModelFormField): string {
-    if (field.kind === "secret") return field.value ? maskSecret(String(field.value)) : this.params.theme.fg("warning", this.t("value.unconfigured"));
+    if (field.kind === "secret") return field.value ? maskSecret(String(field.value), field.redact) : this.params.theme.fg("warning", this.t("value.unconfigured"));
     if (field.kind === "toggle") return field.value
       ? this.params.theme.fg("success", `● ${this.t("value.on")}`)
       : this.params.theme.fg("dim", `○ ${this.t("value.off")}`);
@@ -678,8 +680,8 @@ function visibleStart(selected: number, length: number): number {
   return Math.max(0, Math.min(selected - Math.floor(MAX_VISIBLE_FIELDS / 2), length - MAX_VISIBLE_FIELDS));
 }
 
-function maskSecret(value: string): string {
+function maskSecret(value: string, redact = false): string {
   if (!value) return "";
-  if (value.length <= 8) return "*".repeat(value.length);
+  if (redact || value.length <= 8) return "*".repeat(Math.min(12, value.length));
   return `${value.slice(0, 3)}${"*".repeat(Math.min(12, value.length - 7))}${value.slice(-4)}`;
 }
