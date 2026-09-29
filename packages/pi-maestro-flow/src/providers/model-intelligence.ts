@@ -282,25 +282,38 @@ async function fetchLists(
 ): Promise<ModelIntelligenceCacheFile["lists"]> {
   callerSignal?.throwIfAborted();
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
-  const entries = await Promise.all(MODEL_INTELLIGENCE_DIMENSIONS.map(async (dimension) => {
-    const url = new URL(baseUrl);
-    url.searchParams.set("sort", SORT_BY_DIMENSION[dimension]);
-    const response = await fetchFn(url, {
-      headers: { accept: "application/json" },
-      redirect: "error",
-      signal,
-    });
-    if (response.redirected) throw new Error("OpenRouter models API redirect rejected");
-    if (!response.ok) throw new Error(`OpenRouter models API HTTP ${response.status}`);
-    const payload = await response.json() as { data?: unknown };
-    const ranking = Array.isArray(payload.data)
-      ? payload.data.map(normalizeEntry).filter((entry): entry is OpenRouterModelEntry => entry !== undefined)
-      : [];
-    if (ranking.length === 0) throw new Error(`OpenRouter returned no valid ${dimension} ranking`);
-    return [dimension, ranking] as const;
-  }));
+  const requestController = new AbortController();
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, timeoutSignal, requestController.signal])
+    : AbortSignal.any([timeoutSignal, requestController.signal]);
+  let firstError: unknown;
+  const requests = MODEL_INTELLIGENCE_DIMENSIONS.map(async (dimension) => {
+    try {
+      const url = new URL(baseUrl);
+      url.searchParams.set("sort", SORT_BY_DIMENSION[dimension]);
+      const response = await fetchFn(url, {
+        headers: { accept: "application/json" },
+        redirect: "error",
+        signal,
+      });
+      if (response.redirected) throw new Error("OpenRouter models API redirect rejected");
+      if (!response.ok) throw new Error(`OpenRouter models API HTTP ${response.status}`);
+      const payload = await response.json() as { data?: unknown };
+      const ranking = Array.isArray(payload.data)
+        ? payload.data.map(normalizeEntry).filter((entry): entry is OpenRouterModelEntry => entry !== undefined)
+        : [];
+      if (ranking.length === 0) throw new Error(`OpenRouter returned no valid ${dimension} ranking`);
+      return [dimension, ranking] as const;
+    } catch (error) {
+      if (firstError === undefined) firstError = error;
+      requestController.abort();
+      throw error;
+    }
+  });
+  const settled = await Promise.allSettled(requests);
   callerSignal?.throwIfAborted();
+  if (firstError !== undefined) throw firstError;
+  const entries = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
   return Object.fromEntries(entries) as ModelIntelligenceCacheFile["lists"];
 }
 
@@ -342,13 +355,8 @@ async function loadCache(options: LoadModelIntelligenceOptions): Promise<{
   let refresh = inFlightRefreshes.get(refreshKey);
   if (!refresh) {
     const controller = new AbortController();
-    const state: SharedRefresh = {
-      controller,
-      waiters: 0,
-      settled: false,
-      promise: undefined as unknown as Promise<ModelIntelligenceCacheFile>,
-    };
-    state.promise = (async () => {
+    let state!: SharedRefresh;
+    const promise = (async () => {
       const lists = await fetchLists(
         baseUrl,
         options.timeoutMs ?? FETCH_TIMEOUT_MS,
@@ -363,6 +371,7 @@ async function loadCache(options: LoadModelIntelligenceOptions): Promise<{
       state.settled = true;
       if (inFlightRefreshes.get(refreshKey) === state) inFlightRefreshes.delete(refreshKey);
     });
+    state = { controller, waiters: 0, settled: false, promise };
     refresh = state;
     inFlightRefreshes.set(refreshKey, state);
   }
@@ -396,6 +405,19 @@ function entryIds(entry: OpenRouterModelEntry): string[] {
   return [entry.id, entry.canonical_slug].filter((value): value is string => typeof value === "string");
 }
 
+function providerNamespace(value: string): string | undefined {
+  const slash = value.indexOf("/");
+  return slash > 0 ? value.slice(0, slash).toLowerCase() : undefined;
+}
+
+function aliasProviderCompatible(model: AvailableModelIdentity, entry: OpenRouterModelEntry): boolean {
+  const modelIds = model.modelId ? [model.modelId] : [model.registrationId];
+  const modelProviders = new Set(modelIds.map(providerNamespace).filter((value): value is string => value !== undefined));
+  const entryProviders = new Set(entryIds(entry).map(providerNamespace).filter((value): value is string => value !== undefined));
+  if (entryProviders.size === 0) return true;
+  return [...entryProviders].some((provider) => modelProviders.has(provider));
+}
+
 function rankFor(
   list: readonly OpenRouterModelEntry[] | undefined,
   model: AvailableModelIdentity,
@@ -411,7 +433,10 @@ function rankFor(
   for (const leaf of leafAliases(model)) {
     const modelOwners = models.filter((candidate) => leafAliases(candidate).includes(leaf));
     const entryIndexes = list.flatMap((entry, index) =>
-      entryIds(entry).some((id) => normalizeModelId(id) === leaf) ? [index] : []);
+      aliasProviderCompatible(model, entry)
+        && entryIds(entry).some((id) => normalizeModelId(id) === leaf)
+        ? [index]
+        : []);
     if (modelOwners.length !== 1 || entryIndexes.length !== 1) continue;
     const index = entryIndexes[0]!;
     return { entry: list[index]!, rank: { rank: index + 1, total: list.length }, via: "unambiguous-alias" };

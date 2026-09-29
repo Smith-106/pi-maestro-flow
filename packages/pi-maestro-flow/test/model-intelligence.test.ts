@@ -401,3 +401,61 @@ test("date-suffixed model ids keep exact identity before alias fallback", async 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("leaf fallback rejects a benchmark from another qualified provider", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-provider-fallback-"));
+  const fetchFn: typeof fetch = async () => new Response(JSON.stringify({
+    data: [{ id: "provider-a/shared" }],
+  }), { status: 200 });
+  try {
+    const view = await loadModelIntelligence("development", [
+      { registrationId: "provider-b/shared" },
+    ], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.deepEqual(view.candidates, []);
+    assert.deepEqual(view.unmatched_models, ["provider-b/shared"]);
+    assert.equal(view.recommendation, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed dimension aborts and settles sibling ranking requests", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-model-intelligence-sibling-abort-"));
+  let active = 0;
+  let settled = 0;
+  const fetchFn: typeof fetch = async (input, init) => {
+    active++;
+    try {
+      const sort = new URL(String(input)).searchParams.get("sort");
+      if (sort === "coding-high-to-low") return new Response("failed", { status: 503 });
+      return await new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(new Response(JSON.stringify({
+          data: [{ id: "provider/model" }],
+        }), { status: 200 })), 100);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+        }, { once: true });
+      });
+    } finally {
+      active--;
+      settled++;
+    }
+  };
+  try {
+    const view = await loadModelIntelligence("development", [{ registrationId: "provider/model" }], {
+      cachePath: join(root, "cache.json"),
+      baseUrl: "https://rankings.example/models",
+      fetchFn,
+    });
+    assert.equal(view.status, "unavailable");
+    assert.equal(active, 0);
+    assert.equal(settled, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
