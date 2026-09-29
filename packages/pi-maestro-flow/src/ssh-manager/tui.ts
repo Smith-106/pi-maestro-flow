@@ -18,10 +18,127 @@ import {
   removeLastGrapheme,
   sanitizeSingleLineInput,
 } from "../tui/input-text.ts";
+import { getTuiLocale } from "../tui/locale.ts";
 import type { SshHost, SshKey } from "./model.ts";
 import type { SshHostOperationalStatus } from "./status-monitor.ts";
 
 export interface SshManagerTheme extends FrameTheme {}
+
+const SSH_TUI_TEXT = {
+  en: {
+    secretCompact: "Secret input · Esc",
+    secretFooter: "Enter confirm · Esc cancel · Ctrl+U clear · Backspace delete",
+    managerCompact: "SSH {view} · {count} · Esc",
+    managerTitle: "SSH Manager",
+    hosts: "Hosts",
+    keys: "Keys",
+    noHosts: "○ no SSH servers configured",
+    noKeys: "○ no SSH keys configured",
+    noMatches: "○ no {view} match the current filter",
+    firstHost: "Press A to add your first SSH server; I imports OpenSSH config.",
+    firstKey: "Press A to import a private key from a detected file or an explicit path.",
+    filtering: "Filtering: {query} · Esc clear",
+    filterHint: "type label, endpoint, user, or tag",
+    listHelp: "Tab/H/K switch Hosts/Keys · / filter · showing {count}",
+    close: "Esc close",
+    select: "↑↓ select",
+    attach: "Space attach",
+    useOnly: "Enter use only",
+    add: "A add",
+    edit: "E edit",
+    delete: "D delete",
+    test: "T test",
+    reset: "R reset",
+    import: "I import",
+    lock: "L lock",
+    rename: "E rename",
+    replace: "R replace",
+    direct: "direct",
+    missingJump: "missing jump",
+    trusted: "trusted",
+    untrusted: "untrusted",
+    disabled: "disabled",
+    checking: "checking",
+    online: "online",
+    offline: "offline",
+    tags: "tags {tags}",
+    jump: "jump {jump}",
+    monitor: "monitor {status}",
+    identity: "identity",
+    password: "password",
+    key: "key {label}",
+    missingKey: "missing",
+    agent: "agent",
+    created: "created {date}",
+    bytes: "{count} bytes",
+    pickerCompact: "SSH targets · {count} attached · Esc",
+    pickerTitle: "Attach SSH servers", pickerCount: "{count} attached",
+    pickerEmpty: "○ no SSH servers match the current filter",
+    pickerHelp: "↑↓ select · Space toggle · Enter apply · / filter",
+    pickerFooter: "Esc cancel · selection remains local to this Pi session",
+  },
+  "zh-CN": {
+    secretCompact: "密码输入 · Esc",
+    secretFooter: "Enter 确认 · Esc 取消 · Ctrl+U 清空 · Backspace 删除",
+    managerCompact: "SSH {view} · {count} · Esc",
+    managerTitle: "SSH 管理器",
+    hosts: "主机",
+    keys: "密钥",
+    noHosts: "○ 尚未配置 SSH 服务器",
+    noKeys: "○ 尚未配置 SSH 密钥",
+    noMatches: "○ 没有{view}符合当前筛选条件",
+    firstHost: "按 A 添加第一台 SSH 服务器；按 I 导入 OpenSSH 配置。",
+    firstKey: "按 A 从识别到的文件或指定路径导入私钥。",
+    filtering: "筛选中：{query} · Esc 清除",
+    filterHint: "输入标签、地址、用户或标记",
+    listHelp: "Tab/H/K 切换主机/密钥 · / 筛选 · 显示 {count} 项",
+    close: "Esc 关闭",
+    select: "↑↓ 选择",
+    attach: "Space 附加",
+    useOnly: "Enter 仅使用此项",
+    add: "A 添加",
+    edit: "E 编辑",
+    delete: "D 删除",
+    test: "T 测试",
+    reset: "R 重置",
+    import: "I 导入",
+    lock: "L 锁定",
+    rename: "E 重命名",
+    replace: "R 替换",
+    direct: "直连",
+    missingJump: "跳板机缺失",
+    trusted: "已信任",
+    untrusted: "未信任",
+    disabled: "已禁用",
+    checking: "检查中",
+    online: "在线",
+    offline: "离线",
+    tags: "标记 {tags}",
+    jump: "跳板 {jump}",
+    monitor: "监控 {status}",
+    identity: "身份文件",
+    password: "密码",
+    key: "密钥 {label}",
+    missingKey: "缺失",
+    agent: "代理",
+    created: "创建于 {date}",
+    bytes: "{count} 字节",
+    pickerCompact: "SSH 目标 · 已附加 {count} 项 · Esc",
+    pickerTitle: "附加 SSH 服务器", pickerCount: "已附加 {count} 项",
+    pickerEmpty: "○ 没有 SSH 服务器符合当前筛选条件",
+    pickerHelp: "↑↓ 选择 · Space 切换 · Enter 应用 · / 筛选",
+    pickerFooter: "Esc 取消 · 选择仅在当前 Pi 会话中生效",
+  },
+} as const;
+
+type SshTuiLocale = ReturnType<typeof getTuiLocale>;
+type SshTuiTextKey = keyof typeof SSH_TUI_TEXT.en;
+
+function sshText(key: SshTuiTextKey, locale: SshTuiLocale, vars?: Readonly<Record<string, string | number>>): string {
+  const template: string = SSH_TUI_TEXT[locale][key];
+  return vars ? template.replace(/\{(\w+)\}/gu, (_match, name: string) =>
+    vars[name] === undefined ? `{${name}}` : String(vars[name])) : template;
+}
 
 export interface MaskedSecretInputParams {
   title: string;
@@ -42,13 +159,14 @@ export class MaskedSecretInput implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 120));
-    if (safeWidth < 20) return [fit("Secret input · Esc", safeWidth)];
+    const locale = getTuiLocale();
+    if (safeWidth < 20) return [fit(sshText("secretCompact", locale), safeWidth)];
     const inner = safeWidth - 2;
     const masked = this.value.length > 0 ? "*".repeat(Math.min(this.value.length, Math.max(1, inner - 4))) : "";
     return frame([
       headerLine(this.params.theme, this.params.title, [], inner), rule(inner),
       helpLine(this.params.theme, this.params.prompt, inner), fit(`› ${masked}`, inner), rule(inner),
-      fit("Enter confirm · Esc cancel · Ctrl+U clear · Backspace delete", inner),
+      fit(sshText("secretFooter", locale), inner),
     ], safeWidth, this.params.theme);
   }
 
@@ -117,36 +235,38 @@ export class SshHostManagerOverlay implements Component, Focusable {
     const safeWidth = Math.max(1, Math.min(width, 140));
     const rowsForView = this.view === "hosts" ? this.filteredHosts() : this.filteredKeys();
     this.selected = clampIndex(this.selected, rowsForView.length);
-    if (safeWidth < 20) return [fit(`SSH ${this.view} · ${rowsForView.length} · Esc`, safeWidth)];
+    const locale = getTuiLocale();
+    const viewLabel = sshText(this.view, locale);
+    if (safeWidth < 20) return [fit(sshText("managerCompact", locale, { view: viewLabel, count: rowsForView.length }), safeWidth)];
     const inner = safeWidth - 2;
     const total = this.view === "hosts" ? this.params.hosts.length : (this.params.keys?.length ?? 0);
     const rows: string[] = [
-      headerLine(this.params.theme, "SSH Manager", [`[${this.view === "hosts" ? "Hosts" : "Keys"}]`, `${rowsForView.length}/${total}`], inner),
+      headerLine(this.params.theme, sshText("managerTitle", locale), [`[${viewLabel}]`, `${rowsForView.length}/${total}`], inner),
       rule(inner),
     ];
     if (rowsForView.length === 0) {
-      const empty = total === 0 ? (this.view === "hosts" ? "○ no SSH servers configured" : "○ no SSH keys configured") : `○ no ${this.view} match the current filter`;
+      const empty = total === 0 ? sshText(this.view === "hosts" ? "noHosts" : "noKeys", locale) : sshText("noMatches", locale, { view: viewLabel });
       rows.push(fit(this.params.theme.fg("warning", empty), inner));
-      if (total === 0) rows.push(fit(this.view === "hosts" ? "Press A to add your first SSH server; I imports OpenSSH config." : "Press A to import a private key from an explicit path.", inner));
+      if (total === 0) rows.push(fit(sshText(this.view === "hosts" ? "firstHost" : "firstKey", locale), inner));
     } else {
       const start = visibleStart(this.selected, rowsForView.length, MAX_VISIBLE_ROWS);
       for (let offset = 0; offset < Math.min(MAX_VISIBLE_ROWS, rowsForView.length); offset += 1) {
         const index = start + offset;
         const value = rowsForView[index]!;
         const marker = index === this.selected ? this.params.theme.fg("accent", "›") : " ";
-        const summary = this.view === "hosts" ? this.hostSummary(value as SshHost, index === this.selected) : this.keySummary(value as SshKey, index === this.selected);
+        const summary = this.view === "hosts" ? this.hostSummary(value as SshHost, index === this.selected, locale) : this.keySummary(value as SshKey, index === this.selected, locale);
         const attached = this.view === "hosts" && this.params.selectedHostIds?.includes((value as SshHost).id) ? "[x]" : this.view === "hosts" ? "[ ]" : "";
         rows.push(fit(`${marker} ${attached ? `${attached} ` : ""}${summary}`, inner));
       }
     }
     rows.push(helpLine(this.params.theme, this.filtering
-      ? `Filtering: ${this.query || "type label, endpoint, user, or tag"} · Esc clear`
-      : `Tab/H/K switch Hosts/Keys · / filter · showing ${rowsForView.length}`, inner));
+      ? sshText("filtering", locale, { query: this.query || sshText("filterHint", locale) })
+      : sshText("listHelp", locale, { count: rowsForView.length }), inner));
     if (this.params.notice) rows.push(fit(this.params.theme.fg("warning", this.params.notice), inner));
-    const actions = this.view === "hosts"
-      ? ["Esc close", "↑↓ select", "Space attach", "Enter use only", "A add", "E edit", "D delete", "T test", "R reset", "I import", "L lock"]
-      : ["Esc close", "↑↓ select", "A import", "E rename", "R replace", "D delete", "L lock"];
-    rows.push(rule(inner), fitSegments(inner, actions));
+    const actionKeys: SshTuiTextKey[] = this.view === "hosts"
+      ? ["close", "select", "attach", "useOnly", "add", "edit", "delete", "test", "reset", "import", "lock"]
+      : ["close", "select", "import", "rename", "replace", "delete", "lock"];
+    rows.push(rule(inner), fitSegments(inner, actionKeys.map((key) => sshText(key, locale))));
     return frame(rows, safeWidth, this.params.theme);
   }
 
@@ -188,18 +308,18 @@ export class SshHostManagerOverlay implements Component, Focusable {
     if (data === "l" || data === "L") return this.finish("lock", false);
   }
 
-  private hostSummary(host: SshHost, selected: boolean): string {
+  private hostSummary(host: SshHost, selected: boolean, locale: SshTuiLocale): string {
     const label = selected ? this.params.theme.bold(host.label) : host.label;
-    const jump = host.jumpHostId ? this.params.hosts.find((candidate) => candidate.id === host.jumpHostId)?.label ?? "missing jump" : "direct";
-    const trust = host.hostKey === null ? "untrusted" : "trusted";
+    const jump = host.jumpHostId ? this.params.hosts.find((candidate) => candidate.id === host.jumpHostId)?.label ?? sshText("missingJump", locale) : sshText("direct", locale);
+    const trust = sshText(host.hostKey === null ? "untrusted" : "trusted", locale);
     const monitor = this.params.statuses?.get(host.id)?.status ?? (host.monitorEnabled ? "checking" : "disabled");
-    const tags = (host.tags?.length ?? 0) > 0 ? ` · tags ${host.tags.join(",")}` : "";
-    return `${label} · ${host.user}@${formatAddress(host.host, host.port)} · ${host.shell} · ${authKindLabel(host, this.params.keys)}${tags} · jump ${jump} · ${trust} · monitor ${monitor}`;
+    const tags = (host.tags?.length ?? 0) > 0 ? ` · ${sshText("tags", locale, { tags: host.tags.join(",") })}` : "";
+    return `${label} · ${host.user}@${formatAddress(host.host, host.port)} · ${host.shell} · ${authKindLabel(host, this.params.keys, locale)}${tags} · ${sshText("jump", locale, { jump })} · ${trust} · ${sshText("monitor", locale, { status: sshText(monitor, locale) })}`;
   }
 
-  private keySummary(key: SshKey, selected: boolean): string {
+  private keySummary(key: SshKey, selected: boolean, locale: SshTuiLocale): string {
     const label = selected ? this.params.theme.bold(key.label) : key.label;
-    return `${label} · ${key.publicKeyFingerprint} · created ${key.createdAt} · ${Buffer.byteLength(key.privateKey, "utf8")} bytes`;
+    return `${label} · ${key.publicKeyFingerprint} · ${sshText("created", locale, { date: key.createdAt })} · ${sshText("bytes", locale, { count: Buffer.byteLength(key.privateKey, "utf8") })}`;
   }
 
   private filteredHosts(): SshHost[] {
@@ -258,14 +378,15 @@ export class SshHostPickerOverlay implements Component, Focusable {
     const safeWidth = Math.max(1, Math.min(width, 120));
     const hosts = this.filteredHosts();
     this.selected = clampIndex(this.selected, hosts.length);
-    if (safeWidth < 20) return [fit(`SSH targets · ${this.selectedHostIds.length} attached · Esc`, safeWidth)];
+    const locale = getTuiLocale();
+    if (safeWidth < 20) return [fit(sshText("pickerCompact", locale, { count: this.selectedHostIds.length }), safeWidth)];
     const inner = safeWidth - 2;
     const rows = [
-      headerLine(this.params.theme, "Attach SSH servers", [`${this.selectedHostIds.length} attached`, `${hosts.length}/${this.params.hosts.length}`], inner),
+      headerLine(this.params.theme, sshText("pickerTitle", locale), [sshText("pickerCount", locale, { count: this.selectedHostIds.length }), `${hosts.length}/${this.params.hosts.length}`], inner),
       rule(inner),
     ];
     if (hosts.length === 0) {
-      rows.push(fit(this.params.theme.fg("warning", this.params.hosts.length === 0 ? "○ no SSH servers configured" : "○ no SSH servers match the current filter"), inner));
+      rows.push(fit(this.params.theme.fg("warning", sshText(this.params.hosts.length === 0 ? "noHosts" : "pickerEmpty", locale)), inner));
     } else {
       const start = visibleStart(this.selected, hosts.length, MAX_VISIBLE_ROWS);
       for (let offset = 0; offset < Math.min(MAX_VISIBLE_ROWS, hosts.length); offset += 1) {
@@ -278,9 +399,9 @@ export class SshHostPickerOverlay implements Component, Focusable {
       }
     }
     rows.push(helpLine(this.params.theme, this.filtering
-      ? `Filtering: ${this.query || "type label, endpoint, user, or tag"} · Esc clear`
-      : `↑↓ select · Space toggle · Enter apply · / filter`, inner));
-    rows.push(rule(inner), fit("Esc cancel · selection remains local to this Pi session", inner));
+      ? sshText("filtering", locale, { query: this.query || sshText("filterHint", locale) })
+      : sshText("pickerHelp", locale), inner));
+    rows.push(rule(inner), fit(sshText("pickerFooter", locale), inner));
     return frame(rows, safeWidth, this.params.theme);
   }
 
@@ -330,11 +451,11 @@ export class SshHostPickerOverlay implements Component, Focusable {
   }
 }
 
-function authKindLabel(host: SshHost, keys: readonly SshKey[] = []): string {
-  if (host.auth.kind === "identity") return "identity";
-  if (host.auth.kind === "password") return "password";
-  if (host.auth.kind === "key") { const keyId = host.auth.keyId; return `key ${keys.find((key) => key.id === keyId)?.label ?? "missing"}`; }
-  return "agent";
+function authKindLabel(host: SshHost, keys: readonly SshKey[] | undefined, locale: SshTuiLocale): string {
+  if (host.auth.kind === "identity") return sshText("identity", locale);
+  if (host.auth.kind === "password") return sshText("password", locale);
+  if (host.auth.kind === "key") { const keyId = host.auth.keyId; return sshText("key", locale, { label: keys?.find((key) => key.id === keyId)?.label ?? sshText("missingKey", locale) }); }
+  return sshText("agent", locale);
 }
 function fingerprintAlgorithm(fingerprint: string): string { return fingerprint.startsWith("SHA256:") ? "SHA256 public key" : "public key"; }
 function formatAddress(host: string, port: number): string { return `${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`; }

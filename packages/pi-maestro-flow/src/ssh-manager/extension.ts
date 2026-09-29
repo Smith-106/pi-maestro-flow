@@ -83,8 +83,14 @@ import {
   type SshManagerTheme,
   type SshManagerView,
 } from "./tui.ts";
+import { getTuiLocale } from "../tui/locale.ts";
+import { editSshHostForm, editSshKeyForm } from "./host-form.ts";
 
 const SSH_STATUS_KEY = "maestro-ssh";
+
+function sshUi(english: string, chinese: string): string {
+  return getTuiLocale() === "zh-CN" ? chinese : english;
+}
 
 interface SshToolTargetDetails {
   label: string;
@@ -927,22 +933,22 @@ async function runManager(
       try {
         await bindings.invalidateAll();
       } finally {
-        ctx.ui.notify("SSH manager locked and the in-memory key was cleared.", "info");
+        ctx.ui.notify(sshUi("SSH manager locked and the in-memory key was cleared.", "SSH 管理器已锁定，内存中的密钥已清除。"), "info");
       }
       return;
     }
     try {
       if (action.kind === "add-key") {
         const key = await importManagedKeyWizard(ctx);
-        if (key) { await store.addKey(key); monitor.reconcile(); notice = `Imported key ${key.label}`; }
+        if (key) { await store.addKey(key); monitor.reconcile(); notice = sshUi(`Imported key ${key.label}`, `已导入密钥 ${key.label}`); }
         continue;
       }
       if (action.kind === "edit-key" || action.kind === "replace-key" || action.kind === "delete-key") {
         const key = store.getKeys().find((candidate) => candidate.id === action.keyId);
-        if (!key) { notice = "Selected SSH key is no longer available"; continue; }
+        if (!key) { notice = sshUi("Selected SSH key is no longer available", "选中的 SSH 密钥已不可用"); continue; }
         const affected = dependencyClosureForKey(store.getHosts(), key.id);
         if (action.kind === "edit-key") {
-          const label = await ctx.ui.input("Managed key label", key.label);
+          const label = await ctx.ui.input(sshUi("Managed key label", "托管密钥名称"), key.label);
           if (label !== undefined) await store.updateKey(key.id, { ...key, label: label.trim() });
           else continue;
         } else if (action.kind === "replace-key") {
@@ -950,10 +956,10 @@ async function runManager(
           if (!replacement) continue;
           await store.updateKey(key.id, replacement);
         } else {
-          if (!await ctx.ui.confirm(`Delete ${key.label}?`, "Referenced keys cannot be deleted.")) continue;
+          if (!await ctx.ui.confirm(sshUi(`Delete ${key.label}?`, `删除 ${key.label}？`), sshUi("Referenced keys cannot be deleted.", "被服务器引用的密钥不能删除。"))) continue;
           await store.deleteKey(key.id);
         }
-        await invalidateHostIds(affected, bindings); monitor.reconcile(); notice = `${action.kind === "delete-key" ? "Deleted" : "Updated"} key ${key.label}`;
+        await invalidateHostIds(affected, bindings); monitor.reconcile(); notice = action.kind === "delete-key" ? sshUi(`Deleted key ${key.label}`, `已删除密钥 ${key.label}`) : sshUi(`Updated key ${key.label}`, `已更新密钥 ${key.label}`);
         continue;
       }
       if (action.kind === "import") {
@@ -963,17 +969,17 @@ async function runManager(
       }
       if (action.kind === "add") {
         const host = await editHostWizard(ctx, store.getHosts(), store.getKeys());
-        if (host) { await store.addHost(host); monitor.reconcile(); notice = `Added ${host.label}`; }
+        if (host) { await store.addHost(host); monitor.reconcile(); notice = sshUi(`Added ${host.label}`, `已添加 ${host.label}`); }
         continue;
       }
       const host = store.getHosts().find((candidate) => candidate.id === action.hostId);
-      if (!host) { notice = "Selected SSH server is no longer available"; continue; }
+      if (!host) { notice = sshUi("Selected SSH server is no longer available", "选中的 SSH 服务器已不可用"); continue; }
       if (action.kind === "toggle-select") {
         bindings.toggle(host);
-        notice = `${bindings.selectedIds().includes(host.id) ? "Attached" : "Detached"} ${host.label}`;
+        notice = bindings.selectedIds().includes(host.id) ? sshUi(`Attached ${host.label}`, `已附加 ${host.label}`) : sshUi(`Detached ${host.label}`, `已取消附加 ${host.label}`);
         continue;
       }
-      if (action.kind === "select") { bindings.replace(host); ctx.ui.notify(`SSH server selected exclusively: ${host.label}.`, "info"); return; }
+      if (action.kind === "select") { bindings.replace(host); ctx.ui.notify(sshUi(`SSH server selected exclusively: ${host.label}.`, `已单独选中 SSH 服务器：${host.label}。`), "info"); return; }
       if (action.kind === "edit") {
         const before = store.getReverseDependencyClosure(host.id);
         const replacement = await editHostWizard(ctx, store.getHosts(), store.getKeys(), host);
@@ -982,34 +988,32 @@ async function runManager(
         await invalidateHostIds(affected, bindings);
         await unpairGatewayHostIds(affected, store, executor);
         await store.updateHost(host.id, replacement);
-        monitor.reconcile(); notice = `Updated ${replacement.label}; affected selections and sessions were cleared`;
+        monitor.reconcile(); notice = sshUi(`Updated ${replacement.label}; affected selections and sessions were cleared`, `已更新 ${replacement.label}；受影响的选择和会话已清除`);
         continue;
       }
       if (action.kind === "delete") {
-        if (!await ctx.ui.confirm(`Delete ${host.label}?`, "Referenced jump hosts cannot be deleted.")) continue;
+        if (!await ctx.ui.confirm(sshUi(`Delete ${host.label}?`, `删除 ${host.label}？`), sshUi("Referenced jump hosts cannot be deleted.", "被引用的跳板主机不能删除。"))) continue;
         const affected = store.getReverseDependencyClosure(host.id);
         await invalidateHostIds(affected, bindings);
         await unpairGatewayHostIds(affected, store, executor);
         await store.deleteHost(host.id);
-        monitor.reconcile(); notice = `Deleted ${host.label}`;
+        monitor.reconcile(); notice = sshUi(`Deleted ${host.label}`, `已删除 ${host.label}`);
         continue;
       }
       if (action.kind === "reset") {
-        if (!await ctx.ui.confirm(`Reset trust for ${host.label}?`, "The saved host identity will be removed and monitoring disabled.")) continue;
-        if (!await ctx.ui.confirm("Confirm trust reset", "A future Test will establish trust again.")) continue;
+        if (!await ctx.ui.confirm(sshUi(`Reset trust for ${host.label}?`, `重置 ${host.label} 的信任？`), sshUi("The saved host identity will be removed and monitoring disabled.", "已保存的主机身份将被删除，同时关闭监控。"))) continue;
+        if (!await ctx.ui.confirm(sshUi("Confirm trust reset", "确认重置信任"), sshUi("A future Test will establish trust again.", "稍后可通过测试连接重新建立信任。"))) continue;
         const affected = store.getReverseDependencyClosure(host.id);
         await invalidateHostIds(affected, bindings);
         await unpairGatewayHostIds(affected, store, executor);
         await store.updateHost(host.id, { ...host, hostKey: null, monitorEnabled: false });
-        monitor.reconcile(); notice = `Trust reset for ${host.label}`;
+        monitor.reconcile(); notice = sshUi(`Trust reset for ${host.label}`, `已重置 ${host.label} 的信任`);
         continue;
       }
       if (action.kind === "test") {
         notice = await testAndTrustSshHost(ctx, store, executor, host);
-        if (notice.startsWith("Connection succeeded")) {
-          await invalidateHostIds(store.getReverseDependencyClosure(host.id), bindings);
-          monitor.reconcile();
-        }
+        await invalidateHostIds(store.getReverseDependencyClosure(host.id), bindings);
+        monitor.reconcile();
       }
     } catch (error) {
       notice = error instanceof Error ? error.message : String(error);
@@ -1023,7 +1027,7 @@ async function ensureUnlocked(ctx: ExtensionContext, store: EncryptedSshStore, p
   if (!exists) {
     if (passwordOverride !== undefined) {
       if (passwordOverride.length < 8) {
-        ctx.ui.notify("Master password must contain at least 8 characters.", "warning");
+        ctx.ui.notify(sshUi("Master password must contain at least 8 characters.", "主密码至少需要 8 个字符。"), "warning");
         return false;
       }
       try {
@@ -1035,16 +1039,16 @@ async function ensureUnlocked(ctx: ExtensionContext, store: EncryptedSshStore, p
       }
     }
     while (true) {
-      const password = await showSecretInput(ctx, "Create SSH manager", "New master password (minimum 8 characters)");
+      const password = await showSecretInput(ctx, sshUi("Create SSH manager", "创建 SSH 管理器"), sshUi("New master password (minimum 8 characters)", "新主密码（至少 8 个字符）"));
       if (password === undefined) return false;
       if (password.length < 8) {
-        ctx.ui.notify("Master password must contain at least 8 characters. Try again or press Esc to cancel.", "warning");
+        ctx.ui.notify(sshUi("Master password must contain at least 8 characters. Try again or press Esc to cancel.", "主密码至少需要 8 个字符。请重试或按 Esc 取消。"), "warning");
         continue;
       }
-      const confirmation = await showSecretInput(ctx, "Create SSH manager", "Confirm master password");
+      const confirmation = await showSecretInput(ctx, sshUi("Create SSH manager", "创建 SSH 管理器"), sshUi("Confirm master password", "确认主密码"));
       if (confirmation === undefined) return false;
       if (password !== confirmation) {
-        ctx.ui.notify("Master passwords do not match. Try again or press Esc to cancel.", "warning");
+        ctx.ui.notify(sshUi("Master passwords do not match. Try again or press Esc to cancel.", "两次主密码不一致。请重试或按 Esc 取消。"), "warning");
         continue;
       }
       try {
@@ -1056,13 +1060,13 @@ async function ensureUnlocked(ctx: ExtensionContext, store: EncryptedSshStore, p
       }
     }
   }
-  const password = passwordOverride ?? await showSecretInput(ctx, "Unlock SSH manager", "Master password");
+  const password = passwordOverride ?? await showSecretInput(ctx, sshUi("Unlock SSH manager", "解锁 SSH 管理器"), sshUi("Master password", "主密码"));
   if (password === undefined) return false;
   try {
     await store.unlock(password);
     return true;
   } catch {
-    ctx.ui.notify("Unable to unlock SSH manager. Check the master password and encrypted file.", "error");
+    ctx.ui.notify(sshUi("Unable to unlock SSH manager. Check the master password and encrypted file.", "无法解锁 SSH 管理器，请检查主密码和加密文件。"), "error");
     return false;
   }
 }
@@ -1121,6 +1125,49 @@ export async function findDefaultSshIdentityPath(homeDirectory = homedir()): Pro
   return undefined;
 }
 
+/** Discover private-key files by their header, without exposing key contents to the picker. */
+export async function listSshPrivateKeyPaths(homeDirectory = homedir()): Promise<string[]> {
+  const directory = join(homeDirectory, ".ssh");
+  try {
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) return [];
+  } catch { return []; }
+  let names: string[];
+  try { names = (await readdir(directory)).sort().slice(0, 256); } catch { return []; }
+  const paths: string[] = [];
+  for (const name of names) {
+    if (name.endsWith(".pub")) continue;
+    const path = join(directory, name);
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      const before = await lstat(path);
+      if (!before.isFile() || before.isSymbolicLink() || before.size <= 0 || before.size > SSH_MAX_PRIVATE_KEY_BYTES) continue;
+      handle = await open(path, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW));
+      const after = await handle.stat();
+      if (!after.isFile() || after.size !== before.size) continue;
+      const header = Buffer.alloc(64);
+      try {
+        const { bytesRead } = await handle.read(header, 0, header.length, 0);
+        if (/^-----BEGIN (?:(?:OPENSSH|RSA|EC|DSA|ENCRYPTED) )?PRIVATE KEY-----\r?\n/u.test(header.toString("ascii", 0, bytesRead))) paths.push(path);
+      } finally { header.fill(0); }
+    } catch { /* Ignore inaccessible candidates; manual paths remain available. */ }
+    finally { await handle?.close(); }
+    if (paths.length >= 64) break;
+  }
+  return paths;
+}
+
+export async function chooseSshPrivateKeyPath(ctx: ExtensionContext, prompt: string, suggestedPath?: string, homeDirectory = homedir()): Promise<string | undefined> {
+  const candidates = await listSshPrivateKeyPaths(homeDirectory);
+  if (candidates.length > 0) {
+    const manual = sshUi("Enter private key path manually…", "手动输入私钥路径…");
+    const options = [...new Set([...(suggestedPath ? [suggestedPath] : []), ...candidates]), manual];
+    const selected = await ctx.ui.select(sshUi("Select local private key file", "选择本地私钥文件"), options);
+    if (selected === undefined || selected !== manual) return selected;
+  }
+  return ctx.ui.input(prompt, suggestedPath ?? "");
+}
+
 /** Apply the explicit identity-passphrase edit selected by the operator. */
 export function identityPassphraseAfterEdit(
   current: string | undefined,
@@ -1141,161 +1188,19 @@ export function normalizeSshHostKeyFingerprint(value: string): string {
   return candidates.length === 1 ? candidates[0]! : trimmed;
 }
 
-interface SshHostDraft {
-  id: string;
-  label: string;
-  host: string;
-  user: string;
-  portText: string;
-  shell: SshShell;
-  hostKey: string | null;
-  auth?: SshAuth;
-  tags: string[];
-  jumpHostId: string | null;
-  monitorEnabled: boolean;
-}
-
 async function editHostWizard(
   ctx: ExtensionContext,
   hosts: readonly SshHost[],
   keys: readonly SshKey[],
   current?: SshHost,
 ): Promise<SshHost | undefined> {
-  let draft: SshHostDraft = {
-    id: current?.id ?? createSshHostId(), label: current?.label ?? "", host: current?.host ?? "", user: current?.user ?? "",
-    portText: String(current?.port ?? 22), shell: current?.shell ?? "bash", hostKey: current?.hostKey ?? null, auth: current?.auth,
-    tags: current?.tags ?? [], jumpHostId: current?.jumpHostId ?? null, monitorEnabled: current?.monitorEnabled ?? false,
-  };
-
-  while (true) {
-    const collected = await collectSshHostDraft(ctx, draft, hosts, keys);
-    if (!collected) return undefined;
-    draft = collected;
-    try {
-      return validateSshHost({
-        id: draft.id,
-        label: draft.label.trim(),
-        host: draft.host.trim(),
-        user: draft.user.trim(),
-        port: Number(draft.portText),
-        shell: draft.shell, hostKey: draft.hostKey, auth: draft.auth,
-        tags: draft.tags, jumpHostId: draft.jumpHostId, monitorEnabled: draft.monitorEnabled,
-      });
-    } catch (error) {
-      ctx.ui.notify(`${error instanceof Error ? error.message : String(error)} Previous values were kept; correct them or press Esc to cancel.`, "warning");
-    }
-  }
-}
-
-async function collectSshHostDraft(ctx: ExtensionContext, draft: SshHostDraft, hosts: readonly SshHost[], keys: readonly SshKey[]): Promise<SshHostDraft | undefined> {
-  const label = await ctx.ui.input("SSH server label", draft.label);
-  if (label === undefined) return undefined;
-  const host = await ctx.ui.input("SSH hostname or IP", draft.host);
-  if (host === undefined) return undefined;
-  const user = await ctx.ui.input("SSH username", draft.user);
-  if (user === undefined) return undefined;
-  const portText = await ctx.ui.input("SSH port", draft.portText);
-  if (portText === undefined) return undefined;
-  const shellChoices: SshShell[] = draft.shell === "powershell" ? ["powershell", "bash"] : ["bash", "powershell"];
-  const shell = await ctx.ui.select("Remote shell", shellChoices);
-  if (shell !== "bash" && shell !== "powershell") return undefined;
-  const hostKeyInput = await showSecretInput(ctx, "Optional pinned host identity", draft.hostKey
-    ? "Leave empty to keep the existing pin; Test is the normal trust entry point"
-    : "Optional SHA256 pin; leave empty and use Test for TOFU");
-  if (hostKeyInput === undefined) return undefined;
-  const normalizedHostKey = hostKeyInput === "" && draft.hostKey ? draft.hostKey : normalizeSshHostKeyFingerprint(hostKeyInput);
-  const hostKey = normalizedHostKey === "" ? null : normalizedHostKey;
-  let authChoice: SshAuthenticationChoice;
-  while (true) {
-    const choices = sshAuthenticationChoices(draft.auth?.kind, process.env.SSH_AUTH_SOCK, keys);
-    const selected = await ctx.ui.select(
-      "Authentication method",
-      choices.map((choice) => choice.label),
-    );
-    if (selected === undefined) return undefined;
-    const choice = choices.find((candidate) => candidate.label === selected);
-    if (!choice) return undefined;
-    if (choice.available) {
-      authChoice = choice;
-      break;
-    }
-    ctx.ui.notify(
-      "This host uses a key loaded through SSH_AUTH_SOCK, but that key service is not available in this Pi process. Choose a local private key file or restart Pi from an environment with SSH_AUTH_SOCK.",
-      "warning",
-    );
-  }
-
-  let auth: SshAuth;
-  if (authChoice.kind === "agent") {
-    auth = { kind: "agent" };
-  } else if (authChoice.kind === "key") {
-    const labels = keys.map((key) => key.label);
-    const selected = await ctx.ui.select("Managed key", labels);
-    const key = keys.find((candidate) => candidate.label === selected);
-    if (!key) return undefined;
-    auth = { kind: "key", keyId: key.id };
-  } else if (authChoice.kind === "identity") {
-    const currentIdentity = draft.auth?.kind === "identity" ? draft.auth : undefined;
-    const suggestedPath = currentIdentity?.path ?? await findDefaultSshIdentityPath();
-    const path = await ctx.ui.input("Local private key file", suggestedPath ?? "");
-    if (path === undefined) return undefined;
-    const existingPassphrase = currentIdentity?.passphrase;
-    let passphrase: string | undefined;
-    if (existingPassphrase) {
-      const keep = "Keep existing passphrase";
-      const replace = "Replace passphrase";
-      const remove = "Remove passphrase";
-      const selected = await ctx.ui.select("Identity passphrase", [keep, replace, remove]);
-      if (selected === undefined) return undefined;
-      const action: IdentityPassphraseEditAction = selected === keep
-        ? "keep"
-        : selected === replace
-          ? "replace"
-          : "remove";
-      let replacement: string | undefined;
-      if (action === "replace") {
-        replacement = await showSecretInput(ctx, "Identity passphrase", "Replacement passphrase");
-        if (replacement === undefined) return undefined;
-      }
-      try {
-        passphrase = identityPassphraseAfterEdit(existingPassphrase, action, replacement);
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
-        return collectSshHostDraft(ctx, draft, hosts, keys);
-      }
-    } else {
-      passphrase = await showSecretInput(ctx, "Identity passphrase", "Optional; leave empty for none");
-      if (passphrase === undefined) return undefined;
-    }
-    auth = { kind: "identity", path, ...(passphrase ? { passphrase } : {}) };
-  } else {
-    const currentPassword = draft.auth?.kind === "password" ? draft.auth.password : undefined;
-    while (true) {
-      const password = await showSecretInput(ctx, "SSH password", currentPassword
-        ? "Leave empty to keep the existing password, or enter a replacement"
-        : "Password");
-      if (password === undefined) return undefined;
-      const preserved = password || currentPassword;
-      if (preserved) {
-        auth = { kind: "password", password: preserved };
-        break;
-      }
-      ctx.ui.notify("SSH password cannot be empty. Try again or press Esc to cancel.", "warning");
-    }
-  }
-
-  const tagsInput = await ctx.ui.input("Tags (comma separated)", draft.tags.join(", "));
-  if (tagsInput === undefined) return undefined;
-  const tags = tagsInput.split(",").map((tag) => tag.trim()).filter(Boolean);
-  const jumpCandidates = hosts.filter((candidate) => candidate.id !== draft.id);
-  const jumpLabels = ["Direct connection", ...jumpCandidates.map((candidate) => candidate.label)];
-  const jumpChoice = await ctx.ui.select("Jump host", jumpLabels);
-  if (jumpChoice === undefined) return undefined;
-  const jumpHostId = jumpChoice === jumpLabels[0] ? null : jumpCandidates.find((candidate) => candidate.label === jumpChoice)?.id ?? null;
-  const monitorChoice = await ctx.ui.select("Monitoring", ["Off", "On"]);
-  if (monitorChoice === undefined) return undefined;
-  const monitorEnabled = monitorChoice === "On";
-  return { id: draft.id, label, host, user, portText, shell, hostKey, auth, tags, jumpHostId, monitorEnabled };
+  return editSshHostForm(ctx, {
+    current, hosts, keys, identityPaths: await listSshPrivateKeyPaths(),
+    suggestedPath: current?.auth.kind === "identity" ? current.auth.path : await findDefaultSshIdentityPath(),
+    agentAvailable: Boolean(process.env.SSH_AUTH_SOCK),
+    normalizePin: normalizeSshHostKeyFingerprint,
+    locale: getTuiLocale(),
+  });
 }
 
 async function unpairGatewayHostIds(ids: Iterable<string>, store: EncryptedSshStore, executor: SshExecutor): Promise<void> {
@@ -1326,16 +1231,16 @@ export async function testAndTrustSshHost(ctx: ExtensionContext, store: Encrypte
   await store.reload();
   let current = store.getHosts().find((host) => host.id === snapshot.id);
   if (!current || !sameHostExceptPin(current, snapshot)) throw new Error("SSH host changed during connection test; trust was not saved");
-  if (current.hostKey === result.fingerprint && snapshot.hostKey === null) return `Connection succeeded: ${current.label} (trust was saved concurrently)`;
+  if (current.hostKey === result.fingerprint && snapshot.hostKey === null) return sshUi(`Connection succeeded: ${current.label} (trust was saved concurrently)`, `连接成功：${current.label}（信任已同时保存）`);
   if (store.revision !== revision) throw new Error("SSH manager changed during connection test; trust was not saved");
   if (store.getEffectiveHostDigest(snapshot.id) !== digest) throw new Error("SSH configuration changed during connection test");
-  if (snapshot.hostKey !== null) return `Connection succeeded: ${snapshot.label}`;
-  if (!await ctx.ui.confirm(`Trust ${snapshot.label}?`, "Save the identity observed by this Test?")) return `Connection succeeded without saving trust: ${snapshot.label}`;
+  if (snapshot.hostKey !== null) return sshUi(`Connection succeeded: ${snapshot.label}`, `连接成功：${snapshot.label}`);
+  if (!await ctx.ui.confirm(sshUi(`Trust ${snapshot.label}?`, `信任 ${snapshot.label}？`), sshUi("Save the identity observed by this Test?", "保存本次测试识别到的主机身份？"))) return sshUi(`Connection succeeded without saving trust: ${snapshot.label}`, `连接成功，但未保存信任：${snapshot.label}`);
 
   await store.reload();
   current = store.getHosts().find((host) => host.id === snapshot.id);
   if (!current || !sameHostExceptPin(current, snapshot)) throw new Error("SSH host changed while trust confirmation was open; trust was not saved");
-  if (current.hostKey === result.fingerprint) return `Connection succeeded: ${current.label} (trust was saved concurrently)`;
+  if (current.hostKey === result.fingerprint) return sshUi(`Connection succeeded: ${current.label} (trust was saved concurrently)`, `连接成功：${current.label}（信任已同时保存）`);
   if (current.hostKey !== null) throw new Error("SSH host trust changed while confirmation was open; trust was not saved");
   if (store.revision !== revision) throw new Error("SSH manager changed while trust confirmation was open; trust was not saved");
   if (store.getEffectiveHostDigest(snapshot.id) !== digest) throw new Error("SSH configuration changed while trust confirmation was open; trust was not saved");
@@ -1344,10 +1249,10 @@ export async function testAndTrustSshHost(ctx: ExtensionContext, store: Encrypte
   } catch (error) {
     await store.reload().catch(() => undefined);
     const raced = store.locked ? undefined : store.getHosts().find((host) => host.id === snapshot.id);
-    if (raced && raced.hostKey === result.fingerprint && sameHostExceptPin(raced, snapshot)) return `Connection succeeded: ${snapshot.label} (trust was saved concurrently)`;
+    if (raced && raced.hostKey === result.fingerprint && sameHostExceptPin(raced, snapshot)) return sshUi(`Connection succeeded: ${snapshot.label} (trust was saved concurrently)`, `连接成功：${snapshot.label}（信任已同时保存）`);
     throw error;
   }
-  return `Connection succeeded and trust saved: ${snapshot.label}`;
+  return sshUi(`Connection succeeded and trust saved: ${snapshot.label}`, `连接成功且已保存信任：${snapshot.label}`);
 }
 
 function sameHostExceptPin(left: SshHost, right: SshHost): boolean {
@@ -1355,13 +1260,9 @@ function sameHostExceptPin(left: SshHost, right: SshHost): boolean {
 }
 
 async function importManagedKeyWizard(ctx: ExtensionContext, current?: SshKey): Promise<SshKey | undefined> {
-  const label = await ctx.ui.input("Managed key label", current?.label ?? "");
-  if (label === undefined) return undefined;
-  const path = await ctx.ui.input("Private key path (explicit import)", "");
-  if (path === undefined) return undefined;
-  const passphrase = await showSecretInput(ctx, "Private key passphrase", current?.passphrase ? "Leave empty to keep the existing passphrase" : "Optional; leave empty for none");
-  if (passphrase === undefined) return undefined;
-  return importManagedSshKey(path, label.trim(), passphrase || current?.passphrase, current);
+  const choice = await editSshKeyForm(ctx, await listSshPrivateKeyPaths(), current);
+  if (!choice) return undefined;
+  return importManagedSshKey(choice.path, choice.label, choice.passphrase, current);
 }
 
 /** Read one explicitly named regular key file, derive only its public fingerprint, and scrub the read buffer. */
@@ -1403,17 +1304,17 @@ async function fingerprintPrivateKey(path: string): Promise<string> {
 async function importOpenSshWizard(ctx: ExtensionContext, store: EncryptedSshStore, discover: (options?: DiscoverOpenSshOptions) => Promise<OpenSshDiscoveryResult>): Promise<string> {
   const preview = await discover();
   if (!preview.configFound) {
-    const keyNotice = await hasPrivateKeyFiles(dirname(preview.configPath)) ? "; private-key files exist, but no hosts were guessed from their names" : "";
-    return `No OpenSSH host config was found${keyNotice}`;
+    const keyNotice = await hasPrivateKeyFiles(dirname(preview.configPath)) ? sshUi("; private-key files exist, but no hosts were guessed from their names", "；发现私钥文件，但不会根据文件名猜测服务器") : "";
+    return `${sshUi("No OpenSSH host config was found", "未找到 OpenSSH 主机配置")}${keyNotice}`;
   }
-  if (preview.candidates.length === 0) return `OpenSSH config contains no explicit importable Host aliases${preview.warnings.length ? ` (${preview.warnings.length} warnings)` : ""}`;
+  if (preview.candidates.length === 0) return `${sshUi("OpenSSH config contains no explicit importable Host aliases", "OpenSSH 配置中没有可导入的明确 Host 别名")}${preview.warnings.length ? sshUi(` (${preview.warnings.length} warnings)`, `（${preview.warnings.length} 条警告）`) : ""}`;
   const accepted: OpenSshImportCandidate[] = [];
   for (const candidate of preview.candidates) {
-    const summary = `${candidate.user ?? "user required"}@${formatSshAddress(candidate.hostName, candidate.port)} · ${candidate.identities.length} identity reference(s) · ${candidate.warnings.length} warning(s)`;
-    if (await ctx.ui.confirm(`Import OpenSSH host ${candidate.alias}?`, summary)) accepted.push(candidate);
+    const summary = `${candidate.user ?? sshUi("user required", "需填写用户名")}@${formatSshAddress(candidate.hostName, candidate.port)} · ${sshUi(`${candidate.identities.length} identity reference(s)`, `${candidate.identities.length} 个私钥引用`)} · ${sshUi(`${candidate.warnings.length} warning(s)`, `${candidate.warnings.length} 条警告`)}`;
+    if (await ctx.ui.confirm(sshUi(`Import OpenSSH host ${candidate.alias}?`, `导入 OpenSSH 主机 ${candidate.alias}？`), summary)) accepted.push(candidate);
   }
-  if (accepted.length === 0) return "OpenSSH import cancelled";
-  if (!await ctx.ui.confirm(`Import ${accepted.length} OpenSSH host(s)?`, "Unique known_hosts identities are pinned automatically; remaining hosts stay untrusted with monitoring off.")) return "OpenSSH import cancelled";
+  if (accepted.length === 0) return sshUi("OpenSSH import cancelled", "已取消 OpenSSH 导入");
+  if (!await ctx.ui.confirm(sshUi(`Import ${accepted.length} OpenSSH host(s)?`, `导入 ${accepted.length} 个 OpenSSH 主机？`), sshUi("Unique known_hosts identities are pinned automatically; remaining hosts stay untrusted with monitoring off.", "可唯一匹配 known_hosts 的主机身份会自动固定；其他主机保持未信任且关闭监控。"))) return sshUi("OpenSSH import cancelled", "已取消 OpenSSH 导入");
   const existing = store.getHosts();
   const existingKeys = store.getKeys();
   const importedKeys: SshKey[] = [];
@@ -1421,22 +1322,22 @@ async function importOpenSshWizard(ctx: ExtensionContext, store: EncryptedSshSto
   const existingAliases = new Map(existing.map((host) => [host.label, host.id]));
   const additions: SshHost[] = [];
   for (const candidate of accepted) {
-    const user = candidate.user ?? await ctx.ui.input(`SSH username for ${candidate.alias}`, "");
-    if (!user) throw new Error(`OpenSSH host ${candidate.alias} requires an explicit username`);
+    const user = candidate.user ?? await ctx.ui.input(sshUi(`SSH username for ${candidate.alias}`, `${candidate.alias} 的 SSH 用户名`), "");
+    if (!user) throw new Error(sshUi(`OpenSSH host ${candidate.alias} requires an explicit username`, `OpenSSH 主机 ${candidate.alias} 需要填写用户名`));
     let jumpHostId: string | null = null;
     if (candidate.proxyJumpAliases.length > 0) {
-      if (candidate.proxyJumpAliases.length !== 1) throw new Error(`OpenSSH host ${candidate.alias} has a ProxyJump chain that must be imported as explicit hosts`);
+      if (candidate.proxyJumpAliases.length !== 1) throw new Error(sshUi(`OpenSSH host ${candidate.alias} has a ProxyJump chain that must be imported as explicit hosts`, `OpenSSH 主机 ${candidate.alias} 的 ProxyJump 链需要逐个导入为明确的主机`));
       const alias = candidate.proxyJumpAliases[0]!;
       jumpHostId = ids.get(alias) ?? existingAliases.get(alias) ?? null;
-      if (!jumpHostId) throw new Error(`ProxyJump alias ${alias} is not an accepted or existing host`);
+      if (!jumpHostId) throw new Error(sshUi(`ProxyJump alias ${alias} is not an accepted or existing host`, `ProxyJump 别名 ${alias} 不是已接受或已存在的主机`));
     }
     let auth: SshAuth = { kind: "agent" };
     if (candidate.identities.length > 0) {
-      if (candidate.identities.length > 1) throw new Error(`OpenSSH host ${candidate.alias} requires an explicit identity choice`);
+      if (candidate.identities.length > 1) throw new Error(sshUi(`OpenSSH host ${candidate.alias} requires an explicit identity choice`, `OpenSSH 主机 ${candidate.alias} 需要明确选择一个私钥`));
       const identityPath = candidate.identities[0]!.path;
-      if (await ctx.ui.confirm(`Encrypt identity for ${candidate.alias}?`, "No keeps an explicit path reference; Yes imports the key into this manager.")) {
-        const passphrase = await showSecretInput(ctx, "Private key passphrase", "Optional; leave empty for none");
-        if (passphrase === undefined) throw new Error("OpenSSH key import cancelled");
+      if (await ctx.ui.confirm(sshUi(`Encrypt identity for ${candidate.alias}?`, `加密保存 ${candidate.alias} 的私钥？`), sshUi("No keeps an explicit path reference; Yes imports the key into this manager.", "选择否则保留私钥文件路径引用；选择是则导入并加密保存私钥。"))) {
+        const passphrase = await showSecretInput(ctx, sshUi("Private key passphrase", "私钥口令"), sshUi("Optional; leave empty for none", "可选；留空表示无口令"));
+        if (passphrase === undefined) throw new Error(sshUi("OpenSSH key import cancelled", "已取消 OpenSSH 密钥导入"));
         const key = await importManagedSshKey(identityPath, `${candidate.alias} key`, passphrase || undefined);
         importedKeys.push(key);
         auth = { kind: "key", keyId: key.id };
@@ -1452,7 +1353,7 @@ async function importOpenSshWizard(ctx: ExtensionContext, store: EncryptedSshSto
   });
   await store.saveConfiguration([...existing, ...additions], [...existingKeys, ...importedKeys]);
   const pinned = additions.filter((host) => host.hostKey !== null).length;
-  return `Imported ${additions.length} OpenSSH host(s)${pinned ? ` (${pinned} pinned from known_hosts)` : ""}${importedKeys.length ? ` and ${importedKeys.length} encrypted key(s)` : "; identities remain explicit path references"}`;
+  return sshUi(`Imported ${additions.length} OpenSSH host(s)${pinned ? ` (${pinned} pinned from known_hosts)` : ""}${importedKeys.length ? ` and ${importedKeys.length} encrypted key(s)` : "; identities remain explicit path references"}`, `已导入 ${additions.length} 个 OpenSSH 主机${pinned ? `（${pinned} 个从 known_hosts 固定身份）` : ""}${importedKeys.length ? `和 ${importedKeys.length} 个加密密钥` : "；私钥仍以明确文件路径引用"}`);
 }
 
 async function hasPrivateKeyFiles(directory = join(homedir(), ".ssh")): Promise<boolean> {

@@ -15,8 +15,10 @@ import {
   SshHostProviderError,
 } from "pi-maestro-teammate/v1/ssh-hosts";
 import {
+  chooseSshPrivateKeyPath,
   findDefaultSshIdentityPath,
   identityPassphraseAfterEdit,
+  listSshPrivateKeyPaths,
   normalizeSshHostKeyFingerprint,
   registerSshManager,
   sshAuthenticationChoices,
@@ -27,6 +29,7 @@ import type { SshGatewayBootstrapManager } from "../src/ssh-manager/gateway-boot
 import type { SshGatewayClientPool, SshGatewayInput } from "../src/ssh-manager/gateway-client.ts";
 import type { SshStatusMonitor } from "../src/ssh-manager/status-monitor.ts";
 import type { SshHost } from "../src/ssh-manager/model.ts";
+import { createSshHostForm, createSshKeyForm } from "../src/ssh-manager/host-form.ts";
 
 const PIN = `SHA256:${"A".repeat(43)}`;
 const host: SshHost = {
@@ -92,38 +95,150 @@ test("SSH identity suggestion prefers modern conventional regular key files", as
   }
 });
 
-test("SSH manager retries recoverable setup and host errors while preserving the draft", async () => {
-  const root = await mkdtemp(join(tmpdir(), "ssh-manager-wizard-"));
+test("SSH private key picker recognizes key headers without listing public keys or other files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-key-picker-"));
+  const sshDirectory = join(root, ".ssh");
+  await mkdir(sshDirectory);
+  try {
+    const rsa = join(sshDirectory, "id_rsa");
+    const custom = join(sshDirectory, "custom-server-key");
+    await writeFile(rsa, "-----BEGIN RSA PRIVATE KEY-----\nprivate fixture\n");
+    await writeFile(custom, "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate fixture\n");
+    await writeFile(join(sshDirectory, "id_rsa.pub"), "ssh-rsa public fixture");
+    await writeFile(join(sshDirectory, "known_hosts"), "not a key");
+    await mkdir(join(sshDirectory, "folder"));
+    assert.deepEqual(await listSshPrivateKeyPaths(root), [custom, rsa]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SSH private key picker supports selection, manual paths, cancellation, and empty discovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-key-choice-"));
+  const sshDirectory = join(root, ".ssh");
+  await mkdir(sshDirectory);
+  const key = join(sshDirectory, "server.key");
+  const manual = join(root, "elsewhere.key");
+  const selections = ["key", "manual", undefined];
+  const prompts: string[] = [];
+  const ctx = {
+    ui: {
+      async select(title: string, choices: string[]) {
+        assert.match(title, /Select local private key file|选择本地私钥文件/);
+        assert.equal(choices[0], key);
+        assert.match(choices[1]!, /Enter private key path manually|手动输入私钥路径/);
+        const selected = selections.shift();
+        return selected === "key" ? key : selected === "manual" ? choices[1] : undefined;
+      },
+      async input(title: string, current: string) {
+        prompts.push(`${title}:${current}`);
+        return manual;
+      },
+    },
+  } as unknown as ExtensionContext;
+  try {
+    await writeFile(key, "-----BEGIN PRIVATE KEY-----\nprivate fixture\n");
+    assert.equal(await chooseSshPrivateKeyPath(ctx, "Local private key file", undefined, root), key);
+    assert.equal(await chooseSshPrivateKeyPath(ctx, "Local private key file", undefined, root), manual);
+    assert.equal(await chooseSshPrivateKeyPath(ctx, "Local private key file", undefined, root), undefined);
+    await rm(key);
+    assert.equal(await chooseSshPrivateKeyPath(ctx, "Private key path (explicit import)", undefined, root), manual);
+    assert.deepEqual(prompts, ["Local private key file:", "Private key path (explicit import):"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SSH host form marks required fields in both languages and validates conditional authentication", () => {
+  const options = { hosts: [] as SshHost[], keys: [], identityPaths: ["/home/me/.ssh/custom"], agentAvailable: false, normalizePin: normalizeSshHostKeyFingerprint };
+  for (const locale of ["en", "zh-CN"] as const) {
+    const form = createSshHostForm({ ...options, locale });
+    assert.match(form.title, locale === "en" ? /Add SSH/ : /添加 SSH/);
+    for (const id of ["label", "hostname", "username", "port", "auth", "identityFile", "managedKey", "password"]) {
+      assert.match(form.fields.find((field) => field.id === id)!.label, /\*/);
+    }
+    const values = Object.fromEntries(form.fields.filter((field) => field.kind !== "section").map((field) => [field.id, field.value]));
+    assert.match(form.validate(values)[0]!, locale === "en" ? /required/ : /必填/);
+    Object.assign(values, { label: "Remote", hostname: "192.0.2.5", username: "deploy", auth: "identity" });
+    assert.deepEqual(form.validate(values), []);
+    assert.deepEqual(form.host(values).auth, { kind: "identity", path: "/home/me/.ssh/custom" });
+    values.identityFile = "manual";
+    values.identityPath = "";
+    assert.match(form.validate(values)[0]!, locale === "en" ? /private key/ : /私钥/);
+    values.identityPath = "/another/location.key";
+    assert.deepEqual(form.host(values).auth, { kind: "identity", path: "/another/location.key" });
+    values.auth = "password";
+    values.password = "";
+    assert.match(form.validate(values)[0]!, locale === "en" ? /password/ : /密码/);
+    values.password = "  leading-and-trailing  ";
+    assert.deepEqual(form.validate(values), []);
+    assert.deepEqual(form.host(values).auth, { kind: "password", password: "  leading-and-trailing  " });
+    values.auth = "agent";
+    assert.match(form.validate(values)[0]!, locale === "en" ? /unavailable/ : /无法使用/);
+  }
+});
+
+test("SSH host form selects the preferred identity instead of the first sorted candidate", () => {
+  const paths = ["/home/me/.ssh/id_ecdsa", "/home/me/.ssh/id_ed25519"];
+  const form = createSshHostForm({ hosts: [], keys: [], identityPaths: paths, suggestedPath: paths[1], agentAvailable: false, normalizePin: normalizeSshHostKeyFingerprint, locale: "en" });
+  assert.equal(form.fields.find((field) => field.id === "identityFile")!.value, paths[1]);
+  const values = Object.fromEntries(form.fields.filter((field) => field.kind !== "section").map((field) => [field.id, field.value]));
+  Object.assign(values, { label: "Remote", hostname: "192.0.2.5", username: "deploy" });
+  assert.deepEqual(form.validate(values), []);
+  assert.deepEqual(form.host(values).auth, { kind: "identity", path: paths[1] });
+});
+
+test("SSH host form edit keeps existing auth, trust, tags, jump host and monitoring", () => {
+  const jump: SshHost = { ...host, id: "jump", label: "Jump", auth: { kind: "agent" } };
+  const current: SshHost = { ...host, id: "main", hostKey: PIN, auth: { kind: "identity", path: "/old/key", passphrase: " secret " }, tags: ["prod"], jumpHostId: jump.id, monitorEnabled: true };
+  const form = createSshHostForm({ current, hosts: [jump, current], keys: [], identityPaths: ["/new/key"], agentAvailable: true, normalizePin: normalizeSshHostKeyFingerprint, locale: "zh-CN" });
+  const values = Object.fromEntries(form.fields.filter((field) => field.kind !== "section").map((field) => [field.id, field.value]));
+  assert.deepEqual(form.validate(values), []);
+  assert.deepEqual(form.host(values), current);
+  assert.equal(form.fields.find((field) => field.id === "identityPassphrase")!.redact, true);
+  values.identityFile = "/new/key";
+  values.identityPassphrase = "";
+  assert.deepEqual(form.host(values).auth, { kind: "identity", path: "/new/key" });
+});
+
+test("SSH managed key import and replacement use bilingual forms with explicit file selection", () => {
+  for (const locale of ["en", "zh-CN"] as const) {
+    const form = createSshKeyForm(["/home/me/.ssh/id_rsa"], undefined, locale);
+    assert.match(form.title, locale === "en" ? /Import SSH/ : /导入 SSH/);
+    assert.match(form.fields.find((field) => field.id === "label")!.label, /\*/);
+    assert.match(form.fields.find((field) => field.id === "file")!.label, /\*/);
+    const values = Object.fromEntries(form.fields.map((field) => [field.id, field.value]));
+    assert.ok(form.validate(values).length > 0);
+    values.label = "Laptop key";
+    values.file = "/home/me/.ssh/id_rsa";
+    assert.deepEqual(form.validate(values), []);
+    assert.deepEqual(form.key(values), { label: "Laptop key", path: "/home/me/.ssh/id_rsa" });
+    values.file = "manual";
+    values.path = "";
+    assert.ok(form.validate(values).length > 0);
+    values.path = "/custom/key";
+    assert.deepEqual(form.key(values), { label: "Laptop key", path: "/custom/key" });
+    const current = { id: "key-1", label: "Laptop key", privateKey: "not displayed", passphrase: " pass ", publicKeyFingerprint: PIN, createdAt: new Date(0).toISOString() };
+    const replacement = createSshKeyForm([], current, locale);
+    assert.equal(replacement.fields.find((field) => field.id === "passphrase")!.redact, true);
+    assert.equal(replacement.fields.find((field) => field.id === "passphrase")!.value, " pass ");
+  }
+});
+
+test("SSH manager setup leads into the SSH host form and saves the submitted host", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ssh-manager-form-"));
   const store = new EncryptedSshStore({ path: join(root, "ssh.enc.json") });
   const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> }>();
   const shutdownHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown> = [];
   const notifications: string[] = [];
+  const form = createSshHostForm({ hosts: [], keys: [], identityPaths: [], agentAvailable: false, normalizePin: normalizeSshHostKeyFingerprint, locale: "en" });
+  const values = Object.fromEntries(form.fields.filter((field) => field.kind !== "section").map((field) => [field.id, field.value]));
+  Object.assign(values, { label: "Production", hostname: "prod.example.test", username: "deploy", port: "22", auth: "password", password: "server-password", hostKey: `256 ${PIN} prod.example.test (ED25519)`, tags: "prod, linux" });
+  assert.deepEqual(form.validate(values), []);
   const customResults: unknown[] = [
-    "short",
-    "first-master-password",
-    "mismatch",
-    "second-master-password",
-    "second-master-password",
-    { kind: "add", query: "" },
-    `256 ${PIN} prod.example.test (ED25519)`,
-    "server-password",
-    "",
-    "",
-    { kind: "close", query: "" },
+    "short", "first-master-password", "mismatch", "second-master-password", "second-master-password",
+    { kind: "add", query: "" }, { values }, { kind: "close", query: "" },
   ];
-  const inputSteps = [
-    { title: "SSH server label", current: "", answer: "Production" },
-    { title: "SSH hostname or IP", current: "", answer: "prod.example.test" },
-    { title: "SSH username", current: "", answer: "deploy" },
-    { title: "SSH port", current: "22", answer: "not-a-port" },
-    { title: "Tags (comma separated)", current: "", answer: "prod, linux" },
-    { title: "SSH server label", current: "Production", answer: "Production" },
-    { title: "SSH hostname or IP", current: "prod.example.test", answer: "prod.example.test" },
-    { title: "SSH username", current: "deploy", answer: "deploy" },
-    { title: "SSH port", current: "not-a-port", answer: "22" },
-    { title: "Tags (comma separated)", current: "prod, linux", answer: "prod, linux" },
-  ];
-  let inputIndex = 0;
   const api = {
     registerTool() {},
     registerCommand(name: string, command: unknown) {
@@ -135,23 +250,11 @@ test("SSH manager retries recoverable setup and host errors while preserving the
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
+    hasUI: true,
     ui: {
       async custom() {
         assert.ok(customResults.length > 0, "unexpected custom overlay");
         return customResults.shift();
-      },
-      async input(title: string, current: string) {
-        const step = inputSteps[inputIndex++];
-        assert.ok(step, `unexpected input: ${title}`);
-        assert.equal(title, step.title);
-        assert.equal(current, step.current);
-        return step.answer;
-      },
-      async select(title: string, choices: string[]) {
-        assert.match(title, /Remote shell|Authentication|Jump host|Monitoring/);
-        return title.startsWith("Authentication")
-          ? choices.find((choice) => choice.toLowerCase().includes("password"))
-          : choices[0];
       },
       notify(message: string) { notifications.push(message); },
       setStatus() {},
@@ -161,11 +264,9 @@ test("SSH manager retries recoverable setup and host errors while preserving the
   try {
     registerSshManager(api, { store });
     await commands.get("ssh")!.handler("", ctx);
-    assert.equal(inputIndex, inputSteps.length);
     assert.equal(customResults.length, 0);
-    assert.match(notifications.join("\n"), /at least 8 characters/);
-    assert.match(notifications.join("\n"), /do not match/);
-    assert.match(notifications.join("\n"), /Previous values were kept/);
+    assert.match(notifications.join("\n"), /at least 8 characters|至少需要 8 个字符/);
+    assert.match(notifications.join("\n"), /do not match|不一致/);
     assert.deepEqual(store.getHosts().map(({ label, host, user, port, hostKey, auth }) => ({
       label,
       host,
@@ -203,8 +304,9 @@ test("Test-only TOFU saves an observed pin after confirmation and revalidates th
   } as unknown as SshExecutor;
   try {
     const notice = await testAndTrustSshHost(ctx, store, executor, untrusted);
-    assert.match(notice, /trust saved/);
-    assert.deepEqual(confirmations, ["Trust Production?"]);
+    assert.match(notice, /trust saved|已保存信任/);
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0]!, /Trust Production\?|信任 Production？/);
     assert.equal(store.getHosts()[0]!.hostKey, PIN);
     assert.equal(store.getHosts()[0]!.monitorEnabled, false);
   } finally {
@@ -236,7 +338,7 @@ test("TOFU revalidates after confirmation before writing trust", async () => {
     } as unknown as SshExecutor;
     try {
       if (race === "same-pin") {
-        assert.match(await testAndTrustSshHost(ctx, store, executor, untrusted), /saved concurrently/);
+        assert.match(await testAndTrustSshHost(ctx, store, executor, untrusted), /saved concurrently|信任已同时保存/);
         assert.equal(store.getHosts()[0]!.hostKey, PIN);
       } else {
         await assert.rejects(
