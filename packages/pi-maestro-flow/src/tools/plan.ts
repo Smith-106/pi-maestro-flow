@@ -18,6 +18,12 @@ import { Key, Text, matchesKey, truncateToWidth, visibleWidth } from "@earendil-
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
 import type { UserAttentionHandler } from "../notify/user-attention.ts";
+import {
+  getPlanTransports,
+  type PlanTransportHandle,
+  type PlanTransportRequest,
+  type PlanTransportResult,
+} from "../plan-transport.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import { buildPlanDecomposeContract, PlanDecomposeParams } from "./plan-decompose.ts";
 import {
@@ -880,6 +886,97 @@ async function savePlan(
   return saved;
 }
 
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlanTransportResult(value: unknown): value is PlanTransportResult {
+  if (!isRecordValue(value) || (value.status !== "decision" && value.status !== "edited" && value.status !== "cancelled")) return false;
+  if (value.status === "cancelled") return true;
+  if (value.status === "edited") {
+    return typeof value.markdown === "string"
+      && typeof value.expectedRevision === "number"
+      && Number.isInteger(value.expectedRevision)
+      && value.expectedRevision >= 0;
+  }
+  const decision = value.decision;
+  if (!isRecordValue(decision)
+    || !["execute", "modify", "continue", "refine", "rollback", "exit-plan", "close"].includes(String(decision.action))) return false;
+  if (decision.discussion !== undefined && typeof decision.discussion !== "string") return false;
+  const execution = decision.execution;
+  if (execution === undefined) return true;
+  if (!isRecordValue(execution)
+    || (execution.backend !== "standalone" && execution.backend !== "workflow")
+    || (execution.context !== "current" && execution.context !== "compact")) return false;
+  if (execution.sourceDocument !== undefined && typeof execution.sourceDocument !== "string") return false;
+  return execution.backend === "standalone"
+    ? execution.workflowTarget === undefined
+    : execution.workflowTarget === "current" || execution.workflowTarget === "new";
+}
+
+function openPlanTransport(request: PlanTransportRequest): PlanTransportHandle | undefined {
+  for (const transport of getPlanTransports()) {
+    try {
+      const handle = transport.open(request);
+      if (handle) return handle;
+    } catch (error) {
+      console.error(`[maestro] Plan transport open failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return undefined;
+}
+
+async function racePlanTransport<T>(
+  local: (signal: AbortSignal) => Promise<T>,
+  remote: PlanTransportHandle,
+  signal: AbortSignal,
+): Promise<{ source: "local"; value: T } | { source: "remote"; result: PlanTransportResult }> {
+  const localController = new AbortController();
+  const localSignal = AbortSignal.any([signal, localController.signal]);
+  const localPromise = local(localSignal).then((value) => ({ source: "local" as const, value }));
+  const remotePromise: Promise<{ source: "remote"; result: PlanTransportResult } | { source: "remote-error" }> = remote.promise.then(
+    (result): { source: "remote"; result: PlanTransportResult } => ({
+      source: "remote",
+      result: isPlanTransportResult(result) ? result : { status: "cancelled" },
+    }),
+    () => ({ source: "remote-error" as const }),
+  );
+  const winner = await Promise.race([localPromise, remotePromise]);
+  if (winner.source === "remote-error") {
+    try { await remote.cancel("transport_error"); } catch { /* transport cleanup is best-effort */ }
+    return await localPromise;
+  }
+  if (winner.source === "remote") {
+    localController.abort();
+    void localPromise.catch(() => undefined);
+    return winner;
+  }
+  try { await remote.cancel("tui_answered"); } catch { /* transport cleanup is best-effort */ }
+  return winner;
+}
+
+function transportRequest(
+  ctx: PlanContext,
+  operation: PlanOperationIdentity,
+  kind: PlanTransportRequest["kind"],
+  signal: AbortSignal,
+  options: Omit<PlanTransportRequest, "kind" | "sessionId" | "operationId" | "cwd" | "mode" | "sessionFile" | "markdown" | "revision" | "pathLabel" | "signal">,
+): PlanTransportRequest {
+  return {
+    kind,
+    sessionId: operation.sessionId,
+    operationId: operation.operationId,
+    cwd: ctx.cwd,
+    mode: ctx.mode,
+    sessionFile: ctx.sessionManager.getSessionFile(),
+    markdown: latestPlan ?? "",
+    revision: latestRevision,
+    pathLabel: operation.store?.currentPath ?? "current.md",
+    signal,
+    ...options,
+  };
+}
+
 async function reviewPlan(
   ctx: PlanContext,
   allowConfirm: boolean,
@@ -888,8 +985,8 @@ async function reviewPlan(
   signal?: AbortSignal,
   onUserAttention?: UserAttentionHandler,
 ): Promise<PlanReviewOutcome> {
-  signal ??= ctx.signal;
-  if (signal?.aborted) return { approved: false, exited: false };
+  signal = signal ?? ctx.signal ?? new AbortController().signal;
+  if (signal.aborted) return { approved: false, exited: false };
   if (!ctx.hasUI) {
     if (isCurrentPlanOperation(ctx, operation, false)) {
       ctx.ui.notify("Plan review requires an interactive UI.", "warning");
@@ -907,6 +1004,26 @@ async function reviewPlan(
       id: `plan-review:${operation.sessionId}:${operation.operationId}`,
       kind: "plan-review",
     }, ctx);
+    const remote = openPlanTransport(transportRequest(ctx, operation, "review", signal, {
+      availableActions: [],
+      decisionDocuments: [],
+      drafts: [],
+    }));
+    if (remote) {
+      const raced = await racePlanTransport(
+        (localSignal) => editPlan(ctx, store.currentPath, operation, localSignal).then(() => undefined),
+        remote,
+        signal,
+      );
+      if (raced.source === "remote") {
+        if (raced.result.status === "edited") {
+          await savePlan(ctx, raced.result.markdown, raced.result.expectedRevision, operation);
+        }
+        return { approved: false, exited: false };
+      }
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      return { approved: false, exited: false };
+    }
     await editPlan(ctx, store.currentPath, operation, signal);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     return { approved: false, exited: false };
@@ -933,18 +1050,63 @@ async function reviewPlan(
     }, ctx);
     const decisionDocuments = await detectDecisionDocuments(latestPlan ?? "", ctx.cwd).catch(() => []);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
-    const decision = await openPlanConfirmation(ctx, {
-      markdown: latestPlan ?? "",
-      pathLabel: store.currentPath,
-      canCompactContext: true,
-      contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
+    const remote = openPlanTransport(transportRequest(ctx, operation, "confirm", signal, {
+      availableActions: [
+        "execute",
+        "modify",
+        "refine",
+        ...(drafts.length > 0 ? ["rollback" as const] : []),
+        "continue",
+        "exit-plan",
+      ],
       defaultExecution: latestExecution,
       workflow,
       modelTransition: describePlanModelTransition(ctx),
       decisionDocuments,
       drafts,
-      signal,
-    });
+    }));
+    let decision: Awaited<ReturnType<typeof openPlanConfirmation>>;
+    if (remote) {
+      const raced = await racePlanTransport(
+        (localSignal) => openPlanConfirmation(ctx, {
+          markdown: latestPlan ?? "",
+          pathLabel: store.currentPath,
+          canCompactContext: true,
+          contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
+          defaultExecution: latestExecution,
+          workflow,
+          modelTransition: describePlanModelTransition(ctx),
+          decisionDocuments,
+          drafts,
+          signal: localSignal,
+        }),
+        remote,
+        signal,
+      );
+      if (raced.source === "remote") {
+        if (raced.result.status === "edited") {
+          await savePlan(ctx, raced.result.markdown, raced.result.expectedRevision, operation);
+          continue;
+        }
+        if (raced.result.status === "cancelled") return { approved: false, exited: false };
+        decision = raced.result.decision;
+      } else {
+        decision = raced.value;
+      }
+    } else {
+      decision = await openPlanConfirmation(ctx, {
+        markdown: latestPlan ?? "",
+        pathLabel: store.currentPath,
+        canCompactContext: true,
+        contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
+        defaultExecution: latestExecution,
+        workflow,
+        modelTransition: describePlanModelTransition(ctx),
+        decisionDocuments,
+        drafts,
+        signal,
+      });
+    }
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const action = decision.action;
     if (action === "modify") {
@@ -1070,11 +1232,13 @@ async function reviewPlan(
       continue;
     }
     if (action === "continue") {
-      const discussion = await ctx.ui.input(
-        "Continue discussing the Plan",
-        "Enter feedback or a question",
-        { signal },
-      );
+      const discussion = decision.discussion !== undefined
+        ? decision.discussion
+        : await ctx.ui.input(
+          "Continue discussing the Plan",
+          "Enter feedback or a question",
+          { signal },
+        );
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       if (!discussion?.trim()) continue;
       return deliverPlanDiscussion(ctx, handoffDelivery, discussion.trim());
