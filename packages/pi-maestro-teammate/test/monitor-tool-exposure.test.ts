@@ -58,6 +58,12 @@ test("root Monitor authority is set before exposure notification", async () => {
   const block = source.slice(start, end);
   assert.ok(block.indexOf("monitorInteractionModeActive = true") < block.indexOf("monitorToolExposure?.enter()"));
   assert.match(block, /catch \(error\)[\s\S]*?monitorInteractionModeActive = wasActive/);
+  assert.match(block, /if \(!wasActive\) markWorkspacePeerDirty\(\)/);
+  const exitStart = source.indexOf("const exitMonitorInteractionMode = (): void => {");
+  const exitEnd = source.indexOf("const notifyMonitorModeClosed", exitStart);
+  assert.ok(exitStart >= 0 && exitEnd > exitStart);
+  assert.match(source.slice(exitStart, exitEnd), /if \(wasActive\) markWorkspacePeerDirty\(\)/);
+  assert.match(source, /workspaceRole: monitorInteractionModeActive \? "monitor" : "session"/);
 });
 
 test("Monitor tool exposure switches variants and restores shared active-tool preferences", () => {

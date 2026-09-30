@@ -430,6 +430,7 @@ export interface MonitorQueryAuthorityFence {
   sessionId: string;
   workspaceId: string;
   sourceId: string;
+  baseCwd: string;
   monitorGeneration: number;
 }
 

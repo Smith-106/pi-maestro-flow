@@ -2,6 +2,7 @@
 import { type MessageProvenanceV1 } from "../shared/types.ts";
 import { type WorkspaceWindowTerminalResultDraft } from "../public/v1/workspace-completion.ts";
 import { type WorkspaceProjectionItem, type WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
+import type { TeammateDesktopTargetIdentity } from "../shared/types.ts";
 export { createWorkspaceWindowTerminalResult, decodeWorkspaceWindowTerminalResult, encodeWorkspaceWindowTerminalResult, validateWorkspaceWindowTerminalResult, WORKSPACE_MAIN_SESSION_MARKER, WORKSPACE_WINDOW_TERMINAL_RESULT_TYPE, workspaceWindowCompletionHandle, workspaceWindowTerminalPublicationId, workspaceWindowTerminalReservationId, workspaceWindowTerminalResultMessageId, } from "../public/v1/workspace-completion.ts";
 export type { WorkspaceWindowCompletionHandle, WorkspaceWindowTerminalOutcome, WorkspaceWindowTerminalResult, WorkspaceWindowTerminalResultDraft, } from "../public/v1/workspace-completion.ts";
 export type { WorkspaceTodoSnapshot } from "../public/v1/workspace-projections.ts";
@@ -197,6 +198,9 @@ export interface WorkspaceOwnerState {
     backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[];
     sessionId?: string;
     sessionName?: string;
+    desktopTargetIdentity?: TeammateDesktopTargetIdentity;
+    /** Role of the owner session as presented by workspace-aware clients. */
+    workspaceRole?: "session" | "monitor";
     /** Optional publisher metadata; defaults identify this plugin and workspace-peer v1. */
     plugin?: WorkspaceOwnerPluginAdvertisement;
     protocol?: WorkspaceOwnerProtocolAdvertisement;
@@ -228,6 +232,9 @@ export interface WorkspaceOwnerSnapshot {
     publishedAt: number;
     sessionId?: string;
     sessionName?: string;
+    desktopTargetIdentity?: TeammateDesktopTargetIdentity;
+    /** Explicit role for workspace-aware clients; absent on legacy snapshots. */
+    workspaceRole?: "session" | "monitor";
     /** Optional additive producer advertisement; absent on legacy snapshots. */
     plugin?: WorkspaceOwnerPluginAdvertisement;
     /** Optional additive workspace-peer protocol advertisement. */

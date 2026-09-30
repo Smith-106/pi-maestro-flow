@@ -654,6 +654,50 @@ import type {
 /** Shared-process bridge key: the root host publishes the live v1 mailbox registry here. */
 export { MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
 
+interface DesktopTargetIdentity {
+  sessionId: string;
+  endpointId: string;
+  normalizedCwd: string;
+  processGeneration: string;
+}
+
+function boundedDesktopTargetString(value: unknown, maximum: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maximum
+    && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+}
+
+function exactDesktopTargetIdentity(value: unknown): value is DesktopTargetIdentity {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const target = value as Record<string, unknown>;
+  return boundedDesktopTargetString(target.sessionId, 256)
+    && boundedDesktopTargetString(target.endpointId, 256)
+    && boundedDesktopTargetString(target.normalizedCwd, 4_096)
+    && boundedDesktopTargetString(target.processGeneration, 256);
+}
+
+function desktopTargetIdentityMatchesCwd(targetCwd: string, cwd: string): boolean {
+  if (!cwd) return false;
+  try {
+    return completionWorkspaceId(targetCwd) === completionWorkspaceId(cwd);
+  } catch {
+    return false;
+  }
+}
+
+function desktopTargetIdentityForCurrentSession(
+  sessionId: string | null,
+  cwd: string,
+): DesktopTargetIdentity | undefined {
+  if (!cwd) return undefined;
+  const value = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-maestro-mobile.desktop-target-identity")];
+  return exactDesktopTargetIdentity(value)
+    && value.sessionId === sessionId
+    && desktopTargetIdentityMatchesCwd(value.normalizedCwd, cwd)
+    ? { ...value }
+    : undefined;
+}
 
 function completionWorkspaceIdentity(cwd: string): RuntimeWorkspaceIdentity {
   return cwd
@@ -1379,18 +1423,21 @@ export default function registerTeammateExtension(
     sessionId: string | null;
     workspaceId: string | undefined;
     sourceId: string | undefined;
+    baseCwd: string;
   }>;
   const captureRootSessionFence = (): RootSessionFence => Object.freeze({
     generation: state.sessionGeneration ?? 0,
     sessionId: state.currentSessionId,
     workspaceId: state.currentWorkspaceId,
     sourceId: state.currentSourceId,
+    baseCwd: state.baseCwd,
   });
   const ownsRootSessionFence = (fence: RootSessionFence): boolean =>
     (state.sessionGeneration ?? 0) === fence.generation
     && state.currentSessionId === fence.sessionId
     && state.currentWorkspaceId === fence.workspaceId
-    && state.currentSourceId === fence.sourceId;
+    && state.currentSourceId === fence.sourceId
+    && state.baseCwd === fence.baseCwd;
   const projectionForRootFence = (fence: RootSessionFence): SessionProjectionIdentity | undefined =>
     fence.sessionId && fence.workspaceId && fence.sourceId && fence.generation > 0
       ? {
@@ -1831,6 +1878,7 @@ export default function registerTeammateExtension(
   }
 
   let workspacePeerPublisher: WorkspacePeerPublisher | undefined;
+  let workspacePeerPublisherFence: RootSessionFence | undefined;
   let workspacePeerConsumer: WorkspacePeerCommandConsumer | undefined;
   let workspaceWindowRuntimeActor: WindowSupervisorRuntimeActor | undefined;
   let workspacePeerGeneration = 0;
@@ -2106,7 +2154,12 @@ export default function registerTeammateExtension(
 
   const refreshSessionEndpointDirectory = (includeUnboundLocal = false): void => {
     const registry = sessionHostRegistry;
-    const publisher = workspacePeerPublisher;
+    const candidatePublisher = workspacePeerPublisher;
+    const publisher = candidatePublisher
+      && workspacePeerPublisherFence
+      && ownsRootSessionFence(workspacePeerPublisherFence)
+      ? candidatePublisher
+      : undefined;
     const sshWindows = currentRemoteMonitorBinding(remoteMonitorBinding)
       ? remoteMonitorBinding.windows.listings()
       : [];
@@ -2133,6 +2186,31 @@ export default function registerTeammateExtension(
   const markWorkspacePeerDirty = (): void => {
     workspacePeerPublisher?.markDirty();
     refreshSessionEndpointDirectory();
+  };
+
+  state.publishDesktopTargetIdentity = (identity, expectedGeneration): boolean => {
+    if (!exactDesktopTargetIdentity(identity)
+      || identity.sessionId !== state.currentSessionId
+      || !state.baseCwd
+      || !desktopTargetIdentityMatchesCwd(identity.normalizedCwd, state.baseCwd)
+      || expectedGeneration !== state.sessionGeneration) return false;
+    state.desktopTargetIdentity = { ...identity };
+    state.desktopTargetSessionGeneration = expectedGeneration;
+    markWorkspacePeerDirty();
+    return true;
+  };
+  state.clearDesktopTargetIdentity = (identity): boolean => {
+    const current = state.desktopTargetIdentity;
+    if (!exactDesktopTargetIdentity(identity)
+      || !current
+      || current.sessionId !== identity.sessionId
+      || current.endpointId !== identity.endpointId
+      || current.normalizedCwd !== identity.normalizedCwd
+      || current.processGeneration !== identity.processGeneration) return false;
+    state.desktopTargetIdentity = undefined;
+    state.desktopTargetSessionGeneration = undefined;
+    markWorkspacePeerDirty();
+    return true;
   };
 
   const appendWorkspaceMainProgressEvent = (event: WorkspaceMainSessionProgressEvent): void => {
@@ -3853,6 +3931,7 @@ export default function registerTeammateExtension(
     if (workspacePeerRefresh?.publisher === publisher) workspacePeerRefresh = undefined;
     workspacePeerConsumer = undefined;
     workspacePeerPublisher = undefined;
+    workspacePeerPublisherFence = undefined;
     workspaceWindowRuntimeActor = undefined;
     workspacePeerOwners = [];
     refreshSessionEndpointDirectory();
@@ -3924,17 +4003,21 @@ export default function registerTeammateExtension(
         const publisher = createWorkspacePeerRuntime({
           cwd,
           ownerClaim,
-          getState: () => ({
-            ...buildWorkspaceOwnerState(
-              state,
-              sessionName,
-              currentContextPressure(),
-              workspaceBackgroundJobs,
-              workspaceMainSessionActivityAt,
-            ),
-            ...(workspaceMainSessionProgress === undefined ? {} : { mainProgress: workspaceMainSessionProgress }),
-            ...(workspaceMainLastSettle === undefined ? {} : { mainLastSettle: workspaceMainLastSettle }),
-          }),
+          getState: () => {
+            if (!ownsWorkspacePeerGeneration()) return { agents: [], settled: [] };
+            return {
+              ...buildWorkspaceOwnerState(
+                state,
+                sessionName,
+                currentContextPressure(),
+                workspaceBackgroundJobs,
+                workspaceMainSessionActivityAt,
+              ),
+              workspaceRole: monitorInteractionModeActive ? "monitor" : "session",
+              ...(workspaceMainSessionProgress === undefined ? {} : { mainProgress: workspaceMainSessionProgress }),
+              ...(workspaceMainLastSettle === undefined ? {} : { mainLastSettle: workspaceMainLastSettle }),
+            };
+          },
         });
         const runtimeActor = createWindowSupervisorRuntimeActor({
           cwd,
@@ -3964,6 +4047,7 @@ export default function registerTeammateExtension(
           }
           if (workspacePeerPublisher === publisher) {
             workspacePeerPublisher = undefined;
+            workspacePeerPublisherFence = undefined;
             changed = true;
           }
           if (workspaceWindowRuntimeActor === runtimeActor) {
@@ -3973,6 +4057,7 @@ export default function registerTeammateExtension(
           if (changed) refreshSessionEndpointDirectory();
         };
         workspacePeerPublisher = publisher;
+        workspacePeerPublisherFence = fence;
         workspaceWindowRuntimeActor = runtimeActor;
         const registry = sessionHostRegistry;
         if (!registry) {
@@ -6761,9 +6846,11 @@ export default function registerTeammateExtension(
     }
     if (widgetCtx) refreshModelCatalog(widgetCtx);
     syncMonitorInteractionStatus();
+    if (!wasActive) markWorkspacePeerDirty();
   };
 
   const exitMonitorInteractionMode = (): void => {
+    const wasActive = monitorInteractionModeActive;
     monitorInteractionModeActive = false;
     monitorToolExposure?.exit();
     if (widgetCtx) refreshModelCatalog(widgetCtx);
@@ -6772,6 +6859,7 @@ export default function registerTeammateExtension(
     });
     monitorRegistry.setViewMode("agents");
     syncMonitorInteractionStatus();
+    if (wasActive) markWorkspacePeerDirty();
   };
 
   const notifyMonitorModeClosed = (
@@ -8948,6 +9036,7 @@ export default function registerTeammateExtension(
       sessionId: root.sessionId,
       workspaceId: root.workspaceId,
       sourceId: root.sourceId,
+      baseCwd: root.baseCwd,
       monitorGeneration: monitor.generation,
     });
   };
@@ -8958,6 +9047,7 @@ export default function registerTeammateExtension(
       sessionId: capture.sessionId,
       workspaceId: capture.workspaceId,
       sourceId: capture.sourceId,
+      baseCwd: capture.baseCwd,
     })
     && ownsMonitorCommunication({ generation: capture.monitorGeneration });
 
@@ -11294,9 +11384,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     state.baseCwd = ctx.cwd;
+    state.desktopTargetIdentity = desktopTargetIdentityForCurrentSession(state.currentSessionId, ctx.cwd);
+    state.desktopTargetSessionGeneration = state.desktopTargetIdentity ? state.sessionGeneration : undefined;
     resetAdvisorSession(ctx.cwd);
     state.currentWorkspaceId = completionWorkspaceId(ctx.cwd);
     state.currentSourceId = state.currentSessionId ?? undefined;
+    markWorkspacePeerDirty();
     reconcileSettledAgentsForSession(state, {
       preserveExact: event?.reason === "resume" || event?.reason === "reload",
     });
@@ -11538,10 +11631,18 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui);
     const previousFence = captureRootSessionFence();
+    const nextSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    if (state.currentSessionId !== nextSessionId || state.baseCwd !== ctx.cwd) {
+      state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+    }
     state.baseCwd = ctx.cwd;
-    state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    state.currentSessionId = nextSessionId;
     state.currentWorkspaceId = completionWorkspaceId(ctx.cwd);
     state.currentSourceId = state.currentSessionId ?? undefined;
+    const currentDesktopTarget = desktopTargetIdentityForCurrentSession(state.currentSessionId, ctx.cwd);
+    state.desktopTargetIdentity = currentDesktopTarget;
+    state.desktopTargetSessionGeneration = currentDesktopTarget ? state.sessionGeneration : undefined;
+    markWorkspacePeerDirty();
     const projectionChanged = !ownsRootSessionFence(previousFence);
     if (projectionChanged) {
       abortAdvisorReview("Advisor session changed during compaction.");
@@ -11578,6 +11679,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     cancelRuntimeReadHandle(closingRuntimeReadHandle);
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     state.currentSessionId = null;
+    state.desktopTargetIdentity = undefined;
+    state.desktopTargetSessionGeneration = undefined;
+    markWorkspacePeerDirty();
     completionCoordinator.stopAdmission();
     // Stop externally admitted commands and abort physical children before the
     // first await. Their tracked settlements retain publication ownership until

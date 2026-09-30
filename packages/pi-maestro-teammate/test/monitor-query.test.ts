@@ -107,6 +107,7 @@ function harness(snapshots: MonitorQuerySnapshot[]) {
     sessionId: "session-a",
     workspaceId: WORKSPACE,
     sourceId: "session-a",
+    baseCwd: "/workspace",
     monitorGeneration: 1,
   };
   let index = 0;
@@ -117,6 +118,7 @@ function harness(snapshots: MonitorQuerySnapshot[]) {
       && capture.sessionId === authority.sessionId
       && capture.workspaceId === authority.workspaceId
       && capture.sourceId === authority.sourceId
+      && capture.baseCwd === authority.baseCwd
       && capture.monitorGeneration === authority.monitorGeneration),
     read: async () => snapshots[Math.min(index, snapshots.length - 1)]!,
     waitForWake: async () => { index++; },
@@ -336,6 +338,15 @@ test("Monitor exit/re-enter generation fences a sleeping query", async () => {
   const result = await runMonitorQuery({ action: "wait", target: "first", until: "change", timeoutMs: 100 }, state.dependencies, signal());
   assert.equal(result.status, "stale");
   assert.match(result.reason ?? "", /generation changed/);
+});
+
+test("root cwd change fences a sleeping Monitor query", async () => {
+  const state = harness([snapshot(), snapshot({ firstStatus: "settled" })]);
+  state.dependencies.waitForWake = async (capture) => {
+    state.replaceAuthority({ ...capture, baseCwd: "/workspace/other" });
+  };
+  const result = await runMonitorQuery({ action: "wait", target: "first", until: "change", timeoutMs: 100 }, state.dependencies, signal());
+  assert.equal(result.status, "stale");
 });
 
 test("monitor tool is root-only, exposure-controlled, and does not import Flow", async () => {

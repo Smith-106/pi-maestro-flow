@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { getRuntimeWorkspaceIdentity } from "../runtime-broker/private-state.ts";
 import { logDiagnosticError, logDiagnosticWarn } from "../shared/diagnostic-log.ts";
 
 import { altKey } from "pi-maestro-settings-core/v1";
@@ -1051,6 +1052,14 @@ export function appendAgentProgressLine(
   trimAgentBuffers(agent);
 }
 
+function sameRuntimeWorkspace(cwdA: string, cwdB: string): boolean {
+  try {
+    return getRuntimeWorkspaceIdentity(cwdA).workspaceId === getRuntimeWorkspaceIdentity(cwdB).workspaceId;
+  } catch {
+    return false;
+  }
+}
+
 export function buildWorkspaceOwnerState(
   state: TeammateState,
   sessionName?: string,
@@ -1122,6 +1131,12 @@ export function buildWorkspaceOwnerState(
     settled: [...settledById.values()],
     ...(backgroundJobs === undefined ? {} : { backgroundJobs: [...backgroundJobs] }),
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
+    ...(state.desktopTargetIdentity
+      && state.desktopTargetIdentity.sessionId === state.currentSessionId
+      && sameRuntimeWorkspace(state.desktopTargetIdentity.normalizedCwd, state.baseCwd)
+      && state.desktopTargetSessionGeneration === state.sessionGeneration
+      ? { desktopTargetIdentity: { ...state.desktopTargetIdentity } }
+      : {}),
     ...(sessionName ? { sessionName } : {}),
     ...(contextPressure !== undefined && Number.isFinite(contextPressure) ? { contextPressure: Math.max(0, Math.min(100, Math.round(contextPressure))) } : {}),
     ...(mainActivityAt === undefined ? {} : { mainActivityAt }),

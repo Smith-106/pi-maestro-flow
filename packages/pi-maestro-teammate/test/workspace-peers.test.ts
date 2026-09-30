@@ -225,6 +225,7 @@ test("workspace peer facade, advertisement, protocol version, and main-session s
   assert.equal(identity.version, WORKSPACE_PEER_PROTOCOL_VERSION);
   assert.equal(snapshot.version, WORKSPACE_PEER_PROTOCOL_VERSION);
   assert.equal(snapshot.kind, "owner");
+  assert.equal(snapshot.workspaceRole, "session");
   assert.deepEqual(snapshot.plugin, { id: WORKSPACE_PEER_PLUGIN_ID });
   assert.deepEqual(snapshot.protocol, {
     workspacePeerVersion: WORKSPACE_PEER_PROTOCOL_VERSION,
@@ -232,10 +233,19 @@ test("workspace peer facade, advertisement, protocol version, and main-session s
   });
   assert.equal(snapshot.relay, undefined);
 
+  const monitor = buildWorkspaceOwnerSnapshot(identity, {
+    ...state(agent("cid-monitor-role", "monitor")),
+    workspaceRole: "monitor",
+  }, 1_001);
+  assert.equal(monitor.workspaceRole, "monitor");
+
   const legacySnapshot = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
   delete legacySnapshot.plugin;
   delete legacySnapshot.protocol;
+  delete legacySnapshot.workspaceRole;
   assert.equal(validateWorkspaceOwnerSnapshot(legacySnapshot, identity)?.plugin, undefined);
+  assert.equal(validateWorkspaceOwnerSnapshot(legacySnapshot, identity)?.workspaceRole, undefined);
+  assert.equal(validateWorkspaceOwnerSnapshot({ ...snapshot, workspaceRole: "unknown" }, identity), undefined);
   const advertised = validateWorkspaceOwnerSnapshot({
     ...snapshot,
     relay: { versions: [1], capabilities: ["receipt", "reply"] },
@@ -253,9 +263,52 @@ test("workspace peer facade, advertisement, protocol version, and main-session s
   assert.match(facadeSource, /export \* from "\.\.\/sessions\/workspace-peer-core\.ts"/);
   assert.match(peerCoreSource, /target: `owner:\$\{owner\.ownerId\}`/);
   assert.match(extensionSource, /workspacePeerOwners\.map\(projectWorkspacePeerWindow\)/);
+  assert.match(extensionSource, /workspaceRole: monitorInteractionModeActive \? "monitor" : "session"/);
   assert.match(extensionSource, /const agentSelector = \/\^owner:/);
   assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}:\$\{agent\.correlationId\}`/);
   assert.match(schemaSource, /enum: \["active", "named", "all", "roles", "windows", "inbox"\]/);
+});
+
+test("buildWorkspaceOwnerSnapshot validates and preserves the complete Desktop target identity", () => {
+  const identity = createWorkspacePeerIdentity("/work/app", { ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const desktopTargetIdentity = {
+    sessionId: "session-1",
+    endpointId: "desktop-endpoint",
+    normalizedCwd: "/work/app",
+    processGeneration: "generation-1",
+  };
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, {
+    ...state(),
+    sessionId: "session-1",
+    desktopTargetIdentity,
+  }, 1_000);
+  assert.deepEqual(snapshot.desktopTargetIdentity, desktopTargetIdentity);
+  assert.deepEqual(validateWorkspaceOwnerSnapshot(snapshot, identity)?.desktopTargetIdentity, desktopTargetIdentity);
+  assert.equal(validateWorkspaceOwnerSnapshot({
+    ...snapshot,
+    desktopTargetIdentity: { ...desktopTargetIdentity, processGeneration: undefined },
+  }, identity), undefined);
+  assert.equal(validateWorkspaceOwnerSnapshot({
+    ...snapshot,
+    desktopTargetIdentity: { ...desktopTargetIdentity, sessionId: "other-session" },
+  }, identity), undefined);
+  assert.equal(validateWorkspaceOwnerSnapshot({
+    ...snapshot,
+    desktopTargetIdentity: { ...desktopTargetIdentity, normalizedCwd: "/work/other" },
+  }, identity), undefined);
+  assert.equal(validateWorkspaceOwnerSnapshot({
+    ...snapshot,
+    desktopTargetIdentity: { ...desktopTargetIdentity, endpointId: "e".repeat(257) },
+  }, identity), undefined);
+  const malformedLongPathSnapshot = {
+    ...snapshot,
+    desktopTargetIdentity: {
+      ...desktopTargetIdentity,
+      normalizedCwd: `/${"a".repeat(4_095)}`,
+    },
+  };
+  assert.doesNotThrow(() => validateWorkspaceOwnerSnapshot(malformedLongPathSnapshot, identity));
+  assert.equal(validateWorkspaceOwnerSnapshot(malformedLongPathSnapshot, identity), undefined);
 });
 
 test("workspace root message redrive and receipt reconciliation remain bounded", async () => {
@@ -932,6 +985,65 @@ test("publisher coalesces dirty writes, heartbeats, and removes its owner file o
     await runtime.stop();
   }
   await assert.rejects(readFile(ownerSnapshotPath(runtime.identity)), { code: "ENOENT" });
+});
+
+test("publisher reflects Monitor role transitions without changing owner identity", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  let workspaceRole: "session" | "monitor" = "session";
+  let clock = Date.now();
+  const runtime = createWorkspacePeerRuntime({
+    cwd,
+    rootDir,
+    ownerId: OWNER_A,
+    ownerNonce: NONCE_A,
+    heartbeatMs: 5_000,
+    publishThrottleMs: 0,
+    now: () => ++clock,
+    getState: () => ({ ...state(), sessionId: "session-stable", workspaceRole }),
+  });
+  const path = ownerSnapshotPath(runtime.identity);
+  await runtime.start();
+  try {
+    const identity = (snapshot: Record<string, unknown>) => ({
+      workspaceId: snapshot.workspaceId,
+      ownerId: snapshot.ownerId,
+      ownerNonce: snapshot.ownerNonce,
+      ownerGeneration: snapshot.ownerGeneration,
+      sessionId: snapshot.sessionId,
+    });
+    const initial = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    assert.equal(initial.workspaceRole, "session");
+    const stableIdentity = identity(initial);
+
+    const waitForRole = async (role: "session" | "monitor", after: number): Promise<Record<string, unknown>> => {
+      const deadline = Date.now() + 5_000;
+      do {
+        const snapshot = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+        if (snapshot.workspaceRole === role && Number(snapshot.publishedAt) > after) return snapshot;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      } while (Date.now() < deadline);
+      assert.fail(`owner snapshot did not publish workspaceRole=${role}`);
+    };
+
+    workspaceRole = "monitor";
+    runtime.markDirty();
+    const entered = await waitForRole("monitor", Number(initial.publishedAt));
+    assert.deepEqual(identity(entered), stableIdentity);
+
+    workspaceRole = "session";
+    runtime.markDirty();
+    const exited = await waitForRole("session", Number(entered.publishedAt));
+    assert.deepEqual(identity(exited), stableIdentity);
+
+    workspaceRole = "monitor";
+    runtime.markDirty();
+    workspaceRole = "session";
+    runtime.markDirty();
+    const rapidExit = await waitForRole("session", Number(exited.publishedAt));
+    assert.deepEqual(identity(rapidExit), stableIdentity);
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("mailbox cleanup removes expired files only from the current owner directories", async () => {
@@ -2034,6 +2146,28 @@ test("stale cleanup respects a longer deletion threshold than listing staleness"
 // ===========================================================================
 // Settled result bodies stay out of workspace snapshots
 // ===========================================================================
+
+test("buildWorkspaceOwnerState publishes the Desktop target only for its exact owner generation", () => {
+  const desktopTargetIdentity = {
+    sessionId: "session-1",
+    endpointId: "desktop-endpoint",
+    normalizedCwd: "/work/app",
+    processGeneration: "generation-1",
+  };
+  const current: TeammateState = {
+    baseCwd: "/work/app",
+    currentSessionId: "session-1",
+    sessionGeneration: 4,
+    desktopTargetIdentity,
+    desktopTargetSessionGeneration: 4,
+    activeRuns: new Map(),
+    namedAgents: new Map(),
+  };
+  assert.deepEqual(buildWorkspaceOwnerState(current).desktopTargetIdentity, desktopTargetIdentity);
+  assert.equal(buildWorkspaceOwnerState({ ...current, desktopTargetSessionGeneration: 3 }).desktopTargetIdentity, undefined);
+  assert.equal(buildWorkspaceOwnerState({ ...current, currentSessionId: "session-2" }).desktopTargetIdentity, undefined);
+  assert.equal(buildWorkspaceOwnerState({ ...current, baseCwd: "/work/other" }).desktopTargetIdentity, undefined);
+});
 
 test("buildWorkspaceOwnerState keeps settled summaries but omits result bodies", () => {
   const activeRuns = new Map<string, ActiveAgent>();
