@@ -396,6 +396,96 @@ test("root persists accepted transport turns and diagnose reports the authoritat
   ), true);
 });
 
+test("Desktop target identity follows the current workspace through compact and shutdown", async () => {
+  const workspaceA = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-target-a-"));
+  const workspaceB = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-target-b-"));
+  const targetKey = Symbol.for("pi-maestro-mobile.desktop-target-identity");
+  const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
+  const previousTarget = globals[targetKey];
+  const { hooks } = createHarness();
+  const sessionStart = hooks.get("session_start")?.[0];
+  const sessionCompact = hooks.get("session_compact")?.[0];
+  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(sessionStart);
+  assert.ok(sessionCompact);
+  assert.ok(sessionShutdown);
+  const sessionId = "desktop-target-session";
+  const makeContext = (cwd: string) => ({
+    cwd,
+    hasUI: false,
+    ui: { setWidget() {} },
+    isIdle: () => true,
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getEntries: () => [],
+      getSessionFile: () => undefined,
+      getSessionId: () => sessionId,
+      getSessionName: () => "desktop-target-session",
+    },
+  });
+  const readOwner = (cwd: string): Record<string, any> | undefined => {
+    const ownersDir = createWorkspacePeerPaths(cwd).ownersDir;
+    if (!fs.existsSync(ownersDir)) return undefined;
+    for (const filename of fs.readdirSync(ownersDir).filter((entry) => entry.endsWith(".json"))) {
+      try {
+        const snapshot = JSON.parse(fs.readFileSync(path.join(ownersDir, filename), "utf8")) as Record<string, any>;
+        if (snapshot.kind === "owner") return snapshot;
+      } catch {
+        // Ignore an owner file while it is being atomically replaced.
+      }
+    }
+    return undefined;
+  };
+  const target = (cwd: string, endpointId: string, processGeneration: string) => ({
+    sessionId,
+    endpointId,
+    normalizedCwd: path.normalize(cwd),
+    processGeneration,
+  });
+  const contextA = makeContext(workspaceA);
+  const contextB = makeContext(workspaceB);
+  let started = false;
+  let stopped = false;
+
+  try {
+    globals[targetKey] = target(workspaceB, "desktop-mismatch", "generation-mismatch");
+    sessionStart({ reason: "new" }, contextA);
+    started = true;
+    await waitFor(() => readOwner(workspaceA) !== undefined);
+    assert.equal(readOwner(workspaceA)?.desktopTargetIdentity, undefined);
+
+    globals[targetKey] = undefined;
+    sessionCompact({}, contextA);
+    await waitFor(() => {
+      const snapshot = readOwner(workspaceA);
+      return snapshot !== undefined && snapshot.desktopTargetIdentity === undefined;
+    });
+
+    globals[targetKey] = target(workspaceA, "desktop-a", "generation-a");
+    sessionCompact({}, contextA);
+    await waitFor(() => readOwner(workspaceA)?.desktopTargetIdentity?.processGeneration === "generation-a");
+
+    globals[targetKey] = target(workspaceB, "desktop-b", "generation-b");
+    sessionCompact({}, contextB);
+    await waitFor(() => readOwner(workspaceB)?.desktopTargetIdentity?.processGeneration === "generation-b");
+    assert.notEqual(readOwner(workspaceA)?.desktopTargetIdentity?.processGeneration, "generation-b");
+
+    const shutdownPromise = sessionShutdown({ reason: "quit" }, contextB);
+    const rootState = globals[Symbol.for("pi-maestro-teammate.root-registry")] as TeammateState;
+    assert.equal(rootState.currentSessionId, null);
+    assert.equal(rootState.desktopTargetIdentity, undefined);
+    await shutdownPromise;
+    stopped = true;
+    await waitFor(() => readOwner(workspaceB) === undefined);
+  } finally {
+    if (started && !stopped) await Promise.resolve(sessionShutdown({ reason: "quit" }, contextB)).catch(() => undefined);
+    if (previousTarget === undefined) delete globals[targetKey];
+    else globals[targetKey] = previousTarget;
+    fs.rmSync(workspaceA, { recursive: true, force: true });
+    fs.rmSync(workspaceB, { recursive: true, force: true });
+  }
+});
+
 test("immediate reload waits for workspace peer startup before shutdown cleanup", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-peer-reload-"));
   const { hooks } = createHarness();

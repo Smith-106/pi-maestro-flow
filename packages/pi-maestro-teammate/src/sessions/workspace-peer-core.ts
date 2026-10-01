@@ -47,6 +47,7 @@ import {
   type WorkspaceProjectionItem,
   type WorkspaceTodoSnapshot,
 } from "../public/v1/workspace-projections.ts";
+import type { TeammateDesktopTargetIdentity } from "../shared/types.ts";
 export {
   createWorkspaceWindowTerminalResult,
   decodeWorkspaceWindowTerminalResult,
@@ -303,6 +304,9 @@ export interface WorkspaceOwnerState {
   backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[];
   sessionId?: string;
   sessionName?: string;
+  desktopTargetIdentity?: TeammateDesktopTargetIdentity;
+  /** Role of the owner session as presented by workspace-aware clients. */
+  workspaceRole?: "session" | "monitor";
   /** Optional publisher metadata; defaults identify this plugin and workspace-peer v1. */
   plugin?: WorkspaceOwnerPluginAdvertisement;
   protocol?: WorkspaceOwnerProtocolAdvertisement;
@@ -335,6 +339,9 @@ export interface WorkspaceOwnerSnapshot {
   publishedAt: number;
   sessionId?: string;
   sessionName?: string;
+  desktopTargetIdentity?: TeammateDesktopTargetIdentity;
+  /** Explicit role for workspace-aware clients; absent on legacy snapshots. */
+  workspaceRole?: "session" | "monitor";
   /** Optional additive producer advertisement; absent on legacy snapshots. */
   plugin?: WorkspaceOwnerPluginAdvertisement;
   /** Optional additive workspace-peer protocol advertisement. */
@@ -614,6 +621,22 @@ function boundedInteger(value: unknown, minimum = 0): value is number {
 
 function boundedString(value: unknown, maximum = MAX_STRING): value is string {
   return typeof value === "string" && value.length <= maximum && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+}
+
+function safeWorkspaceIdForCwd(value: string): string | undefined {
+  try {
+    return getRuntimeWorkspaceIdentity(value).workspaceId;
+  } catch {
+    return undefined;
+  }
+}
+
+function validDesktopTargetIdentity(value: unknown): value is TeammateDesktopTargetIdentity {
+  return isRecord(value)
+    && boundedString(value.sessionId, 256) && value.sessionId.length > 0
+    && boundedString(value.endpointId, 256) && value.endpointId.length > 0
+    && boundedString(value.normalizedCwd, MAX_STRING) && value.normalizedCwd.length > 0
+    && boundedString(value.processGeneration, 256) && value.processGeneration.length > 0;
 }
 
 function safeName(value: unknown): value is string {
@@ -1419,6 +1442,11 @@ export function validateWorkspaceOwnerSnapshot(
     || !boundedInteger(value.publishedAt)
     || !optional(value.sessionId, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.sessionName, (candidate): candidate is string => boundedString(candidate, 256))
+    || !optional(value.desktopTargetIdentity, (candidate): candidate is TeammateDesktopTargetIdentity =>
+      validDesktopTargetIdentity(candidate)
+      && candidate.sessionId === value.sessionId
+      && safeWorkspaceIdForCwd(candidate.normalizedCwd) === value.workspaceId)
+    || !optional(value.workspaceRole, (candidate): candidate is "session" | "monitor" => candidate === "session" || candidate === "monitor")
     || !optional(value.plugin, (candidate): candidate is WorkspaceOwnerPluginAdvertisement => validateWorkspaceOwnerPluginAdvertisement(candidate) !== undefined)
     || !optional(value.protocol, (candidate): candidate is WorkspaceOwnerProtocolAdvertisement => validateWorkspaceOwnerProtocolAdvertisement(candidate) !== undefined)
     || !optional(value.relay, (candidate): candidate is WorkspaceOwnerRelayAdvertisement => validateWorkspaceOwnerRelayAdvertisement(candidate) !== undefined)
@@ -1490,6 +1518,8 @@ export function validateWorkspaceOwnerSnapshot(
     publishedAt: value.publishedAt,
     ...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
     ...(value.sessionName === undefined ? {} : { sessionName: value.sessionName }),
+    ...(value.desktopTargetIdentity === undefined ? {} : { desktopTargetIdentity: { ...value.desktopTargetIdentity } }),
+    ...(value.workspaceRole === undefined ? {} : { workspaceRole: value.workspaceRole }),
     ...(plugin === undefined ? {} : { plugin }),
     ...(protocol === undefined ? {} : { protocol }),
     ...(relay === undefined ? {} : { relay }),
@@ -1525,6 +1555,8 @@ export function buildWorkspaceOwnerSnapshot(
     publishedAt,
     ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
     ...(state.sessionName === undefined ? {} : { sessionName: state.sessionName }),
+    ...(state.desktopTargetIdentity === undefined ? {} : { desktopTargetIdentity: { ...state.desktopTargetIdentity } }),
+    workspaceRole: state.workspaceRole ?? "session",
     plugin: state.plugin ?? { id: WORKSPACE_PEER_PLUGIN_ID },
     protocol: state.protocol ?? {
       workspacePeerVersion: WORKSPACE_PEER_PROTOCOL_VERSION,

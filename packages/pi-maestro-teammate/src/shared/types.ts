@@ -727,6 +727,13 @@ export interface SessionProjectionIdentity {
   generation: number;
 }
 
+export interface TeammateDesktopTargetIdentity {
+  sessionId: string;
+  endpointId: string;
+  normalizedCwd: string;
+  processGeneration: string;
+}
+
 export interface TeammateState {
   baseCwd: string;
   currentSessionId: string | null;
@@ -736,6 +743,12 @@ export interface TeammateState {
   currentSourceId?: string;
   /** Monotonic owner token for async work admitted by the current session. */
   sessionGeneration?: number;
+  /** Exact Desktop Plugin target currently owned by this root session. */
+  desktopTargetIdentity?: TeammateDesktopTargetIdentity;
+  desktopTargetSessionGeneration?: number;
+  /** Fenced bridge used by Desktop Plugin to publish its Broker target. */
+  publishDesktopTargetIdentity?: (identity: TeammateDesktopTargetIdentity, sessionGeneration: number) => boolean;
+  clearDesktopTargetIdentity?: (identity: TeammateDesktopTargetIdentity) => boolean;
   /** Child execution promises retained until shutdown has observed process close. */
   dispatchSettlements?: Set<Promise<unknown>>;
   /** @internal Outgoing owner retained while fenced shutdown records settled agents. */
