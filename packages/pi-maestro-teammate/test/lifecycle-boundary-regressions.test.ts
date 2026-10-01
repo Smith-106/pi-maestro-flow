@@ -403,12 +403,14 @@ test("Desktop target identity follows the current workspace through compact and 
   const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
   const previousTarget = globals[targetKey];
   const { hooks } = createHarness();
-  const sessionStart = hooks.get("session_start")?.[0];
-  const sessionCompact = hooks.get("session_compact")?.[0];
-  const sessionShutdown = hooks.get("session_shutdown")?.[0];
-  assert.ok(sessionStart);
-  assert.ok(sessionCompact);
-  assert.ok(sessionShutdown);
+  const runHooks = (name: string, ...args: unknown[]) => {
+    const handlers = hooks.get(name);
+    assert.ok(handlers?.length);
+    return Promise.all(handlers.map((handler) => handler(...args)));
+  };
+  const sessionStart = runHooks.bind(undefined, "session_start");
+  const sessionCompact = runHooks.bind(undefined, "session_compact");
+  const sessionShutdown = runHooks.bind(undefined, "session_shutdown");
   const sessionId = "desktop-target-session";
   const makeContext = (cwd: string) => ({
     cwd,
@@ -449,24 +451,24 @@ test("Desktop target identity follows the current workspace through compact and 
 
   try {
     globals[targetKey] = target(workspaceB, "desktop-mismatch", "generation-mismatch");
-    sessionStart({ reason: "new" }, contextA);
+    await sessionStart({ reason: "new" }, contextA);
     started = true;
     await waitFor(() => readOwner(workspaceA) !== undefined);
     assert.equal(readOwner(workspaceA)?.desktopTargetIdentity, undefined);
 
     globals[targetKey] = undefined;
-    sessionCompact({}, contextA);
+    await sessionCompact({}, contextA);
     await waitFor(() => {
       const snapshot = readOwner(workspaceA);
       return snapshot !== undefined && snapshot.desktopTargetIdentity === undefined;
     });
 
     globals[targetKey] = target(workspaceA, "desktop-a", "generation-a");
-    sessionCompact({}, contextA);
+    await sessionCompact({}, contextA);
     await waitFor(() => readOwner(workspaceA)?.desktopTargetIdentity?.processGeneration === "generation-a");
 
     globals[targetKey] = target(workspaceB, "desktop-b", "generation-b");
-    sessionCompact({}, contextB);
+    await sessionCompact({}, contextB);
     await waitFor(() => readOwner(workspaceB)?.desktopTargetIdentity?.processGeneration === "generation-b");
     assert.notEqual(readOwner(workspaceA)?.desktopTargetIdentity?.processGeneration, "generation-b");
 
