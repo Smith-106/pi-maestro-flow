@@ -239,7 +239,7 @@ test("keeps Providers flat when the same API format uses different URLs", async 
   const registered = new Map<string, any>();
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) { registered.set(name, config); },
-  } as any, { modelsPath, defaultsPath });
+  } as any, { modelsPath, defaultsPath, hostVersion: "0.98.0" });
   assert.deepEqual([...registered.keys()], ["openai-east", "openai-west", "openai-west-b"]);
   assert.deepEqual(registered.get("openai-west")?.models.map((model: any) => model.id), ["model-west-a"]);
   assert.deepEqual(registered.get("openai-west-b")?.models.map((model: any) => model.id), ["model-west-b"]);
@@ -405,7 +405,7 @@ test("runtime registration warns on remote HTTP provider and model URLs but stil
     registerProvider(name: string, config: any) {
       registered.set(name, config);
     },
-  } as any, { modelsPath });
+  } as any, { modelsPath, hostVersion: "0.98.0" });
 
   assert.equal(registered.get("maestro-openai")?.baseUrl, "http://198.51.100.10:8080/v1");
   assert.deepEqual(
@@ -613,7 +613,7 @@ test("registration injects prompt-cache compat flags per policy and API format",
     registerApiProviderConfigs({
       registerProvider(name: string, config: any) { registered.push({ name, config }); },
       registerCommand() {},
-    } as any, { modelsPath, settingsPath });
+    } as any, { modelsPath, settingsPath, hostVersion: "0.98.0" });
     return registered;
   };
 
@@ -1002,7 +1002,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(registrations.length, 1);
   assert.equal(registrations.at(-1)?.name, "maestro-openai");
   assert.equal(registrations.at(-1)?.config.name, undefined);
-  assert.equal(registrations.at(-1)?.config.models[0].id, "gpt-5.4");
+  assert.equal(registrations.at(-1)?.config.models, undefined, "native host owns the saved model catalog");
   assert.match(confirmations[0] ?? "", /上下文窗口 contextWindow：400,000 Token/);
   assert.match(confirmations[0] ?? "", /单次最大输出 maxTokens：128,000 Token/);
   assert.match(confirmations[0] ?? "", /预计实际硬压缩：上下文超过 360,000 Token/);
@@ -1798,7 +1798,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
   assert.ok(selectOptions[0]?.includes("启用：off / minimal / low / medium / high / xhigh / max"));
   assert.equal(registrations.at(-1)?.name, "maestro-qwen");
   assert.equal(registrations.at(-1)?.config.name, undefined);
-  assert.equal(registrations.at(-1)?.config.models[0].id, "qwen3.8-max");
+  assert.equal(registrations.at(-1)?.config.models, undefined, "native host owns the saved model catalog");
 });
 
 test("/api-manager rejects invalid URL, context window, and API key", async (t) => {
@@ -2469,7 +2469,7 @@ test("Qwen entry path preserves ProviderConfig metadata, compat, and canonical m
       captured.push({ name, config });
       registry.registerProvider(name, config);
     },
-  } as any, { modelsPath, defaultsPath });
+  } as any, { modelsPath, defaultsPath, hostVersion: "0.98.0" });
 
   const registration = captured.find((entry) => entry.name === "maestro-qwen")?.config;
   assert.ok(registration);
@@ -2532,7 +2532,7 @@ test("runtime max capability accepts legacy and canonical mappings", async (t) =
   registerApiProviderConfigs({
     registerProvider() {},
     registerCommand(name: string, command: any) { commands.set(name, command); },
-  } as any, { modelsPath });
+  } as any, { modelsPath, hostVersion: "0.98.0" });
   const manager = commands.get("api-manager");
   for (const thinkingLevelMap of [{ max: "max" }, { xhigh: "max" }]) {
     const inputs = ["https://qwen.example.com/v1", "qwen-max"];
@@ -2563,7 +2563,7 @@ test("runtime max capability accepts legacy and canonical mappings", async (t) =
   const registrations: any[] = [];
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) { registrations.push({ name, config }); },
-  } as any, { modelsPath });
+  } as any, { modelsPath, hostVersion: "0.98.0" });
   const map = registrations[0].config.models[0].thinkingLevelMap;
   assert.deepEqual(map, { off: null, xhigh: "max" });
   assert.equal("max" in map, false);
@@ -2704,10 +2704,11 @@ test("/api-manager creates a user-defined Provider with a free-form id and chose
   assert.equal(registrations.at(-1)?.config.api, "openai-completions");
   assert.equal(registrations.at(-1)?.config.name, "My Proxy");
   assert.deepEqual(registrations.at(-1)?.config.headers, { "X-Custom": "custom-val" });
-  assert.equal(registrations.at(-1)?.config.models[0].headers, undefined);
+  assert.equal(registrations.at(-1)?.config.models, undefined, "native registration must not replace the catalog");
   assert.equal(registrations.at(-1)?.config.authHeader, true);
-  assert.equal(registrations.at(-1)?.config.models[0].compat.thinkingFormat, "deepseek");
-  assert.equal(registrations.at(-1)?.config.models[0].id, "my-model");
+  assert.equal(custom.compat.thinkingFormat, "deepseek");
+  assert.equal(custom.models[0].headers, undefined);
+  assert.equal(custom.models[0].id, "my-model");
   assert.match(notifications.at(-1)?.message ?? "", /已保存 1 个模型：my-proxy\/my-model/);
 });
 
@@ -2733,7 +2734,7 @@ test("startup registers legacy managedChannels entries as user-defined Providers
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) { registered.push({ name, config }); },
     registerCommand() {},
-  } as any, { modelsPath, defaultsPath });
+  } as any, { modelsPath, defaultsPath, hostVersion: "0.98.0" });
 
   assert.deepEqual(registered.map((entry) => entry.name), ["my-proxy"]);
   assert.equal(registered[0].config.api, "openai-completions");
@@ -2921,7 +2922,7 @@ test("saveApiProviderSettings writes headers and authHeader, and registration pa
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) { registrations.push({ name, config }); },
     registerCommand() {},
-  } as any, { modelsPath, defaultsPath });
+  } as any, { modelsPath, defaultsPath, hostVersion: "0.98.0" });
 
   const registration = registrations.find((entry) => entry.name === "hdr-chan")?.config;
   assert.ok(registration);
@@ -2976,7 +2977,7 @@ test("startup keeps multiple models under one Provider and preserves model defau
   const registrations = new Map<string, any>();
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) { registrations.set(name, config); },
-  } as any, { modelsPath, defaultsPath, settingsPath });
+  } as any, { modelsPath, defaultsPath, settingsPath, hostVersion: "0.98.0" });
 
   // No identity migration: both models stay under maestro-qwen and no file is rewritten.
   assert.deepEqual(JSON.parse(readFileSync(modelsPath, "utf8")), JSON.parse(modelsBytes));
@@ -4017,7 +4018,7 @@ test("model filter glob matches provider/id and bare id", () => {
   assert.equal(modelMatchesFilterPattern("any", "x", "  "), false);
 });
 
-test("applyModelFilters re-registers providers with curated models", async (t) => {
+test("applyModelFilters preserves saved filters without replacing the native operation catalog", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-apply-filters-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const defaultsPath = join(tempDir, "api-manager.json");
@@ -4041,13 +4042,10 @@ test("applyModelFilters re-registers providers with curated models", async (t) =
 
   await applyModelFilters(pi, ctx, defaultsPath);
 
-  assert.equal(registered.length, 1);
-  assert.equal(registered[0].name, "openai-codex");
-  // gpt-5.4-mini is blocked; gpt-5.4 and gpt-5.5 survive
-  assert.deepEqual(registered[0].config.models.map((m: any) => m.id), ["gpt-5.4", "gpt-5.5"]);
-  assert.equal(registered[0].config.api, "openai-codex-responses");
-  assert.equal(registered[0].config.baseUrl, "https://api.openai.com/v1");
-  assert.equal(registered[0].config.oauth, undefined);
+  assert.deepEqual(registered, [], "native filtering must not replace the operation catalog");
+  assert.deepEqual(fakeModels.map((model) => model.id), ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5"]);
+  assert.deepEqual(await loadModelFilters(defaultsPath), { "openai-codex": { mode: "block", patterns: ["gpt-5.4-mini"] } });
+  assert.deepEqual(notifications, ["Native model filtering is unavailable: replacing the chat catalog would remove image/classifier operations. Saved filters are retained but not applied."]);
 });
 
 test("applyModelFilters is a no-op when no filters are configured", async (t) => {

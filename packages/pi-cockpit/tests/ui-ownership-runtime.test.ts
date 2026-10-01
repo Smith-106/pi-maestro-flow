@@ -10,7 +10,8 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as sdk from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -56,7 +57,7 @@ interface Host {
 	footers: FooterWrite[];
 	emitted: string[];
 	ownershipBoundaries: OwnershipBoundary[];
-	cleanup(): void;
+	cleanup(): Promise<void>;
 }
 
 /** A cockpit config that makes Cockpit the single owner of every surface. */
@@ -87,7 +88,11 @@ async function bootHost(order: readonly string[], teammateRuntimeOptions: Record
 	const agentDir = writeCockpitConfig();
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousRuntimeV2Read = process.env.PI_RUNTIME_V2_READ;
+	const previousTeammateChild = process.env.PI_TEAMMATE_CHILD;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+	// The fixture represents a root interactive host, even when the test runner
+	// was launched by a teammate process.
+	delete process.env.PI_TEAMMATE_CHILD;
 	// This suite exercises the V1 ownership bus, not broker projection takeover.
 	process.env.PI_RUNTIME_V2_READ = "0";
 
@@ -100,14 +105,29 @@ async function bootHost(order: readonly string[], teammateRuntimeOptions: Record
 	const bus = new Map<string, Set<Handler>>();
 	const lifecycle = new Map<string, Set<Handler>>();
 	const shortcuts = new Map<string, any>();
-	const tools = new Map<string, any>();
+	// Model the public 0.99 host registry rather than Proxy no-op capabilities.
+	// Native Cockpit decoration reads settings and ToolInfo after session binding.
+	const tools = new Map<string, any>([
+		sdk.createReadToolDefinition(process.cwd()), sdk.createBashToolDefinition(process.cwd()),
+		sdk.createEditToolDefinition(process.cwd()), sdk.createWriteToolDefinition(process.cwd()),
+		sdk.createGrepToolDefinition(process.cwd()), sdk.createFindToolDefinition(process.cwd()),
+		sdk.createLsToolDefinition(process.cwd()), sdk.createPowerShellToolDefinition(process.cwd()),
+	].map((tool) => [tool.name, tool]));
+	const sources = new Map([...tools.keys()].map((name) => [name, "builtin"]));
+	let activeTools = ["read", "bash", "edit", "write"];
+	let bound = false;
+	let shutdown = false;
 
 	const piBase: any = {
 		registerFlag() {},
-		getActiveTools: () => [],
-		setActiveTools: () => {},
+		getSettings() { assert.ok(bound, "native settings are post-bind only"); return {}; },
+		getActiveTools: () => [...activeTools],
+		setActiveTools: (names: string[]) => { activeTools = [...names]; },
 		registerTool(tool: any) {
-			if (typeof tool?.name === "string") tools.set(tool.name, tool);
+			if (typeof tool?.name === "string") {
+				tools.set(tool.name, tool);
+				sources.set(tool.name, "extension");
+			}
 			return () => { if (tools.get(tool?.name) === tool) tools.delete(tool.name); };
 		},
 		registerCommand: () => () => {},
@@ -117,7 +137,12 @@ async function bootHost(order: readonly string[], teammateRuntimeOptions: Record
 		sendMessage() {},
 		sendUserMessage() {},
 		appendEntry() {},
-		getAllTools: () => [],
+		getAllTools() {
+			assert.ok(bound, "native ownership metadata is post-bind only");
+			return [...tools.values()].map((tool) => ({
+				...tool, exposure: tool.exposure ?? "direct", sourceInfo: { source: sources.get(tool.name) },
+			}));
+		},
 		getThinkingLevel: () => "off",
 		log() {}, warn() {}, error() {},
 		events: {
@@ -224,23 +249,37 @@ async function bootHost(order: readonly string[], teammateRuntimeOptions: Record
 	}
 
 	const fire = async (name: string): Promise<void> => {
+		if (name === "session_start") { bound = true; shutdown = false; }
+		if (name === "session_shutdown") {
+			if (shutdown) return;
+			shutdown = true;
+		}
 		const pending: Promise<unknown>[] = [];
 		for (const handler of [...(lifecycle.get(name) ?? [])]) {
 			try {
-				const result = handler({ type: name }, ctx);
-				if (result && typeof result.then === "function") pending.push(result);
-			} catch { /* handler-level failures are separate */ }
+				pending.push(Promise.resolve(handler({ type: name }, ctx)));
+			} catch (error) { pending.push(Promise.reject(error)); }
 		}
-		await Promise.allSettled(pending);
+		const results = await Promise.allSettled(pending);
+		const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+		assert.deepEqual(errors, [], `${name} handlers must complete: ${errors.map(String).join("; ")}`);
 	};
 
 	return {
 		pi, ctx, fire, shortcuts, tools, widgets, footers, emitted, ownershipBoundaries,
-		cleanup() {
-			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			if (previousRuntimeV2Read === undefined) delete process.env.PI_RUNTIME_V2_READ;
-			else process.env.PI_RUNTIME_V2_READ = previousRuntimeV2Read;
+		async cleanup() {
+			// Assertion failures must not bypass the real extensions' shutdown:
+			// Flow timers and a running Teammate child otherwise keep Node alive.
+			try { await fire("session_shutdown"); }
+			finally {
+				if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+				if (previousRuntimeV2Read === undefined) delete process.env.PI_RUNTIME_V2_READ;
+				else process.env.PI_RUNTIME_V2_READ = previousRuntimeV2Read;
+				if (previousTeammateChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+				else process.env.PI_TEAMMATE_CHILD = previousTeammateChild;
+				rmSync(agentDir, { recursive: true, force: true });
+			}
 		},
 	};
 }
@@ -365,7 +404,7 @@ for (const order of orders) {
 				assert.equal(writes.at(-1)?.mounted, false, `${key} is cleared on shutdown`);
 			}
 		} finally {
-			host.cleanup();
+			await host.cleanup();
 		}
 	});
 }
@@ -382,9 +421,7 @@ test("teammate-first early query converges through Cockpit factory release and s
 		await settle();
 		assert.equal([...host.ownershipBoundaries].reverse().find((boundary) => boundary.agents === true)?.after.includes("teammate-agents"), false);
 	} finally {
-		await host.fire("session_shutdown");
-		await settle();
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
@@ -409,9 +446,7 @@ test("a Teammate instance loaded after session_start still receives ownership", 
 			"a late-loaded Teammate converges without waiting for another session_start",
 		);
 	} finally {
-		await host.fire("session_shutdown");
-		await settle();
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
@@ -438,8 +473,7 @@ test("Cockpit mount failure rolls back partial UI and releases native ownership"
 		await host.shortcuts.get("alt+r")?.handler(host.ctx);
 		assert.equal(host.emitted.slice(beforeShortcut).includes("cockpit:open-session-list"), false, "native session-list fallback is no longer suppressed");
 	} finally {
-		await host.fire("session_shutdown");
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
@@ -470,9 +504,7 @@ test("late active-tree mount failure removes Cockpit before releasing native own
 		assert.ok(release, "failed late mount releases native ownership");
 		assert.equal(release.after.some((key) => key.startsWith("cockpit-")), false, "Cockpit surfaces are gone before release");
 	} finally {
-		await host.fire("session_shutdown");
-		await settle();
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
@@ -504,9 +536,7 @@ test("duplicate and malformed ownership snapshots do not release or rewrite Team
 			"malformed agents value cannot release the existing Cockpit claim",
 		);
 	} finally {
-		await host.fire("session_shutdown");
-		await settle();
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
@@ -546,7 +576,50 @@ test("Cockpit release hands a real running agent back to the native roster at th
 			"shutdown fence prevents any delayed second native remount",
 		);
 	} finally {
-		host.cleanup();
+		await host.cleanup();
+	}
+});
+
+test("failed assertions still shut down Flow and a real running Teammate child", async () => {
+	const child = createRunningChild();
+	const host = await bootHost(["cockpit", "teammate", "flow"], {
+		spawnChildProcess: () => child,
+	});
+	await assert.rejects(async () => {
+		try {
+			await host.fire("session_start");
+			const result = await host.tools.get("teammate").execute(
+				"ownership-cleanup-agent",
+				{ tasks: [{ agent: "general", prompt: "Stay active for cleanup" }], background: true },
+				new AbortController().signal,
+				undefined,
+				host.ctx,
+			);
+			assert.equal(result.isError, false, `dispatch starts: ${JSON.stringify(result.content)}`);
+			assert.equal(child.exitCode, null, "child is genuinely running before failure");
+			assert.fail("injected ownership assertion failure");
+		} finally {
+			await host.cleanup();
+		}
+	}, /injected ownership assertion failure/);
+	assert.equal(child.exitCode, 0, "cleanup stops the running child even after assertion failure");
+	for (const key of ["cockpit-agents", "cockpit-stack", "cockpit-session-bar"]) {
+		assert.equal(host.widgets.filter((write) => write.key === key).at(-1)?.mounted, false, `${key} is cleared`);
+	}
+});
+
+test("rejected shutdown still restores the fixture environment and removes temporary config", async () => {
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const host = await bootHost(["cockpit", "teammate"]);
+	const agentDir = process.env.PI_CODING_AGENT_DIR!;
+	try {
+		await host.fire("session_start");
+		host.pi.on("session_shutdown", () => { throw new Error("injected shutdown failure"); });
+		await assert.rejects(host.cleanup(), /injected shutdown failure/);
+		assert.equal(process.env.PI_CODING_AGENT_DIR, previousAgentDir);
+		assert.equal(existsSync(agentDir), false);
+	} finally {
+		await host.cleanup();
 	}
 });
 
@@ -564,11 +637,11 @@ test("shutdown cancels a queued native roster update and prevents delayed remoun
 			"no timer callback remounts the native roster after shutdown begins",
 		);
 	} finally {
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
-test("active agents render once in the Rail and fixed below-editor tree, then collapse at zero active", async () => {
+test("active agents render once in the Rail and content-sized below-editor tree, then collapse at zero active", async () => {
 	const host = await bootHost(["cockpit", "flow"]);
 	try {
 		await host.fire("session_start");
@@ -587,7 +660,8 @@ test("active agents render once in the Rail and fixed below-editor tree, then co
 		assert.equal(countLines(rail, "dup-two"), 1, `dup-two renders once in Rail: ${JSON.stringify(rail)}`);
 
 		const tree = renderSurface(host, "cockpit-agents");
-		assert.equal(tree.length, 6, "40-row terminal receives the stable 15% tree budget");
+		assert.equal(tree.length, 2, "two active agents use two rows without padding the editor region");
+		assert.ok(tree.length <= 6, "the active tree stays within the 40-row terminal's 15% budget");
 		assert.equal(countLines(tree, "dup-one"), 1, `dup-one renders once in tree: ${JSON.stringify(tree)}`);
 		assert.equal(countLines(tree, "dup-two"), 1, `dup-two renders once in tree: ${JSON.stringify(tree)}`);
 		const treeWrites = host.widgets.filter((write) => write.key === "cockpit-agents" && write.mounted);
@@ -600,9 +674,7 @@ test("active agents render once in the Rail and fixed below-editor tree, then co
 		const writes = host.widgets.filter((write) => write.key === "cockpit-agents");
 		assert.equal(writes.at(-1)?.mounted, false, "the active-to-zero transition removes the tree");
 	} finally {
-		await host.fire("session_shutdown");
-		await settle();
-		host.cleanup();
+		await host.cleanup();
 	}
 });
 
@@ -620,8 +692,6 @@ test("Cockpit is the only footer owner while Flow is loaded", async () => {
 		assert.equal(host.footers.at(-1)?.active, true, "Cockpit ends up owning the footer");
 		assert.ok(host.footers.at(-1)?.caller.startsWith("pi-cockpit/"), "the surviving footer belongs to Cockpit");
 	} finally {
-		await host.fire("session_shutdown");
-		await settle();
-		host.cleanup();
+		await host.cleanup();
 	}
 });

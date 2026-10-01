@@ -1,7 +1,7 @@
 /**
  * TUI rendering for the teammate tool.
  *
- * renderCall: intentionally empty; result rendering owns the lifecycle surface
+ * renderCall: running placeholder until the result owns the lifecycle surface
  * renderResult: real-time streaming for foreground, compact status for completed
  */
 
@@ -250,15 +250,31 @@ function frameExpertResult(
   };
 }
 
-// The result component owns ordinary teammate presentation for every lifecycle
-// phase. Expert mode adds a persistent call header so the Leader strategy is
-// distinguishable from a direct single-agent dispatch.
+type TeammateRenderContext = {
+  expanded?: boolean;
+  isPartial?: boolean;
+  isError?: boolean;
+  state?: Record<string, unknown>;
+};
+
+// Pi renders call + result together, and invokes renderCall first. The shared
+// per-execution state lets the call Component yield to even a partial result
+// without leaving the pre-result execution blank or duplicating progress rows.
+// Expert mode deliberately keeps its distinct strategy header.
 export function renderTeammateCall(
   args: Record<string, unknown>,
   theme: Theme,
-  _context?: { expanded?: boolean; isPartial?: boolean },
+  context?: TeammateRenderContext,
 ): Component {
-  if (!isExpertRenderArgs(args)) return dynamicComponent(() => []);
+  if (!isExpertRenderArgs(args)) {
+    return dynamicComponent((width) => {
+      if (context?.isPartial === false || context?.state?.teammateResultVisible === true || width <= 1) return [];
+      const task = Array.isArray(args.tasks) ? recordOf(args.tasks[0]) : args;
+      const label = renderSafeText(task?.name ?? task?.agent);
+      const glyph = theme.fg("warning", quietStatusMark("running"));
+      return [truncateToWidth(qLine(theme, glyph, "teammate", label ? `@${label}` : ""), liveRenderWidth(width), "…")];
+    });
+  }
   const objective = expertObjective(args);
   return dynamicComponent((width) => {
     const header = `${theme.fg("accent", "◆")} ${theme.bold("EXPERT")}`;
@@ -649,7 +665,12 @@ export function renderTeammateResult(
   options: { expanded: boolean },
   theme: Theme,
   args?: Record<string, unknown>,
+  context?: TeammateRenderContext,
 ): Component {
+  if (context?.state) context.state.teammateResultVisible = true;
+  // Native Pi deliberately passes only content/details in the result argument;
+  // canonical errors arrive separately in ToolRenderContext.
+  if (context?.isError) result = { ...result, isError: true } as AgentToolResult<Details>;
   const details = result.details;
   const expert = isExpertRenderArgs(args);
   let body: Component;

@@ -86,6 +86,7 @@ interface ToolLike {
 		result: AgentToolResult<BashBgDetails>,
 		options: { expanded: boolean },
 		theme: Theme,
+		ctx?: { isError: boolean; toolCallId: string; toolName: string; args: Record<string, unknown>; state: Record<string, unknown> },
 	): { render(width: number): string[] };
 }
 
@@ -161,7 +162,13 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	return {
 		tool: {
 			execute: (id, params, signal) => tool.execute(id, params, signal, undefined, context),
-			renderResult: (result, renderOptions, theme) => tool.renderResult(result, renderOptions, theme),
+			renderResult: (result, renderOptions, theme) => tool.renderResult(result, renderOptions, theme, {
+				isError: (result as { isError?: boolean }).isError === true,
+				toolCallId: "bash-bg-render",
+				toolName: "bash_bg",
+				args: {},
+				state: {},
+			}),
 		},
 		emit,
 		snapshots,

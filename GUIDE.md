@@ -31,7 +31,7 @@
 # 1. Node.js ≥ 22.19.0
 node --version
 
-# 2. Pi Coding Agent globally
+# 2. Pi Coding Agent globally (0.99.0 validation baseline; legacy 0.87–0.98 is version-gated)
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 3. Maestro CLI globally (for knowledge features)
@@ -46,7 +46,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 
 # Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
@@ -807,7 +807,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 pi list
 
 # ─── Knowledge ───

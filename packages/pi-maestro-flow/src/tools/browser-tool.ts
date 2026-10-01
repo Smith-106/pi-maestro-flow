@@ -283,7 +283,7 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "?");
       const url = ctx.args.url ? ` ${String(ctx.args.url).slice(0, 60)}` : "";
       return toolResultLine(theme, {

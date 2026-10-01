@@ -19,17 +19,31 @@ icon: "🏗️"
 
 > 简言之：**flow 负责「编排与知识」，teammate 负责「并行执行」，cockpit 负责「看见」**。
 
+## Pi 原生宿主归属（v0.31.3）
+
+验证基线为 **Pi 0.99.0**；0.87–0.98 legacy 兼容严格版本门控，optional host peer `*` 范围不变。Pi 0.99+ 管理工具 loadout/`tool_search`、模型与 classifier runtime、MCP 和键盘能力。Maestro 只装饰自己注册的 namespace/exposure，尊重 CLI allowlist/禁用设置；缺少原生 API 不会启动第二套 legacy runtime。
+
+MCP 使用原生 `/mcp` 与 `/mcp login <name>`；旧配置迁移前先禁用 `builtin:mcp`，用 `/maestro-mcp-migrate` 预览并批准，再恢复原生管理器。不能无损映射的配置会阻止迁移，而非静默丢弃。
+
+Teammate 并行完成使用按任务 reservation 与父 dispatch 分组，处理早到 publication、foreground/detached 及 nested 交付；durable coordinator 可用时才提供持久交付，local non-durable 路径仍明确存在。Desktop target identity 含 sessionId、endpointId、processGeneration 与 normalizedCwd，并按 session/workspace 验证，不以窗口标签推测目标。
+
 ## 核心概念
 
 ### 工具面（Tool Surface）
 
-- **19 个常驻工具 + 5 个 Plan 动态工具**
-  - 调度：`teammate` · `teammate-send/list/watch/wait`
+- **工具面由宿主版本与 active/discovery 选择决定**
+  - 调度：`teammate` · `teammate-send/list` · `observe`（watch/wait 为 opt-in legacy observation tools）
   - 编排：`maestro` · `goal` · `todo` · `run-control` · `plan-*`
-  - 连接：`mcp` · `lsp` · `browser` · `smart_search` · `search`/`fffind`
-  - 其他：`bash_bg` · `ask-user-question` · `search_tool_bm25`
+  - 连接：原生 `/mcp`（legacy 才注册 Maestro `mcp`）· `lsp` · `browser` · `smart_search` · `search`/`fffind`
+  - 其他：`bash_bg` · `ask-user-question` · `open-code-review`；原生 `tool_search`（legacy 才用 `search_tool_bm25`）
 
 Plan 模式下额外激活 `plan-enter` / `plan-update` / `plan-review` / `plan-confirm` / `plan-exit` / `plan-status` 等只读规划工具。
+
+### 搜索与评审
+
+`search` 替代 `ffgrep`，支持 plain/regex/fuzzy 与 lines/files/count。限定 path 的搜索使用共享 FFF index；工作区根目录 plain/regex 搜索及索引不可用时走有界 rg。fuzzy 必须有索引；结果注明 engine、限制或超时时应缩小 path/glob，不能把部分结果当完整扫描。
+
+`open-code-review` 依赖单独安装的 `ocr` CLI（包内 `optional/OCR-SETUP.md`）：`preview`/`rules` 无 OCR-side LLM，解析待审文件/规则后由宿主 agent 评审；`review` 由 OCR 管理评审、注入 runtime 模型配置，`health` 检查 CLI/模型连通性。模型配置入口为 `/api-manager open-code-review`；preview 不是已经完成的 code review。
 
 ### 执行模型
 

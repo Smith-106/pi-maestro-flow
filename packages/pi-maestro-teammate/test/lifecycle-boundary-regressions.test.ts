@@ -160,6 +160,14 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   };
 }
 
+// Real hosts run every registered handler, in registration order. Classifier
+// ownership and teammate lifecycle hooks deliberately share session events.
+async function runHooks(hooks: Map<string, Array<(...args: any[]) => unknown>>, name: string, ...args: any[]) {
+  const handlers = hooks.get(name);
+  assert.ok(handlers?.length, `Missing ${name} hooks`);
+  for (const handler of handlers) await handler(...args);
+}
+
 function context(): Record<string, unknown> {
   return {
     cwd: process.cwd(),
@@ -491,8 +499,8 @@ test("Desktop target identity follows the current workspace through compact and 
 test("immediate reload waits for workspace peer startup before shutdown cleanup", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-peer-reload-"));
   const { hooks } = createHarness();
-  const sessionStart = hooks.get("session_start")?.[0];
-  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  const sessionStart = runHooks.bind(undefined, hooks, "session_start");
+  const sessionShutdown = runHooks.bind(undefined, hooks, "session_shutdown");
   assert.ok(sessionStart);
   assert.ok(sessionShutdown);
   const errors: unknown[][] = [];
@@ -512,7 +520,7 @@ test("immediate reload waits for workspace peer startup before shutdown cleanup"
         getSessionName: () => "peer-reload",
       },
     };
-    sessionStart({ reason: "new" }, ctx);
+    await sessionStart({ reason: "new" }, ctx);
     await sessionShutdown({ reason: "reload" }, ctx);
 
     assert.equal(
@@ -533,8 +541,8 @@ test("immediate reload waits for workspace peer startup before shutdown cleanup"
 test("root session publishes bounded assistant, tool, and lifecycle progress", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-root-progress-"));
   const { hooks } = createHarness();
-  const sessionStart = hooks.get("session_start")?.[0];
-  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  const sessionStart = runHooks.bind(undefined, hooks, "session_start");
+  const sessionShutdown = runHooks.bind(undefined, hooks, "session_shutdown");
   assert.ok(sessionStart);
   assert.ok(sessionShutdown);
   const ctx = {
@@ -552,7 +560,7 @@ test("root session publishes bounded assistant, tool, and lifecycle progress", a
   let started = false;
 
   try {
-    sessionStart({ reason: "new" }, ctx);
+    await sessionStart({ reason: "new" }, ctx);
     started = true;
     const ownersDir = createWorkspacePeerPaths(project).ownersDir;
     let ownerFile: string | undefined;
@@ -565,44 +573,44 @@ test("root session publishes bounded assistant, tool, and lifecycle progress", a
     });
     assert.ok(ownerFile);
 
-    hooks.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
-    hooks.get("turn_start")?.[0]?.({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }, ctx);
-    hooks.get("message_update")?.[0]?.({
+    await runHooks(hooks, "agent_start", { type: "agent_start" }, ctx);
+    await runHooks(hooks, "turn_start", { type: "turn_start", turnIndex: 0, timestamp: Date.now() }, ctx);
+    await runHooks(hooks, "message_update", {
       type: "message_update",
       message: { role: "assistant", content: [] },
       assistantMessageEvent: { type: "thinking_delta", delta: "private thinking" },
     }, ctx);
-    hooks.get("message_update")?.[0]?.({
+    await runHooks(hooks, "message_update", {
       type: "message_update",
       message: { role: "assistant", content: [] },
       assistantMessageEvent: { type: "text_start" },
     }, ctx);
-    hooks.get("message_update")?.[0]?.({
+    await runHooks(hooks, "message_update", {
       type: "message_update",
       message: { role: "assistant", content: [] },
       assistantMessageEvent: { type: "text_delta", delta: "working on the peer snapshot" },
     }, ctx);
-    hooks.get("message_update")?.[0]?.({
+    await runHooks(hooks, "message_update", {
       type: "message_update",
       message: { role: "assistant", content: [] },
       assistantMessageEvent: { type: "text_delta", delta: " update" },
     }, ctx);
-    hooks.get("tool_execution_start")?.[0]?.({
+    await runHooks(hooks, "tool_execution_start", {
       type: "tool_execution_start",
       toolCallId: "tool-progress-1",
       toolName: "read",
       args: { secret: "raw args must not publish" },
     }, ctx);
-    hooks.get("tool_execution_end")?.[0]?.({
+    await runHooks(hooks, "tool_execution_end", {
       type: "tool_execution_end",
       toolCallId: "tool-progress-1",
       toolName: "read",
       isError: false,
       result: { content: "raw result must not publish" },
     }, ctx);
-    hooks.get("turn_end")?.[0]?.({ type: "turn_end", turnIndex: 0, message: {}, toolResults: [] }, ctx);
-    hooks.get("agent_end")?.[0]?.({ type: "agent_end", messages: [] }, ctx);
-    hooks.get("agent_settled")?.[0]?.({ type: "agent_settled" }, ctx);
+    await runHooks(hooks, "turn_end", { type: "turn_end", turnIndex: 0, message: {}, toolResults: [] }, ctx);
+    await runHooks(hooks, "agent_end", { type: "agent_end", messages: [] }, ctx);
+    await runHooks(hooks, "agent_settled", { type: "agent_settled" }, ctx);
 
     let snapshot: Record<string, any> | undefined;
     await waitFor(() => {
@@ -637,7 +645,7 @@ test("root session publishes bounded assistant, tool, and lifecycle progress", a
 
     const sequenceBeforeRollover = snapshot?.mainProgress.sequence as number;
     for (let index = 0; index < 20; index += 1) {
-      hooks.get("turn_start")?.[0]?.({ type: "turn_start", turnIndex: index + 1, timestamp: Date.now() }, ctx);
+      await runHooks(hooks, "turn_start", { type: "turn_start", turnIndex: index + 1, timestamp: Date.now() }, ctx);
     }
     await waitFor(() => {
       try {
@@ -659,8 +667,8 @@ test("root session publishes bounded assistant, tool, and lifecycle progress", a
 test("workspace observation wait honors result-ready, completion, timeout, abort, and root fences", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-workspace-observe-"));
   const { hooks, commands } = createHarness();
-  const sessionStart = hooks.get("session_start")?.[0];
-  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  const sessionStart = runHooks.bind(undefined, hooks, "session_start");
+  const sessionShutdown = runHooks.bind(undefined, hooks, "session_shutdown");
   assert.ok(sessionStart);
   assert.ok(sessionShutdown);
   const now = Date.now();
@@ -710,7 +718,7 @@ test("workspace observation wait honors result-ready, completion, timeout, abort
 
   let rootShutdown = false;
   try {
-    sessionStart({ reason: "new" }, ctx);
+    await sessionStart({ reason: "new" }, ctx);
     const monitorCommand = commands.get("monitor");
     assert.ok(monitorCommand);
     await monitorCommand.handler("", ctx);
@@ -1085,7 +1093,7 @@ test("non-Monitor observe rejects aliased providers before provider execution", 
       context(),
     );
     assert.equal(result.isError, true);
-    assert.match(result.content[0]?.text ?? "", /only local teammate and bash_bg targets/);
+    assert.match(result.content[0]?.text ?? "", /Invalid observe arguments at \/targets\/0\/kind:.*allowed values/);
     assert.equal(calls, 0);
   } finally {
     unregister();
@@ -1287,7 +1295,7 @@ test("background completion keeps the cwd captured at dispatch admission", async
     });
     return child;
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-  const { teammate, emitted } = createHarness({ spawnChildProcess });
+  const { teammate, emitted, messages, hooks } = createHarness({ spawnChildProcess });
   const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
   ] as TeammateState;
@@ -1322,9 +1330,15 @@ test("background completion keeps the cwd captured at dispatch admission", async
   stdout!.write(`${JSON.stringify({ type: "agent_end", message: { role: "assistant", content: [] } })}\n`);
   await delay(60);
 
-  const completion = emitted.find(({ event }) => event === "teammate:complete");
-  const result = (completion?.payload.structuredResults as Array<{ originCwd: string }> | undefined)?.[0];
+  // Canonical capture survives a workspace switch; live completion notices
+  // are fenced out rather than being sent into the replacement workspace.
+  const publication = emitted.find(({ event }) => event === "teammate:result-published");
+  const result = publication?.payload.result as { originCwd: string; structuredOutput: unknown } | undefined;
   assert.equal(result?.originCwd, origin);
+  assert.deepEqual(result?.structuredOutput, value);
+  assert.equal(emitted.some(({ event }) => event === "teammate:complete"), false);
+  assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
+  await runHooks(hooks, "session_shutdown");
 });
 
 test("observe full detail returns the structured output of a settled schema success", async () => {
@@ -1355,7 +1369,8 @@ test("observe full detail returns the structured output of a settled schema succ
     waitStatus?: string;
     structuredOutput?: unknown;
   };
-  assert.equal(observation.nativeStatus, "completed");
+  assert.equal(observation.nativeStatus, "sleeping");
+  assert.equal(observation.waitStatus, "completed");
   assert.equal(observation.terminalStatus, "completed");
   assert.deepEqual(observation.structuredOutput, { verdict: "ok" });
   const output = (snap.details.output as string[]).join("\n");
@@ -1565,63 +1580,94 @@ test("empty warm turn emits lifecycle completion without another model notificat
   );
 });
 
-test("model-originated status is normalized to coordination and queues a steer", async () => {
-  let stdin: PassThrough | undefined;
-  const control: string[] = [];
-  const spawnChildProcess = (() => {
-    const child = new EventEmitter() as ChildProcess;
-    stdin = new PassThrough();
-    stdin.on("data", (chunk) => control.push(String(chunk)));
-    Object.assign(child, {
-      stdin,
-      stdout: new PassThrough(),
-      stderr: new PassThrough(),
-      connected: false,
-      exitCode: null,
-      signalCode: null,
-      pid: undefined,
-      kill() { return true; },
-    });
-    return child;
-  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-  const { teammate, teammateSend } = createHarness({ spawnChildProcess });
-  const ctx = context();
+for (const childPiVersion of ["0.87.0", "0.99.0"]) {
+  test(`model-originated status is rejected; coordination queues a steer (${childPiVersion})`, async () => {
+    let stdin: PassThrough | undefined;
+    const control: string[] = [];
+    const spawnChildProcess = (() => {
+      const child = new EventEmitter() as ChildProcess;
+      stdin = new PassThrough();
+      const stdout = new PassThrough();
+      stdin.on("data", (chunk) => {
+        control.push(String(chunk));
+        if (childPiVersion !== "0.99.0") return;
+        const command = JSON.parse(String(chunk));
+        if (command.type !== "prompt" && command.type !== "steer") return;
+        queueMicrotask(() => stdout.write(`${JSON.stringify({
+          type: "response", id: command.id, command: command.type, success: true,
+          data: { disposition: command.type === "prompt" ? "started" : "queued" },
+        })}\n`));
+      });
+      Object.assign(child, {
+        stdin,
+        stdout,
+        stderr: new PassThrough(),
+        connected: false,
+        exitCode: null,
+        signalCode: null,
+        pid: undefined,
+        kill() { return true; },
+      });
+      return child;
+    }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+    const { teammate, teammateSend, hooks } = createHarness({ spawnChildProcess, childPiVersion });
+    const ctx = context();
 
-  await teammate.execute(
-    "status-context-root",
-    { tasks: [{ agent: "general", name: "status-worker", prompt: "wait" }], background: true },
-    new AbortController().signal,
-    undefined,
-    ctx,
-  );
-  const status = await teammateSend.execute(
-    "status-context",
-    { to: "status-worker", message: "audit ready", kind: "status" },
-    new AbortController().signal,
-    undefined,
-    ctx,
-  );
-  assert.equal(status.isError, false);
-  assert.match(status.content[0]?.text ?? "", /queued for turn-boundary injection.*does not interrupt/i);
-  assert.doesNotMatch(status.content[0]?.text ?? "", /stored as context/i);
-  assert.match(control.join(""), /"type":"steer"/);
-  assert.doesNotMatch(control.join(""), /"type":"abort"/);
+    try {
+      await teammate.execute(
+        "status-context-root",
+        { tasks: [{ agent: "general", name: "status-worker", prompt: "wait" }], background: true },
+        new AbortController().signal,
+        undefined,
+        ctx,
+      );
+      const controlCountBeforeStatus = control.length;
+      const status = await teammateSend.execute(
+        "status-context",
+        { to: "status-worker", message: "audit ready", kind: "status" },
+        new AbortController().signal,
+        undefined,
+        ctx,
+      );
+      assert.equal(status.isError, true);
+      assert.match(status.content[0]?.text ?? "", /Invalid teammate-send arguments at \/kind:.*allowed values/);
+      assert.equal(control.length, controlCountBeforeStatus, "invalid model status never reaches the child");
+      const coordination = await teammateSend.execute(
+        "coordination-context",
+        { to: "status-worker", message: "audit ready", kind: "coordination" },
+        new AbortController().signal,
+        undefined,
+        ctx,
+      );
+      assert.equal(coordination.isError, false);
+      if (childPiVersion === "0.99.0") {
+        assert.match(coordination.content[0]?.text ?? "", /queued for turn-boundary injection.*does not interrupt/i);
+      } else {
+        assert.match(coordination.content[0]?.text ?? "", /legacy transport \(acceptance\/consumption unconfirmed\)/i);
+      }
+      assert.doesNotMatch(coordination.content[0]?.text ?? "", /stored as context/i);
+      assert.match(control.join(""), /"type":"steer"/);
+      assert.doesNotMatch(control.join(""), /"type":"abort"/);
 
-  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
-    Symbol.for("pi-maestro-teammate.root-registry")
-  ] as TeammateState;
-  const correlationId = state.namedAgents.get("status-worker");
-  assert.ok(correlationId);
-  assert.equal(state.activeRuns.get(correlationId)?.deferredContextMessages, undefined);
+      const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+        Symbol.for("pi-maestro-teammate.root-registry")
+      ] as TeammateState;
+      const correlationId = state.namedAgents.get("status-worker");
+      assert.ok(correlationId);
+      assert.equal(state.activeRuns.get(correlationId)?.deferredContextMessages, undefined);
 
-  await teammateSend.execute(
-    "status-context-abort",
-    { to: "status-worker", mode: "abort" },
-    new AbortController().signal,
-    undefined,
-    ctx,
-  );
-});
+      await teammateSend.execute(
+        "status-context-abort",
+        { to: "status-worker", mode: "abort" },
+        new AbortController().signal,
+        undefined,
+        ctx,
+      );
+    } finally {
+      await runHooks(hooks, "session_shutdown");
+    }
+  });
+}
 
 test("deferred status context is bounded and reserved atomically", () => {
   const agent = { deferredContextMessages: undefined } as unknown as ActiveAgent;
@@ -2477,7 +2523,7 @@ test("result-ready survives a throttled settling update until a new turn or term
   options!.onProgress?.({ ...base, phase: "result-ready", resultReadyAt: readyAt });
   options!.onProgress?.({ ...base, phase: "settling", resultReadyAt: undefined });
   assert.equal(agent.resultReadyAt, readyAt);
-  await hooks.get("session_shutdown")?.[0]?.();
+  await runHooks(hooks, "session_shutdown");
 });
 
 test("stale child requests cannot admit work after the parent session generation changes", async () => {
@@ -2550,7 +2596,7 @@ test("stale child requests cannot admit work after the parent session generation
     id: "late-ui",
     cancelled: true,
   });
-  await hooks.get("session_shutdown")?.[0]?.();
+  await runHooks(hooks, "session_shutdown");
 });
 
 test("session shutdown fences terminal publication after an already-notified root result", async () => {
@@ -2587,7 +2633,7 @@ test("session shutdown fences terminal publication after an already-notified roo
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
   assert.equal(messages.filter((message) => message.customType === "teammate-complete").length, 1);
 
-  const shutdown = hooks.get("session_shutdown")?.[0];
+  const shutdown = runHooks.bind(undefined, hooks, "session_shutdown");
   assert.ok(shutdown);
   await shutdown();
   state.currentSessionId = "session-B";
@@ -2646,7 +2692,7 @@ test("session shutdown fences delayed nested completion from the replacement ses
   await delay(30);
   assert.match(String((replies[0].result as { content: Array<{ text: string }> }).content[0].text), /running in background/);
 
-  const shutdown = hooks.get("session_shutdown")?.[0];
+  const shutdown = runHooks.bind(undefined, hooks, "session_shutdown");
   assert.ok(shutdown);
   await shutdown();
   state.currentSessionId = "session-B";
@@ -3063,11 +3109,11 @@ test("workspace delivery paths retain the originating root session fence", () =>
   assert.ok(shutdown.indexOf("state.currentSessionId = null") < shutdown.indexOf("await "));
 });
 
-test("model status addressed to @root is normalized and starts a root turn", async () => {
+test("model status addressed to @root is rejected; coordination starts a root turn", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-root-status-"));
   const { teammateSend, messages, messageOptions, hooks } = createHarness();
-  const sessionStart = hooks.get("session_start")?.[0];
-  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  const sessionStart = runHooks.bind(undefined, hooks, "session_start");
+  const sessionShutdown = runHooks.bind(undefined, hooks, "session_shutdown");
   assert.ok(sessionStart);
   assert.ok(sessionShutdown);
   const ctx = {
@@ -3092,8 +3138,18 @@ test("model status addressed to @root is normalized and starts a root turn", asy
       undefined,
       ctx,
     );
-    assert.equal(result.isError, false);
-    assert.match(result.content[0]?.text ?? "", /kind coordination/i);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /Invalid teammate-send arguments at \/kind:.*allowed values/);
+    assert.equal(messages.length, 0, "invalid model status cannot start a root turn");
+    const coordination = await teammateSend.execute(
+      "root-coordination",
+      { to: "@root", message: "audit ready", kind: "coordination" },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    assert.equal(coordination.isError, false);
+    assert.match(coordination.content[0]?.text ?? "", /kind coordination/i);
     const index = messages.findIndex((message) => String(message.content).includes("audit ready"));
     assert.notEqual(index, -1);
     assert.equal(messageOptions[index]?.triggerTurn, true);
@@ -3126,8 +3182,8 @@ test("observe status and diagnose use the current window broker read model", asy
     });
     await server.listen();
     const { hooks, observeTool, emitted } = createHarness();
-    const sessionStart = hooks.get("session_start")?.[0];
-    sessionShutdown = hooks.get("session_shutdown")?.[0];
+    const sessionStart = runHooks.bind(undefined, hooks, "session_start");
+    sessionShutdown = runHooks.bind(undefined, hooks, "session_shutdown");
     assert.ok(sessionStart);
     assert.ok(sessionShutdown);
     const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[

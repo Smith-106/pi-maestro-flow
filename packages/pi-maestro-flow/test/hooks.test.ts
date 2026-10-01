@@ -209,7 +209,10 @@ test("Maestro Hook installer defaults to standard and refuses malformed config",
     const missing = await store.load();
     assert.deepEqual(missing.suggestedNames, hooksForPreset("standard"));
     assert.equal(missing.installedPreset, "none");
-    assert.equal(maestroHookDefinitions().filter((definition) => definition.permissionAdvisory).length, 3);
+    assert.deepEqual(
+      maestroHookDefinitions().filter((definition) => definition.permissionAdvisory).map((definition) => definition.name),
+      ["preflight-guard", "spec-validator", "knowledge-guard", "workflow-guard"],
+    );
 
     await mkdir(dirname(configPath), { recursive: true });
     const malformed = "{ broken installer config\n";

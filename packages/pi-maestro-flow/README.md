@@ -15,9 +15,9 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.17.1` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.31.3` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **v0.17.1 supersedes the withdrawn v0.17.0:** package-relative Skill and agent discovery now works after npm installation, and teammate children isolate explicitly loaded extensions.
+> **v0.31.3 — Native Pi Host & Reliable Tool Lifecycles:** validated against Pi 0.99.0; legacy 0.87–0.98 compatibility stays version-gated. Native Pi owns tool discovery, model/classifier runtime, MCP, and keyboard handling.
 
 | Layer | Package | What you get |
 |-------|---------|--------------|
@@ -52,9 +52,9 @@ The companion plugins are dependencies and **auto-register on postinstall** — 
 | **Todo tool** | 1 | `todo` (create / update / list / get / delete / clear / next / advance) |
 | **Run control** | 1 | `run-control` (`session status`; `run brief/check/next/complete`; `session chain insert/update`) |
 | **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution) |
-| **Intelligence tools** | 5 | `lsp`, `browser`, `search_tool_bm25`, `smart_search`, `source_check` |
-| **Search tools** | 2 | `ffgrep`, `fffind` (FFF-backed fast search) |
-| **Other tools** | 3 | `mcp`, `ask-user-question`, `model-availability` |
+| **Intelligence tools** | host-dependent | `lsp`, `browser`, `smart_search`, `source_check`; native `tool_search` (legacy `search_tool_bm25`) |
+| **Search tools** | 2 | `search`, `fffind` (shared index; bounded rg for plain/regex fallback) |
+| **Other tools** | host-dependent | `ask-user-question`, `model-availability`, `open-code-review`; Pi 0.99+ owns MCP |
 | **Plan tools** | 5 | `plan-enter`, `plan-update`, `plan-review`, `plan-confirm`, `plan-exit` (+ `plan-status`) |
 | **Workflow docs** | 87 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
@@ -63,7 +63,8 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ## Prerequisites
 
-- **Pi coding agent** — the host runtime
+- **Node.js ≥ 22.19.0**
+- **Pi coding agent** — 0.99.0 validation baseline; legacy 0.87–0.98 compatibility is version-gated (optional host peers remain `*`)
 - **Maestro Flow** — the project knowledge system (`maestro search` / `maestro load`) (dependency, auto-installed and auto-registered)
 - **pi-maestro-teammate** — the execution engine for exploration, analysis, planning, development, review, and testing dispatch (dependency, auto-installed and auto-registered)
 - **pi-cockpit** — the status-stack / footer UI (dependency, auto-installed and auto-registered; optional at runtime)
@@ -72,7 +73,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.17.1
+pi install npm:pi-maestro-flow@0.31.3
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -82,10 +83,14 @@ After installation:
 - Maestro dispatch is available through the single `maestro` tool
 - Autonomous Goal state is available through `goal`; use `/goal stop`, `/goal resume`, and `/goal clear` for lifecycle control
 - Adaptive foreground/background shell is available through `bash_bg` (auto-backgrounds on timeout, notifies on completion)
-- LSP navigation/refactoring, named-tab browser control, BM25 tool discovery, smart search, and source verification are available through `lsp`, `browser`, `search_tool_bm25`, `smart_search`, and `source_check`
+- LSP navigation/refactoring, named-tab browser control, smart search, and source verification are available through `lsp`, `browser`, `smart_search`, and `source_check`; Pi 0.99+ owns `tool_search`, while legacy hosts use `search_tool_bm25`
 - Compaction capacity management, API retry settings, and model failover are configured through `/maestro-compaction`, `/api-manager`, and `/model-failover`
 - Vision delegation is active when the primary model is text-only: `describe_image` is auto-activated and routes image analysis to a multimodal model; configure with `/vision`
-- MCP OAuth auto-authentication is managed through `/mcp auth`
+- Pi 0.99+ uses native `/mcp` and `/mcp login <name>`; `/mcp auth` is legacy-only. Disable `builtin:mcp` before previewing and approving migration with `/maestro-mcp-migrate`.
+- `open-code-review` integrates a separately installed `ocr` CLI for preview/rules/review/health; configure its review model via `/api-manager open-code-review` (see `optional/OCR-SETUP.md`).
+- Native Cockpit Quiet mode toggles live without changing execution or activating extra tools; first resumed-history rendering may still be official, and third-party execution-only overrides cannot be identified by the public API.
+- Ask transports race the local TUI with cancellation cleanup; Plan confirm/review exposes an optional transport seam, not a bundled remote client UI.
+- DSH users must install the optional peer `@deepseek-ai/dsh-sdk-client` manually; the development baseline is 0.1.0-rc.6.
 - Session export is available through `/export-session-info`
 - Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall. Flow records the companion sources it manages so upgrades can replace those paths safely; an unowned same-name local registration is retained and logged rather than overwritten.
 - Maestro workflow docs installed at `~/.maestro/workflows/`
@@ -499,15 +504,14 @@ Skills are authored and maintained by the [Maestro Flow](https://github.com/catl
 the bundled `.pi/skills/` directory. In this repository the canonical source set lives under
 the root `.pi/skills`; prepack copies it into `packages/pi-maestro-flow/.pi/skills` for npm,
 while the root `.pi/settings.json` references its local `skills` directory for development. Install the package through
-`pi install npm:pi-maestro-flow@0.17.1` (or register a local package path) and Pi discovers
+`pi install npm:pi-maestro-flow@0.31.3` (or register a local package path) and Pi discovers
 the bundled skills through its standard package resource loader.
 
-The package also publishes its Pi-only `AGENTS.md`. The extension reads that bundled
-file from the installed package and appends it to Pi's system prompt through the
-`before_agent_start` event. This keeps the instructions available after npm installation
-without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
+Project system instructions use `.pi/SYSTEM.md` as their single authority; the
+previous bundled `AGENTS.md` injection is retired. Migrate projects that depended
+on that old injection to `.pi/SYSTEM.md`.
 
-`pi-maestro-flow` pins `maestro-flow@0.5.67` as an associated workflow resource package.
+`pi-maestro-flow` depends on `maestro-flow >=0.5.87` as an associated workflow resource package (a range, not an exact pin).
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

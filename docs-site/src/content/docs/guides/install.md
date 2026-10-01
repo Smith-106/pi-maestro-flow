@@ -5,7 +5,7 @@ icon: "📦"
 
 pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。装一个即得全部三个插件：flow、teammate、cockpit。
 
-> **当前稳定版本 v0.30.0：** Gateway handoff/Skill/Maestro CLI 控制面、渐进式 Todo 读取与 Teammate 生命周期修复（引擎精确 pin `maestro-flow@0.5.86`）。下方安装命令已是最新版本；已安装旧版的用户直接覆盖安装即可升级，不要先运行 `pi remove`。
+> **当前版本 v0.31.3：** Native Pi Host & Reliable Tool Lifecycles — 原生宿主能力、并行完成持久化与可靠工具渲染。引擎范围为 `maestro-flow >=0.5.87`，不是精确 pin。已安装旧版的用户直接覆盖安装即可升级，不要先运行 `pi remove`。
 
 ---
 
@@ -14,7 +14,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 | 组件 | 版本要求 | 说明 |
 |------|---------|------|
 | Node.js | ≥ 22.19.0 | 插件运行时 |
-| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.87.0 | legacy 兼容基线 0.87.0；0.99+ 使用原生能力；核心包由 Pi 提供 |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | 0.99.0 验证基线 | 0.99+ 使用原生能力；0.87–0.98 仅走版本门控 legacy 兼容；optional peer `*` 不变，核心包由 Pi 提供 |
 
 > [Maestro Flow](https://github.com/catlog22/maestro-flow)（知识系统 CLI）作为依赖随插件自动安装，无需单独前置安装。
 
@@ -25,7 +25,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 
 # 3. 验证 Flow、Teammate 和 Cockpit 均已列出
 pi list
@@ -42,6 +42,13 @@ pi list
 ```bash
 pi install npm:pi-maestro-flow@<新版本>   # 升级到指定版本
 ```
+
+## 原生宿主与可选组件
+
+Pi 0.99+ 使用宿主原生工具发现、模型/classifier、MCP 和键盘能力；原生 API 缺失时不会启动第二套 legacy runtime。MCP 用 `/mcp` 与 `/mcp login <name>`；旧配置须先禁用 `builtin:mcp`，再运行 `/maestro-mcp-migrate` 预览并批准迁移，完成后恢复原生管理器。
+
+- **DSH**：SDK 为 optional peer，仅使用 DSH 时需手动安装 `@deepseek-ai/dsh-sdk-client`（开发验证基线 `0.1.0-rc.6`）。普通 Pi 后端无需安装。
+- **OpenCodeReview**：`open-code-review` 需要单独安装 `ocr` CLI，安装指引见包内 `optional/OCR-SETUP.md`；模型配置入口为 `/api-manager open-code-review`。
 
 ## 插件注册的工具总览
 
@@ -84,11 +91,11 @@ pi list                # 三个插件均已列出
 ```bash
 # 方式 A：升级本地覆盖到最新
 cd /mnt/c/Users/<用户名>          # Windows: cd C:\Users\<用户名>
-npm install pi-maestro-teammate@2.6.2 pi-cockpit@0.23.0
+npm install pi-maestro-teammate@2.7.2 pi-cockpit@0.24.1
 
 # 方式 B：删除本地覆盖，交给 flow 统一管理
 rm -rf node_modules/pi-maestro-teammate node_modules/pi-cockpit
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 ```
 
 升级的 companion 包与核心版本不匹配时同样会导致该崩溃（旧版扩展分离调用核心 `refresh()` 方法，`this` 绑定丢失）。确保 teammate ≥ 1.7.1 或直接使用最新版。

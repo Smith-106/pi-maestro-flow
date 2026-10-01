@@ -82,8 +82,11 @@ test("session replacement keeps the canonical registry published for the followi
     registerTeammateExtension(api);
     const registry = getSessionHostRegistry(globals);
     assert.ok(registry);
-    const shutdown = handlers.get("session_shutdown")?.[0];
-    assert.ok(shutdown);
+    const shutdownHandlers = handlers.get("session_shutdown");
+    assert.equal(shutdownHandlers?.length, 2, "classifier and session registry own separate shutdown hooks");
+    const shutdown = async (event: unknown) => {
+      for (const handler of shutdownHandlers!) await handler(event);
+    };
     await shutdown({ reason: "resume" });
     assert.equal(getSessionHostRegistry(globals), registry);
     assert.deepEqual(registry.listEndpoints(), []);

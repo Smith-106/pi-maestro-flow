@@ -503,14 +503,10 @@ export default function (pi: ExtensionAPI): void {
 	const ambientSurfaces = new AmbientSurfaceCache();
 	let quietToolsRegistered = false;
 
-	// Register quiet tools at extension load time, not just in session_start.
-	// During /resume, pi renders history BEFORE emitting session_start
-	// (rebindCurrentSession({ renderBeforeBind: true })), so tools registered
-	// only in session_start miss the initial render pass and every historical
-	// tool call gets the verbose default renderer.  registerTool() is valid
-	// during extension load (loader.ts: "refresh is only needed post-bind"),
-	// and the Extension.tools map is read by _refreshToolRegistry during
-	// AgentSession construction — before renderInitialMessages runs.
+	// Only legacy wrappers can register before binding. Native registration needs
+	// public getSettings/getAllTools/getActiveTools, unavailable during load.
+	// Initial resumed history may therefore use official renderers on its first
+	// pass; no public pre-history decoration hook exists.
 	ensureConfigExists();
 	config = loadConfig();
 	compactionStylePatch = attachCompactionStyle({
@@ -818,18 +814,15 @@ export default function (pi: ExtensionAPI): void {
 		req();
 	};
 
-	// Quiet mode live toggle: widgets and footer read config on every render so
-	// they switch immediately. Tool rendering is a one-way latch (registerTool
-	// cannot be undone), so turning ON registers immediately but turning OFF
-	// requires /reload to restore the default tool shells.
+	// Native tool decoration reads config live and restores official rendering
+	// when quiet is off. Legacy wrappers still require /reload to restore shells.
 	const applyQuietMode = (ctx: ExtensionContext, was: boolean, now: boolean): void => {
 		// Broadcast so cross-extension surfaces (e.g. pi-maestro-flow's todo tool
 		// rendering) can follow quiet mode regardless of which path toggled it.
 		publishUiOwnership();
 		if (now && !was) {
-			if (!quietToolsRegistered && getPiHostMode(VERSION) === "legacy") {
-				registerQuietTools(pi, () => config);
-				quietToolsRegistered = true;
+			if (!quietToolsRegistered) {
+				quietToolsRegistered = registerQuietTools(pi, () => config, VERSION, ctx.cwd);
 			}
 			try {
 				ctx.ui.setHiddenThinkingLabel(quietThinkingLabel());
@@ -847,7 +840,7 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.setHiddenThinkingLabel(undefined);
 			} catch { /* non-TUI */ }
 			ctx.ui.notify(
-				tuiT(quietToolsRegistered ? "notice.quietOff" : "notice.quietOffReady"),
+				tuiT(quietToolsRegistered && getPiHostMode(VERSION) === "legacy" ? "notice.quietOff" : "notice.quietOffReady"),
 				"info",
 			);
 		}
@@ -2080,14 +2073,10 @@ export default function (pi: ExtensionAPI): void {
 			async () => config.enabled ? targetCatalogue() : buildCockpitTargetCatalogue(endpoints.snapshot(), [], false),
 		));
 		invalidateUsageCache();
-		// Quiet mode: register compact tool renderers and fold thinking blocks.
-		// Tools are normally registered at extension load time (above) so they
-		// are available before pi renders resumed history.  This session_start
-		// path is a fallback for the rare case where the early config load
-		// returned defaults but the persisted config enables quiet mode.
-		if (config.quietMode && !quietToolsRegistered && getPiHostMode(VERSION) === "legacy") {
-			registerQuietTools(pi, () => config);
-			quietToolsRegistered = true;
+		// Native definitions are registered only after settings/ownership binding.
+		// Legacy registration here is a fallback for a changed persisted config.
+		if (config.quietMode && !quietToolsRegistered) {
+			quietToolsRegistered = registerQuietTools(pi, () => config, VERSION, ctx.cwd);
 		}
 		if (config.quietMode) {
 			try {

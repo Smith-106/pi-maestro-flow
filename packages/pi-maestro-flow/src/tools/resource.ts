@@ -592,7 +592,7 @@ Read local files with the built-in read tool — resource is for protocol resour
       const details = result.details as ResourceDetails | undefined;
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, {
         name: "resource",
         ok: !isError,

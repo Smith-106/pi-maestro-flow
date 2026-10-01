@@ -232,7 +232,7 @@ test("streamDevin authenticates, encodes the Cascade request, and streams text",
     const model = devinModel(edge.baseUrl);
     const events = await collectEvents(
       model,
-      { systemPrompt: "you are devin", messages: HISTORY, tools: TOOLS },
+      { messages: [{ role: "system", content: "you are devin", toolsAdded: TOOLS, timestamp: 0 }, ...HISTORY] },
       {
         apiKey: "session-token-abc",
         maxTokens: 4_096,
@@ -323,7 +323,7 @@ test("streamDevin authenticates, encodes the Cascade request, and streams text",
     assert.equal(toolResult?.toolResultIsError, true);
     assert.equal(followUp?.prompt, "please fix it");
     assert.notEqual(user?.messageId, followUp?.messageId);
-    assert.equal(user?.messageId, deterministicUuid(`${request.cascadeId}\0` + "0\0user"));
+    assert.equal(user?.messageId, deterministicUuid(`${request.cascadeId}\0` + "1\0user"));
   } finally {
     await edge.close();
   }

@@ -20,10 +20,14 @@ const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
 const packTimeout = 360_000;
 const installTimeout = 600_000;
-const testTimeout = packTimeout * 6 + installTimeout + 120_000;
+const postinstallTimeout = 30_000;
+const testTimeout = packTimeout * 6 + installTimeout + postinstallTimeout + 120_000;
 
 test("packed child Pi discovers shared Todo without root-only lifecycle tools", { timeout: testTimeout }, () => {
-  const base = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
+  const configuredTempRoot = process.env.TMPDIR || process.env.TMP || process.env.TEMP;
+  const base = configuredTempRoot
+    ? resolve(configuredTempRoot)
+    : process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
   const root = join(base, `pmt-${process.pid}-${Date.now()}`);
   const consumer = join(root, "consumer");
   const workspace = join(root, "workspace");
@@ -107,11 +111,17 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
       `@earendil-works/pi-ai@${piSdkVersion}`,
       `@earendil-works/pi-coding-agent@${piSdkVersion}`,
       `@earendil-works/pi-tui@${piSdkVersion}`,
+      // Match Pi's managed installer; host SDKs above remain explicit inputs.
+      "--legacy-peer-deps",
+      "--ignore-scripts",
       "--no-audit",
       "--no-fund",
     ], consumer, env, installTimeout);
 
     const installedFlow = join(consumer, "node_modules", "pi-maestro-flow");
+    // Optional runtime setup is covered by packed-consumer-e2e; this gate
+    // exercises Flow's real companion registration and child Todo discovery.
+    run(npmCommand, ["run", "postinstall"], installedFlow, env, postinstallTimeout);
     const installedSettingsCore = join(consumer, "node_modules", "pi-maestro-settings-core");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
     const installedCockpit = join(consumer, "node_modules", "pi-cockpit");

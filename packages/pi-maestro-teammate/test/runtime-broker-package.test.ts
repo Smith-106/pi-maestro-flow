@@ -125,6 +125,14 @@ test("packed install runs the runtime broker bin under supported Node without na
     const tarball = path.join(root, packed.filename);
     assert.equal(fs.existsSync(tarball), true);
 
+    const dependencyTarballs = ["pi-maestro-settings-core", "pi-maestro-backends"].map((name) => {
+      const dependency = parsePackResult(npmRun(
+        ["pack", "--json", "--ignore-scripts", "--pack-destination", root],
+        path.resolve(packageRoot, "..", name),
+      ));
+      assert.ok(dependency.filename, `${name} pack did not report a tarball filename`);
+      return path.join(root, dependency.filename);
+    });
     fs.writeFileSync(path.join(consumer, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`);
     const installEnv = {
       ...process.env,
@@ -134,7 +142,7 @@ test("packed install runs the runtime broker bin under supported Node without na
       npm_config_prefix: prefix,
     };
     npmRun(
-      ["install", tarball, "--ignore-scripts", "--no-audit", "--no-fund"],
+      ["install", ...dependencyTarballs, tarball, "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund"],
       consumer,
       installEnv,
       installTimeout,

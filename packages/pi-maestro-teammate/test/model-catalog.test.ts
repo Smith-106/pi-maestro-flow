@@ -141,10 +141,10 @@ test("session start snapshots models and before_agent_start refreshes changed re
 
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
-    assert.equal(handlers.get("session_start")?.length, 1);
+    assert.equal(handlers.get("session_start")?.length, 2, "classifier and teammate catalog bind independently");
     assert.equal(handlers.get("before_agent_start")?.length, 1);
 
-    await handlers.get("session_start")![0]({}, ctx);
+    for (const handler of handlers.get("session_start")!) await handler({}, ctx);
     const first = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
     assert.match(first.systemPrompt, /openai\/gpt-5/);
     assert.doesNotMatch(first.systemPrompt, /<monitor_mode>/);
@@ -177,6 +177,7 @@ test("session start snapshots models and before_agent_start refreshes changed re
     assert.match(second.systemPrompt, /anthropic\/claude-opus/);
     assert.doesNotMatch(second.systemPrompt, /openai\/gpt-5/);
   } finally {
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     if (previousHome === undefined) delete process.env.HOME;

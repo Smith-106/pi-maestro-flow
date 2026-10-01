@@ -211,7 +211,9 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         `@earendil-works/pi-tui@${piSdkVersion}`,
         `@types/cross-spawn@${localFlowPackage.devDependencies["@types/cross-spawn"]}`,
         `@types/node@${piCodingAgentPackage.devDependencies["@types/node"]}`,
-        `typescript@${piCodingAgentPackage.devDependencies.typescript}`,
+        `typescript@${localFlowPackage.devDependencies.typescript}`,
+        // Match Pi's managed installer; host SDKs above remain explicit inputs.
+        "--legacy-peer-deps",
         "--omit=optional",
         "--ignore-scripts",
         "--no-audit",

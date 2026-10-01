@@ -1111,9 +1111,8 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   const workflowMirrorSkill = readFileSync(join(import.meta.dirname, "../../../.pi/skills/maestro/SKILL.md"), "utf8");
   assert.match(workflowMirrorSkill, /Advance only with `todo\(\{ action: "next" \}\)`/);
   assert.deepEqual([...handlers.keys()], [
-    "tool_result",
-    "session_shutdown",
     "session_start",
+    "session_shutdown",
     "before_agent_start",
     "agent_start",
     "tool_call",
@@ -1128,6 +1127,14 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   ]);
   assert.equal(handlers.get("tool_call")?.length, 3, "compaction and search guards precede child permission handling");
   assert.equal(handlers.get("before_agent_start")?.length, 1, "child only uses before_agent_start to sync the gated new-context tool");
+  const runHooks = async (name: string, event: unknown, ctx: ExtensionContext): Promise<unknown> => {
+    let result: unknown;
+    for (const handler of handlers.get(name) ?? []) {
+      const next = await handler(event, ctx);
+      if (next !== undefined) result = next;
+    }
+    return result;
+  };
   let providerAborts = 0;
   const providerCtx = {
     cwd: "D:/workspace",
@@ -1136,24 +1143,24 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     sessionManager: { getBranch: () => [] },
     ui: { setStatus() {}, notify() {} },
   } as ExtensionContext;
-  await handlers.get("context")?.[0]?.({
+  await runHooks("context", {
     type: "context",
     messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
   }, providerCtx);
-  const guardedPayload = await handlers.get("before_provider_request")?.[0]?.({
+  const guardedPayload = await runHooks("before_provider_request", {
     type: "before_provider_request",
     payload: { max_tokens: 1, thinking: { type: "enabled", budget_tokens: 1024 } },
   }, providerCtx);
   assert.equal(guardedPayload, undefined, "child aborts invalid thinking instead of degrading it");
   assert.equal(providerAborts, 1);
-  await handlers.get("session_start")?.[0]?.({ reason: "new" }, providerCtx);
+  await runHooks("session_start", { reason: "new" }, providerCtx);
   assert.equal(active.includes("compact_history"), false, "enabling New Context must not expose the legacy tool name");
-  const structuredOutputDecision = await handlers.get("tool_call")?.[1]?.({
+  const structuredOutputDecision = await runHooks("tool_call", {
     type: "tool_call",
     toolName: "structured_output",
     toolCallId: "verdict-1",
     input: { pass: false },
-  }, {} as ExtensionContext);
+  }, providerCtx);
   assert.equal(structuredOutputDecision, undefined, "child-local verdicts must not wait for parent permission RPC");
 
   const childNotifications: string[] = [];
@@ -1165,7 +1172,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     sessionManager: { getBranch: () => [] },
     ui: { setStatus() {}, notify(message: string) { childNotifications.push(message); } },
   } as ExtensionContext;
-  await handlers.get("context")?.[0]?.({
+  await runHooks("context", {
     type: "context",
     messages: [{
       role: "assistant",
@@ -1179,21 +1186,21 @@ test("teammate child registers interaction, local Bash, and parent-permission su
       isError: false,
     }],
   }, childCtx);
-  await handlers.get("agent_end")?.[0]?.({
+  await runHooks("agent_end", {
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
   }, childCtx);
-  const completedTurnResult = await handlers.get("session_before_compact")?.[0]?.({ reason: "threshold" }, childCtx);
+  const completedTurnResult = await runHooks("session_before_compact", { reason: "threshold" }, childCtx);
   assert.notDeepEqual(completedTurnResult, { cancel: true }, "exhausted output headroom keeps native ownership");
   assert.ok(
     childNotifications.some((message) => /Native threshold compaction retained/.test(message)),
     "the child explains why native ownership was retained",
   );
-  await handlers.get("session_compact")?.[0]?.({}, childCtx);
+  await runHooks("session_compact", {}, childCtx);
 
-  await handlers.get("agent_end")?.[0]?.({
+  await runHooks("agent_end", {
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
   }, childCtx);
-  const fallbackResult = await handlers.get("session_before_compact")?.[0]?.({
+  const fallbackResult = await runHooks("session_before_compact", {
     reason: "threshold",
     customInstructions: NATIVE_FALLBACK_COMPACTION_MARKER,
   }, childCtx);
@@ -1205,7 +1212,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     get model() { throw new Error("model lookup failed"); },
     ui: { setStatus() {}, notify(message: string) { endFailureNotifications.push(message); } },
   } as ExtensionContext;
-  await assert.doesNotReject(() => handlers.get("agent_end")?.[0]?.({ messages: [] }, endFailureCtx) as Promise<unknown>);
+  await assert.doesNotReject(() => runHooks("agent_end", { messages: [] }, endFailureCtx) as Promise<unknown>);
   assert.match(endFailureNotifications[0] ?? "", /Child output-limit compaction failed/);
 
   const settledFailureNotifications: string[] = [];
@@ -1217,7 +1224,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
       notify(message: string) { settledFailureNotifications.push(message); },
     },
   } as ExtensionContext;
-  await assert.doesNotReject(() => handlers.get("agent_settled")?.[0]?.({}, settledFailureCtx) as Promise<unknown>);
+  await assert.doesNotReject(() => runHooks("agent_settled", {}, settledFailureCtx) as Promise<unknown>);
   assert.match(settledFailureNotifications[0] ?? "", /Child settled context compaction failed/);
 });
 

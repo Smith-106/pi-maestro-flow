@@ -22,6 +22,18 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 - **跨会话监督**：Window Bar 中按 `Alt+W` 切换目标窗口的 Monitor 绑定
 - **CLI agent 徽章**：外部 CLI 后端（`cli/*` 模型）的 agent 行渲染专用 `⌘ cli` 徽章
 
+## Native Quiet 与工具生命周期（v0.31.3）
+
+Pi 验证基线为 0.99.0。原生 Quiet 装饰官方内置 ToolDefinition（包括已提供的 PowerShell），保留执行、参数与 active tool 选择；不会因提供渲染器而额外启用 grep/find/ls/PowerShell。紧凑工具行使用 self-owned shell，避免再叠加宿主背景框。
+
+- `/cockpit quiet` 与设置界面的 Quiet 开关在原生宿主上 **live 生效**：关闭时组合官方 renderer/shell，开启时显示紧凑状态行；不改变工具能力。
+- Maestro 工具使用宿主 canonical error context 显示失败；普通 teammate 在结果出现前显示 running，partial/final result 接管后不再重复 call 行。Expert 模式保留策略 header。
+- 原生注册需要 session binding 后的 settings/ownership API，因此 **首次 resumed history pass 可能仍是官方渲染**；没有公共 pre-history decoration hook。
+- 可识别的第三方工具覆盖会跳过；仅改变执行的 `baseToolsOverride` 无法通过 public API 识别，不承诺保留任意此类 override。其他扩展工具的样式仍由各自 owner 控制。
+- Pi 0.87–0.98 使用版本门控 legacy wrappers，关闭 Quiet 后仍可能需要 `/reload` 恢复默认 shell。
+
+Footer 不再显示重复的 bash_bg 状态行；背景任务仍用 `Alt+J` 覆盖层查看。
+
 ## 配置文件
 
 ```json

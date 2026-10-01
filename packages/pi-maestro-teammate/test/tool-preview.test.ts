@@ -10,7 +10,9 @@ test("onToolStart forwards the redacted args preview into progress", () => {
 	const source = fs.readFileSync(new URL("../src/runs/pi-subprocess-attempt.ts", import.meta.url), "utf-8");
 	assert.match(source, /previewToolCallArgs\(event\.args, toolName\)/);
 	assert.match(source, /argsPreview === undefined/);
-	assert.match(source, /\{ name: toolName, status: "running", argsPreview \}\);/);
+	assert.match(source, /progress\.recentTools\.push\(\{ \.\.\.identity, name: toolName, status: "running", \.\.\.\(argsPreview === undefined \? \{\} : \{ argsPreview \}\) \}\);/);
+	assert.match(source, /toolCallId: event\.toolCallId/);
+	assert.match(source, /parentToolCallId: event\.parentToolCallId/);
 });
 
 test("previewToolCallArgs prefers the first informative key in priority order", () => {

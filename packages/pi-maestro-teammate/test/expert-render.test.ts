@@ -204,9 +204,9 @@ test("expert completed and failed results expose accurate terminal headers", () 
 });
 
 test("ordinary teammate rendering remains unframed", () => {
-  assert.deepEqual(
-    renderTeammateCall({ tasks: [{ prompt: "inspect" }] }, theme as never).render(80),
-    [],
+  assert.match(
+    renderTeammateCall({ tasks: [{ prompt: "inspect" }] }, theme as never).render(80).join("\n"),
+    /teammate/,
   );
   const lines = renderTeammateResult({
     content: [{ type: "text", text: "done" }],
@@ -218,7 +218,7 @@ test("ordinary teammate rendering remains unframed", () => {
 test("root and proxy result renderers pass original args to the expert renderer", () => {
   const source = fs.readFileSync(path.resolve("src/extension/index.ts"), "utf8");
   assert.equal(
-    source.match(/renderTeammateResult\(result, options, theme, context\?\.args\)/g)?.length,
+    source.match(/renderTeammateResult\(result, options, theme, context\?\.args, context\)/g)?.length,
     2,
   );
 });

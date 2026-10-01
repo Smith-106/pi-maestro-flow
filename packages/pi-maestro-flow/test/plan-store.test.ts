@@ -7,10 +7,19 @@ import {
   checksumText,
   PlanApprovalError,
   PlanRevisionConflictError,
-  PlanStore,
+  PlanStore as RuntimePlanStore,
   planSessionStorageId,
   workspaceStorageId,
 } from "../src/tools/plan-store.ts";
+
+// Storage/lifecycle tests exercise lock ownership, not the platform process probe.
+// A slow/unavailable Windows CIM subprocess must not consume their test budget;
+// explicit process-identity overrides in lock-reclamation tests still take precedence.
+class PlanStore extends RuntimePlanStore {
+  constructor(cwd: string, options: ConstructorParameters<typeof RuntimePlanStore>[1] = {}) {
+    super(cwd, { getProcessIdentity: (pid) => `test-process:${pid}`, ...options });
+  }
+}
 
 test("workspace storage IDs are readable and collision resistant", () => {
   const first = workspaceStorageId(join("C:\\work", "demo"));

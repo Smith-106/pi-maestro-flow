@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import {
 	closeSync,
 	existsSync,
@@ -16,6 +17,7 @@ import {
 	SETTINGS_ANNOUNCE_EVENT,
 	SETTINGS_DISCOVER_EVENT,
 	SETTINGS_PROTOCOL_VERSION,
+	getPiHostMode,
 	type ConfiguredSettingValue,
 	type JsonValue,
 	type SettingDefinition,
@@ -100,6 +102,7 @@ export interface CockpitSettingsProvider extends SettingsProviderV1 {
 }
 
 export interface CockpitSettingsProviderOptions {
+	hostVersion?: unknown;
 	getConfigPath?: () => string;
 	getRuntimeConfig: () => CockpitConfig;
 	applyRuntimeConfig: (config: CockpitConfig, changedKeys: readonly string[], context: SettingsContextV1) => Promise<void> | void;
@@ -161,6 +164,7 @@ const CATALOGS = {
 		"cockpit.option.usd": "USD ($)",
 		"cockpit.option.cny": "CNY (¥)",
 		"cockpit.quietMode": "Quiet tool rendering",
+		"cockpit.quietMode.description": "Compact built-in tools and Maestro tools such as teammate, observe and Todo without changing their execution or parameters. Other extensions own their tool styles. Reload may be required when toggling.",
 		"cockpit.quietSymbols": "Quiet symbols",
 		"cockpit.agentsMode": "Agent display",
 		"cockpit.todoMode": "Todo display",
@@ -248,6 +252,7 @@ const CATALOGS = {
 		"cockpit.option.usd": "美元（$）",
 		"cockpit.option.cny": "人民币（¥）",
 		"cockpit.quietMode": "紧凑工具渲染",
+		"cockpit.quietMode.description": "紧凑显示内置工具及 teammate、observe、Todo 等 Maestro 工具，不改变执行能力或参数。其他扩展工具的样式由各自插件控制。切换后可能需要重载。",
 		"cockpit.quietSymbols": "紧凑状态符号",
 		"cockpit.agentsMode": "Agent 显示",
 		"cockpit.todoMode": "Todo 显示",
@@ -367,7 +372,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 		reversibility: "full",
 		editor: { kind: "number", min: 0.01, max: 100, step: 0.01 },
 	},
-	booleanDefinition("quietMode", "cockpit.group.general", 2, "cockpit.quietMode", "extension-reload"),
+	booleanDefinition("quietMode", "cockpit.group.general", 2, "cockpit.quietMode", "extension-reload", "cockpit.quietMode.description"),
 	enumDefinition("quietSymbols", "cockpit.group.general", 3, "cockpit.quietSymbols", ["check", "dot"], "live"),
 	enumDefinition("agentsMode", "cockpit.group.panels", 0, "cockpit.agentsMode", ["list", "compact"], "live"),
 	enumDefinition("todoMode", "cockpit.group.panels", 1, "cockpit.todoMode", ["list", "compact"], "live"),
@@ -464,6 +469,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 export function createCockpitSettingsProvider(options: CockpitSettingsProviderOptions): CockpitSettingsProvider {
 	const instanceId = randomUUID();
 	const configPath = options.getConfigPath ?? getConfigPath;
+	const quietRequiresReload = getPiHostMode(options.hostVersion ?? VERSION) !== "native";
 	const prepared = new Map<string, PreparedCockpitChange>();
 
 	return {
@@ -477,7 +483,9 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 			descriptionKey: "cockpit.provider.description",
 			order: 10,
 			capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
-			settings: DEFINITIONS,
+			settings: DEFINITIONS.map((definition) => definition.key === "quietMode" && !quietRequiresReload
+				? { ...definition, activation: "live", reversibility: "full" }
+				: definition),
 			catalogs: CATALOGS,
 		}),
 		read: () => {
@@ -509,7 +517,7 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 				const temporaryPath = `${path}.${process.pid}.${token}.tmp`;
 				writeSyncedFile(temporaryPath, content);
 				const changedKeys = request.changes.map((change) => change.key);
-				const activation = activationFor(request.changes, current.config, nextConfig);
+				const activation = activationFor(request.changes, current.config, nextConfig, quietRequiresReload);
 				prepared.set(token, {
 					token,
 					transactionId: request.transactionId,
@@ -601,7 +609,7 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 			const changedKeys = request.changes.map((change) => change.key);
 			await options.applyRuntimeConfig(config, changedKeys, request.context);
 			if (state) prepared.delete(state.token);
-			const deferred = (state?.activation ?? activationFor(request.changes, options.getRuntimeConfig(), config))
+			const deferred = (state?.activation ?? activationFor(request.changes, options.getRuntimeConfig(), config, quietRequiresReload))
 				.filter((entry) => entry.boundary !== "live");
 			return {
 				appliedKeys: changedKeys.filter((key) => !deferred.some((entry) => entry.keys.includes(key))),
@@ -817,12 +825,13 @@ function activationFor(
 	changes: readonly SettingsChange[],
 	before: CockpitConfig,
 	after: CockpitConfig,
+	quietRequiresReload: boolean,
 ): SettingsActivationPlan[] {
 	const live: string[] = [];
 	const reloadQuiet: string[] = [];
 	const reloadInteractions: string[] = [];
 	for (const change of changes) {
-		if (change.key === "quietMode" && before.quietMode && !after.quietMode) reloadQuiet.push(change.key);
+		if (change.key === "quietMode" && before.quietMode && !after.quietMode && quietRequiresReload) reloadQuiet.push(change.key);
 		else if (change.key === "doubleEscapeClearInput" || change.key === "fullscreenInput" || change.key === "historyEnabled") reloadInteractions.push(change.key);
 		else live.push(change.key);
 	}

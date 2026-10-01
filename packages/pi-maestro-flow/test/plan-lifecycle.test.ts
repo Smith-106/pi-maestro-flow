@@ -34,7 +34,7 @@ import {
   type PlanTransportResult,
 } from "../src/plan-transport.ts";
 import {
-  PlanStore,
+  PlanStore as RuntimePlanStore,
   type LoadedPlan,
   type PlanExecutionChoice,
   type PlanWorkflowBinding,
@@ -48,6 +48,15 @@ import {
   setGoalVerifierRunnerForTest,
   type GoalContext,
 } from "../src/tools/goal.ts";
+
+// Storage/lifecycle tests exercise lock ownership, not the platform process probe.
+// A slow/unavailable Windows CIM subprocess must not consume their test budget;
+// explicit process-identity overrides in lock-reclamation tests still take precedence.
+class PlanStore extends RuntimePlanStore {
+  constructor(cwd: string, options: ConstructorParameters<typeof RuntimePlanStore>[1] = {}) {
+    super(cwd, { getProcessIdentity: (pid) => `test-process:${pid}`, ...options });
+  }
+}
 
 interface ToolLike {
   description?: string;
@@ -1038,6 +1047,18 @@ test("Workflow new-session compact returns before settlement and resumes after c
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages[0] ?? "", /WORKFLOW NEW SESSION RUN BRIEF/);
     assert.match(harness.messages[0] ?? "", /selected Execute/);
+
+    // Delivery enqueues its durable acknowledgement asynchronously. Wait for the
+    // committed boundary before shutdown/removal can race the manifest writer.
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: "workflow-new-compact-chat" },
+    });
+    const deadline = Date.now() + 2_000;
+    while ((await store.load()).manifest.workflowBinding?.deliveryStatus !== "delivered") {
+      assert.ok(Date.now() < deadline, "Workflow delivery acknowledgement must commit");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

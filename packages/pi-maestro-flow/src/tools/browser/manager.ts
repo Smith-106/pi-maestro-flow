@@ -2367,6 +2367,7 @@ export function installRequestListenerScope(page: Page): RequestListenerScope {
   const originalOnce = page.once;
   const callOn = originalOn.bind(page) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page;
   const callOff = originalOff.bind(page) as unknown as (type: PageEventType, handler?: GenericPageHandler) => Page;
+  const callOnce = originalOnce.bind(page) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page;
   const wrappers = new Map<GenericPageHandler, GenericPageHandler>();
   const ownedHandlers: GenericPageHandler[] = [];
   const trackedRequests = new WeakSet<HTTPRequest>();
@@ -2391,17 +2392,18 @@ export function installRequestListenerScope(page: Page): RequestListenerScope {
     if (trackedRequests.has(request)) return;
     trackedRequests.add(request);
     // Keep request identity intact and observe even fire-and-forget resolutions.
-    for (const method of ["continue", "abort", "respond"] as const) {
-      const original = request[method].bind(request) as (...args: never[]) => Promise<void>;
-      request[method] = ((...args: never[]) => {
+    const wrapMethod = <K extends "continue" | "abort" | "respond">(method: K): void => {
+      const original = request[method].bind(request) as (...args: Parameters<HTTPRequest[K]>) => Promise<void>;
+      request[method] = ((...args: Parameters<HTTPRequest[K]>) => {
         const result = (async () => {
           if (!active) throw new Error("Browser request handler belongs to a finished run.");
           return await original(...args);
         })();
         track(result);
         return result;
-      }) as typeof request[typeof method];
-    }
+      }) as HTTPRequest[K];
+    };
+    for (const method of ["continue", "abort", "respond"] as const) wrapMethod(method);
   };
   const scopedOn = (type: PageEventType, handler: GenericPageHandler): Page => {
     if (type !== "request") return callOn(type, handler);
@@ -2440,7 +2442,7 @@ export function installRequestListenerScope(page: Page): RequestListenerScope {
     return result;
   };
   const scopedOnce = (type: PageEventType, handler: GenericPageHandler): Page => {
-    if (type !== "request") return originalOnce.call(page, type, handler);
+    if (type !== "request") return callOnce(type, handler);
     const onceHandler: GenericPageHandler = (...args) => {
       try { return handler(...args); }
       finally { scopedOff(type, onceHandler); }

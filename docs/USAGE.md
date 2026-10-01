@@ -52,7 +52,7 @@
 | 组件 | 版本要求 |
 |------|---------|
 | Node.js | ≥ 22.19.0 |
-| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | 0.99.0 验证基线；0.87–0.98 版本门控 legacy 兼容 |
 
 > [Maestro Flow](https://github.com/catlog22/maestro-flow)（知识系统）作为依赖随插件自动安装，无需单独前置安装。
 
@@ -60,13 +60,22 @@
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
 ```
 
 升级会迁移由 Flow 管理的 companion 注册；同名本地开发覆盖会被保留并在启动日志中提示，需显式升级或移除。
+
+### Pi 0.99 原生宿主与新工具
+
+Pi 0.99+ 由宿主管理工具 loadout、`tool_search`、模型/classifier、MCP 与键盘能力；缺少原生 API 不会自动启动第二套 legacy runtime。Pi 核心 optional peer 的 `*` 范围不变。MCP 使用原生 `/mcp`；迁移旧配置前先禁用 `builtin:mcp`，再运行 `/maestro-mcp-migrate` 预览并批准，完成后恢复原生管理器。
+
+- `search` 替代 `ffgrep`：支持 literal/regex/fuzzy 与 lines/files/count；索引不可用及工作区根目录 plain/regex 搜索可走有界 `rg`，fuzzy 仍需索引。大项目应限定 path/glob。
+- `open-code-review` 需要单独安装 `ocr` CLI。`preview`/`rules` 只解析文件与规则，`review` 使用运行时模型执行 OCR 管理的评审；`health` 检查连通性。模型配置入口为 `/api-manager open-code-review`，安装说明见 `packages/pi-maestro-flow/optional/OCR-SETUP.md`。
+- 可选 Ask transport 与本地 TUI 竞速并取消另一端；Mobile 取消也会关闭本地向导。Plan confirm/review 暴露可选 transport seam 和 revision 检查，不代表所有客户端都已实现 Plan UI。
+- 原生 Quiet 模式支持 live 切换且不额外激活工具；首次恢复历史渲染和第三方 execution-only override 仍有边界，详见文档站 [Cockpit](../docs-site/src/content/docs/guides/cockpit.md)。
 
 ### 插件注册的工具总览
 
@@ -1237,7 +1246,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 
 # ─── 知识 ───
 maestro search "查询" --code

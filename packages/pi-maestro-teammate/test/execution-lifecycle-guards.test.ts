@@ -194,8 +194,8 @@ test("late structured output from the aborted turn cannot settle an accepted int
           });
         } else if (command.type === "abort") {
           queueMicrotask(() => {
-            // This is the old turn's terminal shortcut. It must be ignored
-            // while the interrupt transaction owns settlement.
+            // The aborted turn's late submission must be ignored while the
+            // interrupt transaction owns settlement.
             handle!.stdout.write(line({
               type: "tool_execution_end",
               toolName: "structured_output",
@@ -230,6 +230,8 @@ test("late structured output from the aborted turn cannot settle an accepted int
               toolName: "structured_output",
               isError: false,
             }));
+            handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+            handle!.stdout.write(line({ type: "agent_settled" }));
           });
         }
       }
@@ -2033,15 +2035,23 @@ test("missing structured_output recovery times out and settles as failed", async
     return handle!.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runSingleTeammate(
-    {
-      agent: "general",
-      task: "return structured output",
-      context: "fresh",
-      outputSchema: valueSchema,
-    },
-    { baseCwd: process.cwd(), spawnChildProcess, structuredOutputRecoveryTimeoutMs: 50 },
-  );
+  // The fake child has no OS handle to keep the event loop alive while the
+  // production recovery watchdog is unref'd. Retain one until it settles.
+  const keepAlive = setInterval(() => {}, 10);
+  let result: SingleResult;
+  try {
+    result = await runSingleTeammate(
+      {
+        agent: "general",
+        task: "return structured output",
+        context: "fresh",
+        outputSchema: valueSchema,
+      },
+      { baseCwd: process.cwd(), spawnChildProcess, structuredOutputRecoveryTimeoutMs: 50 },
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.structuredOutput, undefined);

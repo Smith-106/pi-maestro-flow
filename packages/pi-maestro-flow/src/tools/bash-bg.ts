@@ -956,9 +956,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as BashBgDetails | undefined;
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
-      const running = details?.running === true;
+      const running = !isError && details?.running === true;
       const mark = running
         ? theme.fg("warning", "•")
         : (!isError && (details?.exitCode ?? 0) === 0

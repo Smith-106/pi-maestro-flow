@@ -11,11 +11,11 @@ const npmCliPath = process.env.npm_execpath
   ?? resolve(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
 const npmCommand = [process.execPath, npmCliPath];
 const piCorePackageVersions = {
-  "@earendil-works/pi-agent-core": "0.84.4",
-  "@earendil-works/pi-ai": "0.84.4",
-  "@earendil-works/pi-coding-agent": "0.84.4",
-  "@earendil-works/pi-tui": "0.84.4",
-  typebox: "1.3.7",
+  "@earendil-works/pi-agent-core": "0.99.0",
+  "@earendil-works/pi-ai": "0.99.0",
+  "@earendil-works/pi-coding-agent": "0.99.0",
+  "@earendil-works/pi-tui": "0.99.0",
+  typebox: "1.3.27",
 };
 const piCorePackageNames = Object.keys(piCorePackageVersions);
 const extensionRoots = [

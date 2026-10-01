@@ -191,13 +191,15 @@ test("completion and stalled custom messages render bounded full-width cards", (
   assert.ok(stalled.every((line) => visibleWidth(line) === 79));
 });
 
-test("quiet single-task call leaves all rendering to the result component", () => {
+test("quiet single-task call shows a placeholder before the result component", () => {
   setQuietMode(true);
   const rendered = renderTeammateCall({ agent: "general", name: "ping", prompt: "reply pong" }, theme as never, { expanded: true }).render(80);
-  assert.deepEqual(rendered, []);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /teammate.*@ping/);
+  assert.doesNotMatch(rendered[0], /reply pong/);
 });
 
-test("quiet multi-task call leaves all rendering to the result component", () => {
+test("quiet multi-task call shows a placeholder before the result component", () => {
   setQuietMode(true);
   const rendered = renderTeammateCall({
     tasks: [
@@ -206,7 +208,8 @@ test("quiet multi-task call leaves all rendering to the result component", () =>
     ],
     background: false,
   }, theme as never, { expanded: true }).render(80);
-  assert.deepEqual(rendered, []);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /teammate.*@pkgs/);
 });
 
 test("quiet streaming progress keeps agent and child trees but hides stream content", () => {
@@ -606,7 +609,7 @@ test("quiet failed result keeps an agent row and a single error summary", () => 
 test("dot symbol mode applies to teammate running, success, and failure rows", () => {
   setQuietMode(true, "dot");
   const call = renderTeammateCall({ agent: "general", prompt: "inspect" }, theme as never).render(80);
-  assert.deepEqual(call, []);
+  assert.deepEqual(call, ["  ○ teammate @general"]);
 
   const success = renderTeammateResult({
     content: [{ type: "text", text: "complete output" }],
@@ -677,5 +680,5 @@ test("root and nested self-rendered teammate tools share renderers", () => {
 // shared cockpit event. Behaviour (flag -> rendering) is covered above.
 test("ownership handler is the unique wire for the teammate quiet mirror", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?setQuietMode\([\s\S]*?quiet[\s\S]*?===\s*true/);
+  assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?const nextQuiet = ownership\.quiet === true;[\s\S]*?setQuietMode\(nextQuiet, ownership\.quietSymbols\)/);
 });

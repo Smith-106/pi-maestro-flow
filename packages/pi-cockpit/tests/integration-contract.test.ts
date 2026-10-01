@@ -28,6 +28,16 @@ import {
 import cockpitEntry, { resolveCockpitSurfaceState } from "../src/index.ts";
 import extensionEntry from "../src/extension/index.ts";
 import { SESSION_BAR_WIDGET_KEY } from "../src/session-bar.ts";
+import { SessionUiState } from "../src/session-ui-state.ts";
+
+/** Keep ordered source contracts inside their actual state-machine boundary. */
+function sourceSection(source: string, start: string, end: string): string {
+	const from = source.indexOf(start);
+	assert.ok(from >= 0, `missing boundary: ${start}`);
+	const to = source.indexOf(end, from + start.length);
+	assert.ok(to > from, `missing closing boundary: ${end}`);
+	return source.slice(from, to);
+}
 
 test("Cockpit defaults Todo to a one-line collapsed summary and Quiet to dot symbols", () => {
 	assert.equal(DEFAULT_CONFIG.todoExpanded, false);
@@ -89,7 +99,12 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   assert.match(source, /maestro\.snapshot\(\)\?\.artifact\?\.available[\s\S]*?tuiT\("artifact\.hint"\)[\s\S]*?sessionUi\.mode === "agent" \? "session\.agentListHint" : "session\.listHint"/);
   assert.match(source, /showOwner = mode === "window" \|\| endpoint\.kind === "root"[\s\S]*?ownerDisplayToken\(endpoint\.label, endpoint\.registryEndpoint\.ownerId\)/);
   assert.doesNotMatch(source, /alt\+shift\+(?:r|l|up|down)/);
-  assert.match(source, /data !== "\\x1b\[1;2A" && data !== "\\x1b\[1;2B"/);
+  const navigation = sourceSection(source, "sessionBarNavDisposer = ctx.ui.onTerminalInput", "const releaseUiOwnership");
+  assert.match(navigation, /if \(ambientKeysShouldYield\(capturedTui\)\) return undefined/);
+  assert.match(navigation, /const plainPrevious = data === "\\x1b\[D"/);
+  assert.match(navigation, /const plainNext = data === "\\x1b\[C"/);
+  assert.match(navigation, /if \(!windowPrevious && !windowNext && !plainPrevious && !plainNext\) return undefined/);
+  assert.doesNotMatch(navigation, /\\x1b\[1;2[AB]/);
 });
 
 test("Cockpit packages complete selectable color themes", () => {
@@ -138,16 +153,21 @@ test("Cockpit owns native UI through events instead of clearing foreign widget k
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /pi\.events\.emit\(COCKPIT_UI_OWNERSHIP_EVENT/);
 	assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_QUERY_EVENT/);
-	assert.match(source, /agents: config\.enabled && config\.hideNativeAgents/);
-	assert.match(source, /sessionList: config\.enabled/);
+	const snapshot = sourceSection(source, "const uiOwnershipSnapshot", "const publishUiOwnership");
+	// Intent alone cannot suppress native UI: every owned surface is gated by
+	// the effective claim, and dock-only surfaces also require a visible dock.
+	assert.match(snapshot, /const ownsDock = uiOwnershipClaimed && surfaceState === "dock"/);
+	assert.match(snapshot, /todo: uiOwnershipClaimed/);
+	assert.match(snapshot, /agents: uiOwnershipClaimed && config\.hideNativeAgents/);
+	assert.match(snapshot, /sessionList: uiOwnershipClaimed/);
 	assert.match(source, /todoDurationChart: config\.todoDurationChart/);
 	assert.match(source, /quietSymbols: config\.quietSymbols/);
-	assert.match(source, /footer: config\.enabled/);
-	assert.match(source, /footer: false/);
-	assert.match(source, /sidebar: ownsDock/);
-	assert.match(source, /goal: ownsDock/);
-	assert.match(source, /sidebar: false/);
-	assert.match(source, /goal: false/);
+	assert.match(snapshot, /footer: uiOwnershipClaimed/);
+	assert.match(snapshot, /quiet: uiOwnershipClaimed && config\.quietMode/);
+	assert.match(snapshot, /sidebar: ownsDock/);
+	assert.match(snapshot, /goal: ownsDock/);
+	const release = sourceSection(source, "const releaseUiOwnership", "const acquireUiOwnership");
+	assert.match(release, /uninstallUi\(ctx\);[\s\S]*?finally \{\s*uiOwnershipClaimed = false;\s*publishUiOwnership\(\);/);
 	assert.match(source, /pi\.events\.on\(COCKPIT_TODO_TOGGLE_EVENT/);
 	assert.doesNotMatch(source, /teammate-agents|todo-panel/);
 	assert.equal(COCKPIT_UI_OWNERSHIP_EVENT, "cockpit:ui-ownership");
@@ -160,7 +180,14 @@ test("Ownership handshake: late subscribers can query and both consumers ask", (
 	const cockpitSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	// Cockpit answers the query with a fresh broadcast and re-broadcasts when
 	// agent activity starts (the moment a native widget would otherwise appear).
-	assert.match(cockpitSource, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_QUERY_EVENT, \(\) => \{\s*\n\s*publishUiOwnership\(\);/);
+	const responder = sourceSection(cockpitSource, "let ownershipQueryDisposer", "const setTodoExpanded");
+	assert.match(responder, /ownershipQueryDisposer \?\?= pi\.events\.on\(COCKPIT_UI_OWNERSHIP_QUERY_EVENT, publishUiOwnership\)/);
+	assert.match(responder, /ownershipQueryDisposer\?\.\(\);[\s\S]*?ownershipQueryDisposer = undefined/);
+	assert.match(responder, /ensureOwnershipQueryResponder\(\);[\s\S]*?publishUiOwnership\(\);/);
+	const start = sourceSection(cockpitSource, 'pi.on("session_start"', 'pi.on("session_shutdown"');
+	assert.match(start, /uiOwnershipClaimed = false;\s*ensureOwnershipQueryResponder\(\);\s*publishUiOwnership\(\);/);
+	const shutdown = sourceSection(cockpitSource, 'pi.on("session_shutdown"', 'pi.on("before_agent_start"');
+	assert.match(shutdown, /unsubscribeBusEvents\(\);\s*disposeOwnershipQueryResponder\(\);/);
 	const startedBlock = cockpitSource.match(
 		/pi\.events\.on\(TEAMMATE_STARTED_EVENT, \(payload\) => \{[\s\S]*?\n\t\t\t\}\)\,/,
 	);
@@ -222,14 +249,17 @@ test("Cockpit installs compaction compact-form styling before resumed history re
 
 test("Cockpit acquires the footer before installing and releases it before deferred re-enable", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-	assert.match(
-		source,
-		/session_start[\s\S]*?if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*applyUi\(ctx\);\s*publishUiOwnership\(\);/,
-	);
-	assert.match(
-		source,
-		/if \(wasEnabled !== config\.enabled\)[\s\S]*?if \(config\.enabled\) \{[\s\S]*?enableAfterClose = true;[\s\S]*?\} else \{[\s\S]*?uninstallUi\(ctx\);[\s\S]*?publishUiOwnership\(\);/,
-	);
+	const start = sourceSection(source, 'pi.on("session_start"', 'pi.on("session_shutdown"');
+	assert.match(start, /if \(config\.enabled\) acquireUiOwnership\(ctx\);\s*else releaseUiOwnership\(ctx\);/);
+	const acquire = sourceSection(source, "const acquireUiOwnership", "const syncActiveAgentSurface");
+	assert.match(acquire, /if \(!config\.enabled \|\| !isTuiContext\(ctx\)\) \{\s*uiOwnershipClaimed = false;\s*publishUiOwnership\(\);\s*return false;/);
+	assert.match(acquire, /uiOwnershipClaimed = true;\s*publishUiOwnership\(\);\s*try \{\s*applyUi\(ctx\);/);
+	assert.match(acquire, /catch \(error\) \{[\s\S]*?uninstallUi\(ctx\);[\s\S]*?uiOwnershipClaimed = false;\s*publishUiOwnership\(\);/);
+	const release = sourceSection(source, "const releaseUiOwnership", "const acquireUiOwnership");
+	assert.match(release, /uninstallUi\(ctx\);[\s\S]*?finally \{\s*uiOwnershipClaimed = false;\s*publishUiOwnership\(\);/);
+	const toggle = sourceSection(source, "if (wasEnabled !== config.enabled)", "if (wasQuiet !== config.quietMode)");
+	assert.match(toggle, /if \(config\.enabled\) \{[\s\S]*?enableAfterClose = true;\s*\} else \{\s*enableAfterClose = false;\s*releaseUiOwnership\(ctx\);/);
+	assert.doesNotMatch(toggle, /acquireUiOwnership\(ctx\)|applyUi\(ctx\)/);
 });
 
 test("Cockpit teammate event names and payload ingestion stay aligned with the public v1 contract", () => {
@@ -303,7 +333,13 @@ test("Cockpit defers settings-driven re-enable until the settings overlay is clo
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /let enableAfterClose = false/);
 	assert.match(source, /if \(config\.enabled\) \{[\s\S]*?enableAfterClose = true;[\s\S]*?\} else \{/);
-	assert.match(source, /dispose\(\): void \{[\s\S]*?if \(enableAfterClose && config\.enabled\)[\s\S]*?queueMicrotask[\s\S]*?publishUiOwnership\(\);[\s\S]*?applyUi\(ctx\)/);
+	const settings = sourceSection(source, "const openSettings = async", "\n}");
+	const finalize = sourceSection(settings, "const finalize =", "activeSettingsOverlay = { finalize }");
+	assert.match(finalize, /if \(settled\) return;\s*settled = true;/);
+	assert.match(finalize, /if \(enableAfterClose && config\.enabled\) \{\s*queueMicrotask\(\(\) => \{\s*if \(lastCtx !== ctx \|\| !config\.enabled\) return;\s*acquireUiOwnership\(ctx\);\s*req\(\);/);
+	assert.match(finalize, /done\(undefined\)/);
+	const component = sourceSection(settings, "const ui = {", "return ui;");
+	assert.match(component, /dispose\(\): void \{[\s\S]*?finalize\(\);/);
 	assert.doesNotMatch(source, /if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*enableAfterClose/);
 });
 
@@ -360,8 +396,25 @@ test("Cockpit Agent modal opens from the Alt+R session list and shares the live 
 	assert.match(source, /todoExpanded: effectiveTodoExpanded\(\)/);
 	assert.match(source, /const effectiveTodoExpanded = \(\): boolean =>\s*config\.todoExpanded/);
 	assert.match(source, /uninstallUi[\s\S]*?activeAgentOverlay\?\.finalize\(\)/);
-	assert.match(source, /session_start[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
-	assert.match(source, /session_shutdown[\s\S]*?agentReads\.clear\(\);[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
+	// Scroll/follow state now belongs to SessionUiState per endpoint, not a
+	// separate agentListScroll variable. Both session boundaries reset it.
+	const start = sourceSection(source, 'pi.on("session_start"', 'pi.on("session_shutdown"');
+	const shutdown = sourceSection(source, 'pi.on("session_shutdown"', 'pi.on("before_agent_start"');
+	assert.match(start, /sessionUi\.reset\(\)/);
+	assert.match(shutdown, /sessionUi\.reset\(\);\s*agentReads\.clear\(\);/);
+	const uiState = new SessionUiState();
+	uiState.setMode("window");
+	uiState.select("previous-agent", "agent");
+	uiState.select("previous-window", "window");
+	uiState.setScroll("previous-agent", 17, false);
+	uiState.setDraft("previous-agent", "previous draft");
+	uiState.reset();
+	assert.equal(uiState.mode, "agent");
+	assert.equal(uiState.selectedId("agent"), undefined);
+	assert.equal(uiState.selectedId("window"), undefined);
+	assert.deepEqual(uiState.endpoint("previous-agent"), {
+		draft: "", unread: 0, lastSeenRevision: undefined, scroll: 0, followTail: true, detail: true,
+	});
 });
 
 test("Cockpit projects Pi UI prompts as waiting without ending the running lifecycle", () => {

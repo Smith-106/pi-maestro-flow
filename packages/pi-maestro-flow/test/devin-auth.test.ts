@@ -107,7 +107,7 @@ test("devinTokenExpiry projects the JWT exp minus skew, else one year out", () =
   assert.equal(devinTokenExpiry("header.not-base64-json.sig", now), now + DEVIN_TOKEN_FALLBACK_TTL_MS);
 });
 
-test("loginDevin exchanges a pasted code for a session token", async () => {
+test("loginDevin exchanges a pasted code for a session token", async () => withCallbackPortEnv("0", async () => {
   const expSeconds = Math.floor(Date.now() / 1000) + 7_200;
   const token = fakeJwt(expSeconds);
   const stub = stubDevinTokenFetch(token);
@@ -149,7 +149,7 @@ test("loginDevin exchanges a pasted code for a session token", async () => {
   } finally {
     stub.restore();
   }
-});
+}));
 
 test("loginDevin completes through its loopback callback and rejects a foreign state", async () => {
   await withCallbackPortEnv("0", async () => {
@@ -213,7 +213,7 @@ test("loginDevin surfaces a callback error without exchanging a token", async ()
   });
 });
 
-test("loginDevin reports a failure pasted as a redirect URL", async () => {
+test("loginDevin reports a failure pasted as a redirect URL", async () => withCallbackPortEnv("0", async () => {
   const stub = stubDevinTokenFetch("unused");
   try {
     const failure = await loginDevin(callbackCallbacks(
@@ -226,7 +226,7 @@ test("loginDevin reports a failure pasted as a redirect URL", async () => {
   } finally {
     stub.restore();
   }
-});
+}));
 
 test("refreshDevinToken rejects because Devin issues no refresh token", async () => {
   await assert.rejects(refreshDevinToken(), /cannot be refreshed; run \/login devin/);

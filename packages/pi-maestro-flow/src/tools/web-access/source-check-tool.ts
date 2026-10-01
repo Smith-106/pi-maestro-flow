@@ -69,7 +69,7 @@ export function createSourceCheckTool(): ToolDefinition<typeof SourceCheckParams
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const details = result.details as SourceCheckDetails | undefined;
       const status = details?.artifact?.claims?.[0]?.status ?? "unknown";
       const block = result.content.find((c) => c.type === "text");

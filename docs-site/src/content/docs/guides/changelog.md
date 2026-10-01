@@ -5,7 +5,23 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.30.0（2026-09-08）。** Gateway handoff/Skill/Maestro CLI 控制面、渐进式 Todo 读取与可恢复 New Context 更新；引擎精确 pin `maestro-flow@0.5.86`；搭配 Teammate 2.6.2、Cockpit 0.23.0、Settings-Core 0.2.1、Backend-Core 0.1.3 与 Backends 0.1.3。
+> **当前版本：v0.31.3 — Native Pi Host & Reliable Tool Lifecycles。** Pi 验证基线 0.99.0；0.87–0.98 版本门控 legacy 兼容；引擎保持 `maestro-flow >=0.5.87` 范围。
+
+## v0.31.3 — 原生 Pi 宿主与可靠工具生命周期
+
+> Flow 0.31.3、Teammate 2.7.2、Cockpit 0.24.1、Settings-Core 0.2.3、Backends 0.1.5；Backend-Core 0.1.4、Fabric/Fabric-Core 0.1.0、pi-fluent-tui 0.1.2 不变。范围：v0.31.2 后 30 个 commit，包含发布准备及用户批准的 Quiet 与工具生命周期改动；验证及产物一致性记录在 RELEASE.md 和发布回执中。
+
+- **原生 Pi 能力归属**：Pi 0.99+ 管理工具 loadout/`tool_search`、模型/classifier、MCP 与键盘；Maestro 尊重 CLI 选择并给自己的工具添加 namespace/exposure。原生 API 缺失不回退第二套 legacy runtime；optional host peer `*` 不变。
+- **Native Quiet 与工具生命周期**：官方内置定义保持执行/参数/active tools，紧凑渲染不叠加宿主 shell，live 切换恢复官方渲染；Maestro 使用 canonical error context。teammate 在结果出现前显示 running，随后交给 partial/final result，避免空白或双行进度。
+- **Quiet 边界**：首次 resumed history 可能先用官方 renderer；可识别的第三方覆盖跳过，execution-only `baseToolsOverride` 无法通过 public API 识别；legacy 关闭仍可能需要 `/reload`。
+- **并行完成与 Desktop 精确身份**：按任务保存完成 reservation、缓冲早到 publication 并约束 foreground/detached/nested 交付；workspace publication 暴露并验证 session/endpoint/processGeneration/normalizedCwd，避免用窗口标签猜目标。代理错误与监控结果边界同步加固。
+- **Ask/Plan 远程接口**：Ask 本地/远程竞速只结算一次并取消另一端，Mobile 取消同步关闭本地向导；可选 Plan confirm/review transport 支持 revision 检查及取消清理，是集成 seam，不代表全部客户端已经提供 Plan UI。
+- **可寻址压缩证据与恢复焦点**：工具结果移出上下文时保留分类 receipt、preview 与精确 `session://.../entry/...`；恢复遵循 live actor/Todo/Goal/Plan 进度，避免重新探索或重复分解已运行计划。Run-response 对齐 v3 身份与取消 fence。
+- **搜索与评审**：`search` 替代 `ffgrep`，支持共享索引与有界 rg fallback（fuzzy 仍需索引）；`open-code-review` 集成单独安装的 `ocr` CLI，preview/rules 为无 OCR-side LLM 的文件/规则解析，review 使用运行时模型，health 检查连通性。reviewer 指引与 `/api-manager open-code-review` 同步。
+- **SSH、隧道与模型路由**：SSH 增加 host 表单与本地化；实验性 OpenAI Secure Tunnel 支持托管 endpoint 与可选 publicUrl，仍要求 Gateway 认证；模型 benchmark/availability/failover 与证据边界加固。
+- **可选 DSH SDK**：改为 optional peer；使用 DSH 才需手动安装 `@deepseek-ai/dsh-sdk-client`，开发基线 0.1.0-rc.6。引擎为范围依赖，不是精确 pin；准备环境安装 0.5.87，registry latest 当时为 0.5.89，fresh registry smoke 由发布操作者验证最新解析。
+
+升级：`pi install npm:pi-maestro-flow@0.31.3`。Node.js ≥ 22.19.0 不变；升级前关闭 Pi，完成后重启，保留的本地 companion 覆盖须自行更新。
 
 ## v0.30.0（2026-09-08）
 

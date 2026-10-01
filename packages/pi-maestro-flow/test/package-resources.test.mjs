@@ -17,11 +17,11 @@ const cockpitRoot = join(root, "..", "pi-cockpit");
 const settingsCoreRoot = join(root, "..", "pi-maestro-settings-core");
 const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const piCorePeerBaselines = {
-  "@earendil-works/pi-agent-core": "0.84.4",
-  "@earendil-works/pi-ai": "0.84.4",
-  "@earendil-works/pi-coding-agent": "0.84.4",
-  "@earendil-works/pi-tui": "0.84.4",
-  typebox: "1.3.7",
+  "@earendil-works/pi-agent-core": "0.99.0",
+  "@earendil-works/pi-ai": "0.99.0",
+  "@earendil-works/pi-coding-agent": "0.99.0",
+  "@earendil-works/pi-tui": "0.99.0",
+  typebox: "1.3.27",
 };
 const smartSearchSource = "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz";
 const teammatePublicExports = {
@@ -64,7 +64,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/settings.local.json"));
   assert.ok(pkg.files.includes("!.pi/model-failover.json"));
   assert.ok(pkg.files.includes("!.pi/scratch/**"));
-  assert.match(pkg.dependencies["maestro-flow"], exactSemver);
+  assert.equal(pkg.dependencies["maestro-flow"], ">=0.5.87");
   assert.equal(pkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
   assert.equal(teammatePkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
   assert.equal(cockpitPkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
@@ -203,13 +203,13 @@ test("package contains the canonical workflow skill set", () => {
   assert.equal(existsSync(join(root, ".pi", "skills", "swarm", "SKILL.md")), false, "native swarm Skill must not be packaged");
 });
 
-test("knowledge capture skills are model-invocable and the system prompt introduces Know-how", () => {
+test("knowledge capture skills remain user-invoked and the system prompt introduces Know-how", () => {
   const knowhowSkill = readFileSync(join(root, ".pi", "skills", "maestro-knowhow", "SKILL.md"), "utf8");
   const specSkill = readFileSync(join(root, ".pi", "skills", "maestro-spec", "SKILL.md"), "utf8");
   const systemPrompt = readFileSync(join(root, ".pi", "SYSTEM.md"), "utf8");
 
-  assert.match(knowhowSkill, /disable-model-invocation:\s*false/);
-  assert.match(specSkill, /disable-model-invocation:\s*false/);
+  assert.match(knowhowSkill, /disable-model-invocation:\s*true/);
+  assert.match(specSkill, /disable-model-invocation:\s*true/);
   assert.match(systemPrompt, /`maestro-knowhow` captures reusable knowledge in `\.workflow\/knowhow\/`/);
   assert.match(systemPrompt, /Automatically load and follow it/);
   assert.match(systemPrompt, /use `maestro-spec` instead for explicit project constraints/);

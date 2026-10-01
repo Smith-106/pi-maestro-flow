@@ -4,6 +4,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VERSION, createEditTool } from "@earendil-works/pi-coding-agent";
+import * as sdk from "@earendil-works/pi-coding-agent";
+const createAllToolDefinitions = (cwd: string) => Object.fromEntries([
+	sdk.createReadToolDefinition(cwd), sdk.createBashToolDefinition(cwd), sdk.createEditToolDefinition(cwd), sdk.createWriteToolDefinition(cwd),
+	sdk.createGrepToolDefinition(cwd), sdk.createFindToolDefinition(cwd), sdk.createLsToolDefinition(cwd), sdk.createPowerShellToolDefinition(cwd),
+].map((tool) => [tool.name, tool]));
 import { registerGuardedEditTool, registerNativeEditPolicy } from "../src/edit-guard.ts";
 import { registerQuietTools, toolCallLine, toolResultLine, toolResultCard } from "../src/quiet-tools.ts";
 import { navigateHostThemeSettings } from "../src/host-ui.ts";
@@ -12,26 +17,44 @@ import { memoizedLines } from "../src/render-memo.ts";
 
 function host() {
 	const native = createEditTool(process.cwd());
-	const tools = new Map<string, any>(["read", "edit", "write", "bash", "powershell", "grep", "find", "ls"].map((name) => [name, name === "edit" ? native : { name, outputSchema: {}, annotations: {}, isError: true }]));
+	const tools = new Map<string, any>(Object.entries(createAllToolDefinitions(process.cwd())));
+	let active = ["read", "bash", "edit", "write"];
 	const hooks = new Map<string, any>();
 	const registered: string[] = [];
 	const pi = {
 		registerTool(tool: any) { registered.push(tool.name); tools.set(tool.name, tool); },
 		on(name: string, handler: any) { hooks.set(name, handler); return () => hooks.delete(name); },
+		getSettings: () => ({}),
+		getAllTools: () => [...tools.values()].map((tool) => ({ ...tool, exposure: tool.exposure ?? "direct", sourceInfo: { source: "builtin" } })),
+		getActiveTools: () => [...active],
+		setActiveTools: (names: string[]) => { active = names; },
 	};
 	return { pi, native, tools, hooks, registered };
 }
 
-test("native and unknown hosts never replace any base tool, including quiet toggles", () => {
-	for (const version of [VERSION, "0.99.0", "0.100.0", undefined, "0.99.0-beta.1", "garbage"]) {
+test("native quiet decorates official definitions without the legacy edit schema", () => {
+	for (const version of [VERSION, "0.99.0", "0.100.0"]) {
+		const h = host();
+		registerGuardedEditTool(h.pi as never, version);
+		registerNativeEditPolicy(h.pi as never, version);
+		assert.deepEqual(h.registered, []);
+		registerQuietTools(h.pi as never, () => DEFAULT_CONFIG, version);
+		assert.deepEqual(h.registered.sort(), [...h.tools.keys()].sort());
+		assert.deepEqual(h.pi.getActiveTools(), ["read", "bash", "edit", "write"]);
+		assert.equal("occurrence" in h.tools.get("edit").parameters.properties.edits.items.properties, false);
+		assert.strictEqual(h.tools.get("edit").prepareArguments, createAllToolDefinitions(process.cwd()).edit.prepareArguments);
+	}
+});
+
+test("unknown hosts leave every tool untouched", () => {
+	for (const version of [null, "0.99.0-beta.1", "garbage"]) {
 		const h = host();
 		const originals = [...h.tools];
 		registerGuardedEditTool(h.pi as never, version);
 		registerNativeEditPolicy(h.pi as never, version);
-		for (let i = 0; i < 3; i++) registerQuietTools(h.pi as never, () => DEFAULT_CONFIG, version);
+		registerQuietTools(h.pi as never, () => DEFAULT_CONFIG, version);
 		assert.deepEqual(h.registered, []);
 		for (const [name, tool] of originals) assert.strictEqual(h.tools.get(name), tool);
-		assert.equal("occurrence" in h.native.parameters.properties.edits.items.properties, false);
 	}
 });
 

@@ -1935,11 +1935,12 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "enter");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      return toolResultLine(theme, { name: "plan", ok: true, arg: "enter", summary: resultSummary(result), expanded: opts.expanded, detail: text });
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "enter", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
 
@@ -1968,11 +1969,11 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "update");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "update", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
@@ -1996,11 +1997,11 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "review");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "review", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
@@ -2051,11 +2052,11 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "confirm");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "confirm", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
@@ -2123,11 +2124,11 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "decompose");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "decompose", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
@@ -2149,11 +2150,11 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "exit");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "exit", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
@@ -2175,11 +2176,11 @@ export function registerPlanTools(
       if (ctx?.isPartial === false) return new Text("", 0, 0);
       return toolCallLine(theme, "plan", "status");
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const block = result.content.find((c) => c.type === "text");
       const text = block && "text" in block ? block.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       return toolResultLine(theme, { name: "plan", ok: !isError, arg: "status", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };

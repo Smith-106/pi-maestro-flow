@@ -5,7 +5,23 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.30.0 (2026-09-08).** Gateway handoff, Skill, and Maestro CLI control surfaces; progressive Todo reads and resumable New Context updates; exact engine pin `maestro-flow@0.5.86`; bundles Teammate 2.6.2, Cockpit 0.23.0, Settings-Core 0.2.1, Backend-Core 0.1.3, and Backends 0.1.3.
+> **Current version: v0.31.3 — Native Pi Host & Reliable Tool Lifecycles.** Pi 0.99.0 validation baseline; version-gated legacy compatibility for 0.87–0.98; engine range remains `maestro-flow >=0.5.87`.
+
+## v0.31.3 — Native Pi Host & Reliable Tool Lifecycles
+
+> Flow 0.31.3, Teammate 2.7.2, Cockpit 0.24.1, Settings-Core 0.2.3, and Backends 0.1.5; Backend-Core 0.1.4, Fabric/Fabric-Core 0.1.0, and pi-fluent-tui 0.1.2 are unchanged. Scope: 30 commits after v0.31.2, including release preparation and user-approved Quiet/tool-lifecycle changes. Verification and publication integrity are recorded in RELEASE.md and release receipts.
+
+- **Native Pi ownership**: Pi 0.99+ owns the tool loadout/`tool_search`, model/classifier runtime, MCP, and keyboard handling. Maestro respects CLI selection and annotates its own tools with namespaces/exposure. Missing native APIs do not start a second legacy runtime; optional host peers remain `*`.
+- **Native Quiet and tool lifecycles**: official built-in definitions retain execution, parameters, and active tools; compact rendering avoids duplicate host shells and toggles back to official rendering live. Maestro honors canonical error context. Teammate shows running until partial/final results take ownership, avoiding blank or duplicated progress.
+- **Quiet limitations**: the first resumed-history pass may use official renderers; detectable third-party overrides are skipped, and execution-only `baseToolsOverride` cannot be identified through the public API. Turning legacy Quiet off may still require `/reload`.
+- **Parallel completion and exact Desktop identity**: per-task reservations, buffered early publications, and fenced foreground/detached/nested delivery; workspace publications expose and validate session/endpoint/processGeneration/normalizedCwd rather than guessing from labels. Proxy error and monitoring result boundaries are hardened.
+- **Remote Ask/Plan APIs**: Ask settles the local/remote race once and cancels the other surface; Mobile cancellation also closes the local wizard. Optional Plan confirm/review transports support revision checks and cancellation cleanup: an integration seam, not a claim that all clients already have a Plan UI.
+- **Addressable compaction evidence and recovery focus**: categorized receipts, previews, and exact `session://.../entry/...` references preserve access to dropped tool results. Recovery follows live actor/Todo/Goal/Plan progress rather than repeating exploration or decomposing a running Plan. Run-response aligns v3 identities and cancellation fences.
+- **Search and review**: `search` replaces `ffgrep`, with shared-index and bounded rg fallback (fuzzy still needs the index). `open-code-review` wraps a separately installed `ocr` CLI: preview/rules resolve files/rules without an OCR-side LLM, review uses the runtime model, and health checks connectivity. Reviewer guidance and `/api-manager open-code-review` are aligned.
+- **SSH, tunnels, and model routing**: SSH host forms and localization; experimental OpenAI Secure Tunnel managed endpoints with optional publicUrl and mandatory Gateway authentication; stronger benchmark/availability/failover and evidence boundaries.
+- **Optional DSH SDK**: an optional peer, manually installed only for DSH; development baseline `@deepseek-ai/dsh-sdk-client@0.1.0-rc.6`. The engine is a range, not an exact pin: preparation has 0.5.87 installed and registry latest was 0.5.89; the operator will verify latest resolution in a fresh registry smoke.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.31.3`. Node.js ≥ 22.19.0 is unchanged. Close Pi before upgrading, restart afterward, and update preserved local companion overrides explicitly.
 
 ## v0.30.0 (2026-09-08)
 

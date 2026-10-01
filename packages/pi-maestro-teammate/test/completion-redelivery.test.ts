@@ -703,13 +703,15 @@ test("root and nested synthetic recovery retry the failed canonical main dispatc
 
   assert.match(rootPublication, /const previousPublication = publishedResultsByCorrelation\.get\(result\.correlationId\)/);
   assert.match(rootPublication, /publicationCount > 1[\s\S]*?previousPublication\?\.resourceAcknowledged === false/);
-  assert.match(rootPublication, /publicationCount === 1 \|\| retriesMainPublication[\s\S]*?\? completionSeed/);
+  assert.match(rootPublication, /const primaryCompletionSeed = primaryCompletionSeedFor\(result\.correlationId\)/);
+  assert.match(rootPublication, /publicationCount === 1 \|\| retriesMainPublication[\s\S]*?\? primaryCompletionSeed/);
   assert.match(rootPublication, /publicationCount > 1\s*&& !retriesMainPublication\s*&& notifyAdditional/);
   assert.match(rootPublication, /return resultCompletionDurable \? publication : undefined/);
 
   assert.match(nestedPublication, /const previousPublication = nestedPublishedResultsByCorrelation\.get\(result\.correlationId\)/);
   assert.match(nestedPublication, /publicationCount > 1[\s\S]*?previousPublication\?\.resourceAcknowledged === false/);
-  assert.match(nestedPublication, /publicationCount === 1 \|\| retriesMainPublication[\s\S]*?\? completionSeed/);
+  assert.match(nestedPublication, /const primaryCompletionSeed = primaryCompletionSeedFor\(result\.correlationId\)/);
+  assert.match(nestedPublication, /publicationCount === 1 \|\| retriesMainPublication[\s\S]*?\? primaryCompletionSeed/);
   assert.match(nestedPublication, /publicationCount > 1\s*&& !retriesMainPublication\s*&& notifyAdditional/);
   assert.match(nestedPublication, /return resultDurable \? publication : undefined/);
 });

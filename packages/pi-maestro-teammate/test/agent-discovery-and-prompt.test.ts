@@ -627,6 +627,7 @@ Custom reviewer prompt.
 
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  const sessionShutdownHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
   let activeTools: string[] = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
@@ -638,6 +639,7 @@ Custom reviewer prompt.
     setActiveTools(names: string[]) { activeTools = [...names]; },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
+      if (event === "session_shutdown") sessionShutdownHandlers.push(handler);
     },
   }, {
     get(target, property) {
@@ -658,7 +660,7 @@ Custom reviewer prompt.
         getSessionFile: () => path.join(project, "session.jsonl"),
       },
     };
-    sessionStartHandlers[0]({}, context);
+    for (const handler of sessionStartHandlers) await handler({}, context);
     const listTool = tools.get("teammate-list") as {
       execute: (...args: unknown[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { agents: unknown[] } }>;
     };
@@ -674,6 +676,7 @@ Custom reviewer prompt.
       (agent as { name?: string }).name === "custom-reviewer"
     ));
   } finally {
+    for (const handler of sessionShutdownHandlers) await handler({ reason: "quit" }, undefined);
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     fs.rmSync(project, { recursive: true, force: true });
@@ -725,8 +728,8 @@ test("teammate send guidance requires meaningful new traffic and explains queued
   assert.match(modeSchema, /tool returning is not a delivery boundary/i);
   assert.match(modeSchema, /replacement or next prompt/i);
   const backgroundSchema = JSON.stringify(TeammateParams.properties.background);
-  assert.match(backgroundSchema, /completion state is published immediately.*Cockpit/i);
-  assert.match(backgroundSchema, /consumed only when the caller AgentSession would otherwise stop/i);
+  assert.match(backgroundSchema, /Agent state is published immediately to lifecycle observers.*Cockpit/i);
+  assert.match(backgroundSchema, /caller AgentSession consumes them only when it would otherwise stop/i);
   assert.match(backgroundSchema, /not when an individual tool call returns/i);
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.match(source, /The message is queued and may not yet be consumed; do not resend it/);
@@ -927,6 +930,7 @@ Proxy specialist prompt.
 
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  const sessionShutdownHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
   const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }> = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
@@ -935,6 +939,7 @@ Proxy specialist prompt.
     },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
+      if (event === "session_shutdown") sessionShutdownHandlers.push(handler);
       if (event === "before_agent_start") {
         beforeAgentStartHandlers.push(handler as typeof beforeAgentStartHandlers[number]);
       }
@@ -963,7 +968,7 @@ Proxy specialist prompt.
     assert.match(String(tools.get("observe")?.description), /local teammate and background Bash/);
     assert.doesNotMatch(String(tools.get("teammate-list")?.description), /cross-session windows/);
 
-    assert.equal(sessionStartHandlers.length, 1);
+    assert.equal(sessionStartHandlers.length, 2, "classifier and teammate lifecycle both register");
     const context = {
       cwd: project,
       modelRegistry: { getAvailable: () => [] },
@@ -972,7 +977,7 @@ Proxy specialist prompt.
         getSessionFile: () => path.join(project, "session.jsonl"),
       },
     };
-    sessionStartHandlers[0]({}, context);
+    for (const handler of sessionStartHandlers) await handler({}, context);
 
     const refreshed = tools.get("teammate");
     assert.doesNotMatch(String(refreshed?.description), /proxy-specialist \[project\]/);
@@ -988,6 +993,7 @@ Proxy specialist prompt.
     assert.match(injected.systemPrompt, /depth 1\/2/);
     assert.match(injected.systemPrompt, /Remaining teammate depth: 1/);
   } finally {
+    for (const handler of sessionShutdownHandlers) await handler({ reason: "quit" }, undefined);
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
@@ -1111,6 +1117,7 @@ ${name} prompt.
 
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  const sessionShutdownHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
   const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }> = [];
   let activeTools: string[] = [];
   const pi = new Proxy({
@@ -1123,6 +1130,7 @@ ${name} prompt.
     setActiveTools(names: string[]) { activeTools = [...names]; },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
+      if (event === "session_shutdown") sessionShutdownHandlers.push(handler);
       if (event === "before_agent_start") {
         beforeAgentStartHandlers.push(handler as typeof beforeAgentStartHandlers[number]);
       }
@@ -1138,7 +1146,7 @@ ${name} prompt.
   delete process.env.PI_TEAMMATE_CHILD;
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
-    assert.equal(sessionStartHandlers.length, 1);
+    assert.equal(sessionStartHandlers.length, 2, "classifier and teammate lifecycle both register");
     assert.equal(tools.has("observe"), true);
     assert.equal(tools.has("teammate-watch"), false);
     assert.equal(tools.has("teammate-wait"), false);
@@ -1152,7 +1160,7 @@ ${name} prompt.
         getSessionFile: () => path.join(cwd, "session.jsonl"),
       },
     });
-    sessionStartHandlers[0]({}, context(firstProject));
+    for (const handler of sessionStartHandlers) await handler({}, context(firstProject));
     const first = tools.get("teammate");
     assert.doesNotMatch(String(first?.description), /root-alpha \[project\]/);
     assert.match(String(first?.description), /Available Teammate Agents section/);
@@ -1164,7 +1172,7 @@ ${name} prompt.
     assert.match(firstPrompt.systemPrompt, /never changes a chosen agent's role, tools, permissions, or task scope/);
     assert.doesNotMatch(firstPrompt.systemPrompt, /Role guidance/);
 
-    sessionStartHandlers[0]({}, context(secondProject));
+    for (const handler of sessionStartHandlers) await handler({}, context(secondProject));
     const second = tools.get("teammate");
     assert.doesNotMatch(String(second?.description), /root-beta \[project\]/);
     assert.match(String(second?.description), /Available Teammate Agents section/);
@@ -1174,6 +1182,7 @@ ${name} prompt.
     assert.match(secondPrompt.systemPrompt, /- root-beta: root-beta role/);
     assert.doesNotMatch(secondPrompt.systemPrompt, /root-alpha role/);
   } finally {
+    for (const handler of sessionShutdownHandlers) await handler({ reason: "quit" }, undefined);
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
     fs.rmSync(firstProject, { recursive: true, force: true });

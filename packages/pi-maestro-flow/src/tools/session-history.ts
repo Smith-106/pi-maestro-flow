@@ -687,7 +687,7 @@ The include categories are user, assistant, visible_custom, compaction, and tool
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "?");
       const scope = ctx.args.scope ? ` ${String(ctx.args.scope)}` : "";
       return toolResultLine(theme, {

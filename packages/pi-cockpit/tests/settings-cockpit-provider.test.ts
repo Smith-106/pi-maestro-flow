@@ -40,9 +40,11 @@ function tempConfig(): { directory: string; path: string } {
 function providerAt(path: string, hooks: {
 	apply?: (config: CockpitConfig, keys: readonly string[]) => void;
 	action?: (name: string) => void;
+	hostVersion?: unknown;
 } = {}) {
 	let runtime = structuredClone(DEFAULT_CONFIG);
 	const provider = createCockpitSettingsProvider({
+		hostVersion: hooks.hostVersion,
 		getConfigPath: () => path,
 		getRuntimeConfig: () => runtime,
 		applyRuntimeConfig: (config, keys) => {
@@ -68,6 +70,11 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 		assert.equal(pinEditor?.editor.kind, "boolean");
 		assert.equal(pinEditor?.defaultValue, false);
 		assert.equal(pinEditor?.descriptionKey, "cockpit.pinEditorBottom.description");
+		const quiet = description.settings.find((setting) => setting.key === "quietMode");
+		assert.equal(quiet?.descriptionKey, "cockpit.quietMode.description");
+		for (const locale of ["en", "zh-CN"] as const) {
+			assert.match(description.catalogs?.[locale]?.["cockpit.quietMode.description"] ?? "", /teammate.*observe.*Todo/);
+		}
 		assert.ok(description.settings.some((setting) => setting.key === "staticMode" && setting.editor.kind === "boolean"));
 		assert.ok(description.settings.some((setting) => setting.key === "toolPalette" && setting.editor.kind === "enum"), "toolPalette now editable via the provider");
 		const durationChart = description.settings.find((setting) => setting.key === "todoDurationChart");
@@ -280,25 +287,32 @@ test("committed changes can roll back to the exact previous document", async () 
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("quiet disable is persisted but reported as reload-required", async () => {
-	const { directory, path } = tempConfig();
-	try {
-		writeFileSync(path, JSON.stringify({ ...DEFAULT_CONFIG, quietMode: true }));
-		const { provider } = providerAt(path);
-		const before = await provider.read({ context });
-		const prepared = await provider.prepare!({
-			context,
-			transactionId: "tx-quiet",
-			changes: [{ operation: "set", key: "quietMode", scope: "global", value: false }],
-			expectedRevisions: before.configured.resources,
-		});
-		assert.deepEqual(prepared.activation, [{
-			boundary: "extension-reload",
-			keys: ["quietMode"],
-			messageKey: "cockpit.runtime.reloadQuiet",
-		}]);
-		await provider.abort!({ context, transactionId: "tx-quiet", prepareToken: prepared.prepareToken! });
-	} finally { rmSync(directory, { recursive: true, force: true }); }
+test("Quiet activation reflects native live rendering and legacy reload requirements", async () => {
+	for (const hostVersion of ["0.99.0", "0.98.0", "unknown"]) {
+		const { directory, path } = tempConfig();
+		try {
+			writeFileSync(path, JSON.stringify({ ...DEFAULT_CONFIG, quietMode: true }));
+			const { provider } = providerAt(path, { hostVersion });
+			const native = hostVersion === "0.99.0";
+			const description = await provider.describe({ context });
+			assert.equal(description.settings.find((setting) => setting.key === "quietMode")?.activation, native ? "live" : "extension-reload");
+			const before = await provider.read({ context });
+			const prepared = await provider.prepare!({
+				context,
+				transactionId: "tx-quiet",
+				changes: [{ operation: "set", key: "quietMode", scope: "global", value: false }],
+				expectedRevisions: before.configured.resources,
+			});
+			assert.deepEqual(prepared.activation, native
+				? [{ boundary: "live", keys: ["quietMode"] }]
+				: [{ boundary: "extension-reload", keys: ["quietMode"], messageKey: "cockpit.runtime.reloadQuiet" }]);
+			const committed = await provider.commit!({ context, transactionId: "tx-quiet", prepareToken: prepared.prepareToken! });
+			assert.deepEqual(committed.changedKeys, ["quietMode"]);
+			assert.equal(JSON.parse(readFileSync(path, "utf8")).quietMode, false);
+			const activated = await provider.applyRuntime!({ context, transactionId: "tx-quiet", snapshot: committed.snapshot, changes: [{ operation: "set", key: "quietMode", scope: "global", value: false }] });
+			assert.equal(activated.deferred?.length ?? 0, native ? 0 : 1);
+		} finally { rmSync(directory, { recursive: true, force: true }); }
+	}
 });
 
 test("interaction settings describe with defaults off and complete bilingual keys", async () => {

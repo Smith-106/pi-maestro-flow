@@ -20,6 +20,12 @@ icon: "🔄"
 | 适用时机 | 上下文容量不足 | Todo/语义阶段的自然边界 |
 | 默认状态 | 开启 | 开启，可显式关闭 |
 
+## 可寻址证据与恢复焦点（v0.31.3）
+
+压缩移出工具结果时，checkpoint/capsule 会保留有界 Evidence Index：按 read/inspect/edit/command/resource 分类，包含工具、目标、preview 或错误，以及精确 `session://<sessionId>/entry/<entryId>`。这是原 active-chain 结果的恢复入口，不是另一份完整日志，也不代表隐藏记录或任意 session 都能读取。
+
+恢复时先使用 capsule 与 live Todo/Goal/Plan/Workflow 状态；Evidence Index 已给精确 URI 时，按需直接用 `resource` 解析该项，再考虑有界 `session_history` 查询。preview 已回答问题时不要重读；不要机械加载所有索引项或重跑命令。Recovery focus 跟随当前 actor、实际任务与 Plan 进度，已经分解并开始执行的 Plan 不应从头再分解。
+
 ## 配置
 
 用户级配置位于 `~/.pi/agent/settings.json`，项目级配置位于 `<项目>/.pi/settings.json`；项目字段覆盖用户字段。

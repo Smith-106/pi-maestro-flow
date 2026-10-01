@@ -1290,7 +1290,7 @@ export default function registerTeammateExtension(
         return renderTeammateCall(args, theme, context);
       },
       renderResult(result, options, theme, context) {
-        return renderTeammateResult(result, options, theme, context?.args);
+        return renderTeammateResult(result, options, theme, context?.args, context);
       },
     };
     if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
@@ -6439,7 +6439,7 @@ export default function registerTeammateExtension(
     },
 
     renderResult(result, options, theme, context) {
-      return renderTeammateResult(result, options, theme, context?.args);
+      return renderTeammateResult(result, options, theme, context?.args, context);
     },
   };
 
@@ -6934,9 +6934,9 @@ export default function registerTeammateExtension(
         ?? auxToolCallFallback("teammate-watch", theme);
     },
 
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
       if (options.isPartial) return new Text("", 0, 0);
-      const failed = (result as { isError?: boolean }).isError === true;
+      const failed = context.isError || (result as { isError?: boolean }).isError === true;
       return renderQuietTeammateAux("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme)
         ?? auxToolResultFallback(result, theme);
     },
@@ -6989,10 +6989,10 @@ export default function registerTeammateExtension(
         ?? auxToolCallFallback("teammate-wait", theme);
     },
 
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
       if (options.isPartial) return new Text("", 0, 0);
       const status = result.details?.status ?? "timeout";
-      const failed = (result as { isError?: boolean }).isError === true;
+      const failed = context.isError || (result as { isError?: boolean }).isError === true;
       return renderQuietTeammateAux("teammate-wait", status, failed ? "failure" : "success", theme)
         ?? auxToolResultFallback(result, theme);
     },
@@ -9726,9 +9726,9 @@ Use list for an attention-first overview, get for one complete normalized window
         ?? auxToolCallFallback("teammate-monitor", theme);
     },
 
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
       if (options.isPartial) return new Text("", 0, 0);
-      const failed = (result as { isError?: boolean }).isError === true;
+      const failed = context.isError || (result as { isError?: boolean }).isError === true;
       return renderQuietTeammateAux("teammate-monitor", failed ? "failed" : "ok", failed ? "failure" : "success", theme)
         ?? auxToolResultFallback(result, theme);
     },

@@ -359,7 +359,7 @@ export function createSmartSearchTool(
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
       const mode = String(ctx.args.mode ?? "search");
       const query = String(ctx.args.query ?? "").slice(0, 60);

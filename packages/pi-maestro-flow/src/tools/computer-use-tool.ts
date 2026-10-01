@@ -201,7 +201,7 @@ export function createComputerUseTool(manager: ComputerUseManagerLike = computer
       if (opts.isPartial) return new Text("", 0, 0);
       const action = String(ctx.args.action ?? "?");
       const details = result.details as ComputerUseToolDetails | undefined;
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const detail = result.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
       return toolResultLine(theme, { name: "computer_use", ok: !isError, arg: action, summary: resultSummary(result), expanded: opts.expanded, detail });
     },

@@ -57,6 +57,14 @@ Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WA
 - `plan-confirm`（或 `/plan approve`）提交计划并恢复 Act 工具；
 - `plan-exit` 放弃计划返回 Act 模式。
 
+### 可选远程 Ask / Plan transport（v0.31.3）
+
+宿主集成可通过 `pi-maestro-flow/ask-transport` 与 `pi-maestro-flow/plan-transport` 注册外部交互面。未注册或 transport 返回 undefined 时仍由本地 TUI 控制；它们不是用户开启即可得到的完整 Desktop/Mobile Plan UI。
+
+- Ask 本地/远程竞速只结算一次；回答后取消另一端，本地取消会关闭远程请求，Mobile 取消也关闭本地向导；abort 与 transport error 走清理路径。
+- Plan seam 用于 confirm/review，携带当前 revision、可用 action、draft 与模型切换信息；远程 edit 要提交 expectedRevision，避免覆盖更新的计划。
+- Plan 本地/远程 decision/edit/cancel 竞速，取消或中止清理剩余 surface；集成不能绕过现有批准与 revision 边界。
+
 ### 切换方式
 
 `Alt+Shift+P` 或 `/plan` 切换 Plan/Act 模式。`ask` / `plan-confirm` / `plan-editor` / `plan-review` 等交互工具支持取消透传：中止信号会沿权限提示与 teammate 交互中继向前传递，ask 按顺序执行。

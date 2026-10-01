@@ -1901,7 +1901,7 @@ The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as 
       if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "?");
       let arg = action;
       if (action === "explore") {
@@ -1988,7 +1988,7 @@ Only request completion after all work is done; the extension verifies it indepe
       if (options.isPartial) return new Text("", 0, 0);
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "Goal action completed.";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "?");
       const objective = action === "create" || action === "update" ? String(ctx.args.objective ?? "") : "";
       const arg = objective ? `${action} ${objective.slice(0, 40)}` : action;
@@ -2042,7 +2042,7 @@ Self-driven review (delegate mode): preview → collect diffs per returned refs 
       if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "review");
       return toolResultLine(theme, { name: "open-code-review", ok: !isError, arg: action, summary: resultSummary(result), expanded: opts.expanded, detail: message });
     },
@@ -2281,7 +2281,7 @@ When NOT to use:
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const arg = Array.isArray(ctx.args.argv) ? ctx.args.argv.join(" ") : "?";
-      return toolResultLine(theme, { name: "run-control", ok: details?.ok !== false, arg, summary: resultSummary(result), expanded: opts.expanded, detail: message });
+      return toolResultLine(theme, { name: "run-control", ok: !ctx.isError && (result as { isError?: boolean }).isError !== true && details?.ok !== false, arg, summary: resultSummary(result), expanded: opts.expanded, detail: message });
     },
   };
   pi.registerTool(runControlTool);
@@ -5186,7 +5186,7 @@ When NOT to use:
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as AskResultDetails | undefined;
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const questions = ctx.args.questions as unknown[] | undefined;
       const arg = `${questions?.length ?? 0} question${questions?.length === 1 ? "" : "s"}`;
       if (details?.cancelled) {

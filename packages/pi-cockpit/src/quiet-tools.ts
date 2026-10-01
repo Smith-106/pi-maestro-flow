@@ -3,18 +3,11 @@
 // a config-driven SPECS table + shared render functions. Execution is delegated
 // to the original built-in tools — only the rendering is replaced.
 //
-// Legacy-host scope only: the seven built-in tools (read/bash/edit/write/grep/find/ls)
-// are compressed. Compression works by re-registering the tool name and delegating
-// execution back to pi's exported creators. MCP/extension tools (todo, teammate,
-// mcp, lsp, ...) cannot be compressed this way: registerTool is first-name-wins and
-// replaces the whole definition, and the public API exposes neither a render-only
-// hook nor a handle to the original execute — re-registering them would break their
-// execution, so Cockpit does not re-register them. Self-rendering extension
-// tools such as `observe` consume Cockpit's quiet ownership event in their owner
-// extension and provide their own compact shell.
-//
-// Registered at session_start when config.quietMode is true. Because tools cannot
-// be unregistered, toggling quiet mode off requires /reload or a new session.
+// Native hosts decorate official ToolDefinitions after session binding, when
+// settings and tool ownership are available. Legacy hosts retain their wrappers.
+// Extension/SDK tools are never replaced. The public API cannot expose arbitrary
+// baseToolsOverride execution, nor safely decorate before initial history renders.
+// Maestro-owned tools consume the quiet ownership event in their owner extension.
 
 import type {
 	BashToolDetails,
@@ -24,6 +17,7 @@ import type {
 	ReadToolDetails,
 	Theme,
 	ThemeColor,
+	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
 	VERSION,
@@ -35,7 +29,10 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
-import { Text, type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+// Namespace access avoids eager missing-export failures on legacy SDKs, where
+// the native definition factories do not exist and this branch is never entered.
+import * as nativeTools from "@earendil-works/pi-coding-agent";
+import { Box, Container, Text, type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { quietStatusMark } from "pi-maestro-settings-core/ui";
 import { getPiHostMode } from "pi-maestro-settings-core/v1";
@@ -124,7 +121,7 @@ const SPECS: ToolSpec[] = [
 		arg: (a) => shortenPath(a.path || ""),
 		summary: (r) => {
 			const c = r.content[0];
-			if (c?.type === "image") return "image";
+			if (r.content.some((block: any) => block.type === "image")) return "image";
 			const lines = c?.type === "text" ? c.text.split("\n").length : 0;
 			const d = r.details as ReadToolDetails | undefined;
 			let s = `${lines}L`;
@@ -136,12 +133,12 @@ const SPECS: ToolSpec[] = [
 	{
 		name: "bash",
 		arg: (a) => a.command || "",
-		summary: (r) => {
+		summary: (r, ctx) => {
 			const out = textOf(r);
-			const exit = parseBashExit(out);
+			const exit = r.structuredContent?.exit_code ?? parseBashExit(out);
 			const n = out.split("\n").filter((l: string) => l.trim()).length;
 			const d = r.details as BashToolDetails | undefined;
-			let s = `${exit ?? "?"} · ${n}L`;
+			let s = `${exit ?? (ctx.isError ? "?" : 0)} · ${n}L`;
 			if (d?.truncation?.truncated) s += " · trunc";
 			return s;
 		},
@@ -200,6 +197,21 @@ const SPECS: ToolSpec[] = [
 		expanded: (r) => textOf(r),
 	},
 ];
+const NATIVE_SHELL_SPEC: ToolSpec = {
+	...SPECS.find((spec) => spec.name === "bash")!,
+	summary(result, ctx) {
+		const output = textOf(result);
+		const exitMarker = ctx.isError ? output.match(/(?:^|\n)Command exited with code (\d+)\s*$/) : null;
+		const exitCode = ctx.isError ? (exitMarker ? Number(exitMarker[1]) : null) : 0;
+		const lines = output.split("\n").filter((line) => line.trim()).length;
+		return `${exitCode ?? "?"} · ${lines}L${result.details?.truncation?.truncated ? " · trunc" : ""}`;
+	},
+	ok: (_result, ctx) => !ctx.isError,
+};
+const NATIVE_SPECS = [
+	...SPECS.map((spec) => spec.name === "bash" ? NATIVE_SHELL_SPEC : spec),
+	{ ...NATIVE_SHELL_SPEC, name: "powershell" },
+];
 
 // ---------- rendering ----------
 
@@ -228,10 +240,11 @@ function renderCallLine(
 	theme: any,
 	glyphs: IconGlyphs,
 	mode: CockpitConfig["quietSymbols"],
+	width = termWidth(),
 ): string {
 	const mark = quietMark(mode, "running", glyphs);
-	const argCap = Math.max(10, termWidth() - (spec.name.length + mark.length + 5));
-	const argText = truncate(spec.arg(args), argCap);
+	const argCap = Math.max(1, width - (spec.name.length + mark.length + 5));
+	const argText = truncate(sanitizeCardText(spec.arg(args)), argCap);
 	return `  ${theme.fg("warning", mark)} ${toolName(spec, theme, "warning")}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
 }
 
@@ -244,6 +257,7 @@ function renderResultLine(
 	expanded: boolean,
 	glyphs: IconGlyphs,
 	mode: CockpitConfig["quietSymbols"],
+	width = termWidth(),
 ): string {
 	const isOk = spec.ok ? spec.ok(result, ctx) : !ctx.isError;
 	const stateColor: ThemeColor = isOk ? "success" : "error";
@@ -251,11 +265,11 @@ function renderResultLine(
 	const mark = theme.fg(stateColor, rawMark);
 
 	const overhead = 7 + spec.name.length + rawMark.length;
-	const budget = Math.max(20, termWidth() - overhead);
+	const budget = Math.max(1, width - overhead);
 	const sumCap = Math.min(35, Math.floor(budget * 0.4));
 	const sumRaw = truncate(spec.summary(result, ctx), sumCap);
 	const argCap = Math.max(10, budget - sumRaw.length);
-	const argText = truncate(spec.arg(args), argCap);
+	const argText = truncate(sanitizeCardText(spec.arg(args)), argCap);
 
 	let t = `  ${mark} ${toolName(spec, theme, stateColor)}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
 	if (sumRaw) t += ` ${theme.fg("dim", `· ${sumRaw}`)}`;
@@ -271,15 +285,95 @@ function renderResultLine(
 
 // ---------- registration ----------
 
-/**
- * Register compact tool renderers for quiet mode. Called once at session_start
- * when config.quietMode is true. Tools delegate execution to the built-in
- * implementations; only the visual shell is replaced.
- */
-export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitConfig, hostVersion: unknown = VERSION): void {
-	// The native host owns all base-tool metadata and execution. Until it offers
-	// a render-only hook, quiet rendering is limited to Maestro-owned tools.
-	if (getPiHostMode(hostVersion) !== "legacy") return;
+// All non-render fields, including execute's fifth ExtensionToolContext, stay
+// intact. Verbose mode composes the official renderers and original shell inside
+// our self shell; this permits live toggles without unregistering a tool.
+export function decorateNativeQuietTool(
+	original: ToolDefinition<any, any, any>,
+	getConfig: () => CockpitConfig,
+): ToolDefinition<any, any, any> {
+	const spec = NATIVE_SPECS.find((entry) => entry.name === original.name);
+	if (!spec) return original;
+	const resultKey = Symbol("cockpit-native-result");
+	const callKey = Symbol("cockpit-native-call");
+	return {
+		...original,
+		renderShell: "self",
+		renderCall(args, theme, ctx) {
+			ctx.state[callKey] = original.renderCall?.(args, theme, { ...ctx, lastComponent: ctx.state[callKey] });
+			return {
+				render(width) {
+					const config = getConfig();
+					if (config.enabled && config.quietMode) {
+						if (!ctx.isPartial) return [];
+						return lineComponent(() => renderCallLine(spec, args, theme, resolveGlyphs(config.icons.mode), config.quietSymbols, width)).render(width);
+					}
+					const shell = original.renderShell === "self" ? new Container() : new Box(1, 1,
+						(text) => theme.bg(ctx.isPartial ? "toolPendingBg" : ctx.isError ? "toolErrorBg" : "toolSuccessBg", text));
+					if (ctx.state[callKey]) shell.addChild(ctx.state[callKey]);
+					if (ctx.state[resultKey]) shell.addChild(ctx.state[resultKey]);
+					return shell.render(width);
+				},
+				invalidate() {},
+			};
+		},
+		renderResult(result, options, theme, ctx) {
+			// Run official renderer lifecycle even while compact (e.g. shell timer
+			// cleanup, edit preview state); never pass our wrapper as lastComponent.
+			// Use a fresh native result component: official write switches between
+			// Container (success) and Text (error), which cannot reuse one another.
+			ctx.state[resultKey] = original.renderResult?.(result, options, theme, { ...ctx, lastComponent: undefined });
+			return {
+				render(width) {
+					const config = getConfig();
+					if (!config.enabled || !config.quietMode || options.isPartial) return [];
+					return lineComponent(() => renderResultLine(spec, ctx.args, result, ctx, theme, options.expanded,
+						resolveGlyphs(config.icons.mode), config.quietSymbols, width)).render(width);
+				},
+				invalidate() {},
+			};
+		},
+	};
+}
+
+/** Native calls must happen post-bind; no settings/ownership API exists at load. */
+export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitConfig, hostVersion: unknown = VERSION, cwd = process.cwd()): boolean {
+	const hostMode = getPiHostMode(hostVersion);
+	if (hostMode === "unknown") return false;
+	if (hostMode !== "legacy") {
+		const settings = pi.getSettings();
+		const definitions = [
+			nativeTools.createReadToolDefinition(cwd, { autoResizeImages: settings.images?.autoResize ?? true }),
+			nativeTools.createBashToolDefinition(cwd, { commandPrefix: settings.shellCommandPrefix, shellPath: settings.shellPath }),
+			nativeTools.createEditToolDefinition(cwd), nativeTools.createWriteToolDefinition(cwd),
+			nativeTools.createGrepToolDefinition(cwd), nativeTools.createFindToolDefinition(cwd), nativeTools.createLsToolDefinition(cwd),
+			nativeTools.createPowerShellToolDefinition(cwd),
+		];
+		const tools = new Map(pi.getAllTools().map((tool) => [tool.name, tool]));
+		const active = pi.getActiveTools();
+		let registered = 0;
+		try {
+			for (const definition of definitions) {
+				const tool = tools.get(definition.name);
+				// ToolInfo is not a definition handle. Skip distinguishable overrides;
+				// an execution-only baseToolsOverride is not detectable via this API.
+				if (tool?.sourceInfo.source !== "builtin" || tool.description !== definition.description ||
+					JSON.stringify(tool.parameters) !== JSON.stringify(definition.parameters) ||
+					JSON.stringify(tool.promptGuidelines) !== JSON.stringify(definition.promptGuidelines) ||
+					tool.exposure !== (definition.exposure ?? "direct") ||
+					JSON.stringify(tool.namespace) !== JSON.stringify(definition.namespace) ||
+					JSON.stringify(tool.annotations) !== JSON.stringify(definition.annotations)) continue;
+				pi.registerTool(decorateNativeQuietTool(definition, getConfig));
+				registered += 1;
+			}
+		} finally {
+			// registerTool refreshes the registry. Never activate grep/find/ls or
+			// PowerShell merely because Cockpit supplies their visual shell.
+			pi.setActiveTools(active);
+		}
+		return registered > 0;
+	}
+
 	for (const spec of SPECS) {
 		const original = (getBuiltInTools(process.cwd()) as any)[spec.name];
 		const guardedEdit = spec.name === "edit";
@@ -321,6 +415,7 @@ export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitCon
 			},
 		});
 	}
+	return true;
 }
 
 // ---------------------------------------------------------------------------

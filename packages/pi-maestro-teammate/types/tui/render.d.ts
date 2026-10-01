@@ -1,7 +1,7 @@
 /**
  * TUI rendering for the teammate tool.
  *
- * renderCall: intentionally empty; result rendering owns the lifecycle surface
+ * renderCall: running placeholder until the result owns the lifecycle surface
  * renderResult: real-time streaming for foreground, compact status for completed
  */
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -9,10 +9,13 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component } from "@earendil-works/pi-tui";
 import type { Details } from "../shared/types.ts";
 type Theme = ExtensionContext["ui"]["theme"];
-export declare function renderTeammateCall(args: Record<string, unknown>, theme: Theme, _context?: {
+type TeammateRenderContext = {
     expanded?: boolean;
     isPartial?: boolean;
-}): Component;
+    isError?: boolean;
+    state?: Record<string, unknown>;
+};
+export declare function renderTeammateCall(args: Record<string, unknown>, theme: Theme, context?: TeammateRenderContext): Component;
 export declare function renderTeammateListCall(args: Record<string, unknown>, theme: Theme, context?: {
     isPartial?: boolean;
 }): Component;
@@ -44,7 +47,7 @@ export declare function renderMonitorResult(result: AgentToolResult<unknown>, op
 }, theme: Theme, rendererError?: boolean): Component;
 export declare function renderTeammateResult(result: AgentToolResult<Details>, options: {
     expanded: boolean;
-}, theme: Theme, args?: Record<string, unknown>): Component;
+}, theme: Theme, args?: Record<string, unknown>, context?: TeammateRenderContext): Component;
 export declare function renderTeammateCompletionMessage(content: string, details: Details, expanded: boolean, theme: Theme): Component;
 export declare function renderTeammateCompletionFallbackMessage(content: string, expanded: boolean, theme: Theme): Component;
 export interface CompletionOutboxRenderDetails {

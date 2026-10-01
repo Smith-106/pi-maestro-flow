@@ -52,7 +52,7 @@
 | Component | Version |
 |-----------|---------|
 | Node.js | ≥ 22.19.0 |
-| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | 0.99.0 validation baseline; version-gated legacy compatibility for 0.87–0.98 |
 
 > [Maestro Flow](https://github.com/catlog22/maestro-flow) (knowledge system) is auto-installed as a dependency — no separate prerequisite install needed.
 
@@ -60,13 +60,22 @@
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
 ```
 
 Upgrades migrate Flow-managed companion registrations. A same-name local development override is preserved and reported in the startup log; update or remove that override explicitly.
+
+### Pi 0.99 Native Host and New Tools
+
+On Pi 0.99+, the host owns the tool loadout, `tool_search`, model/classifier runtime, MCP, and keyboard capabilities. Missing native APIs do not start a second legacy runtime. Optional Pi host peers keep their `*` ranges. Use native `/mcp`; disable `builtin:mcp` before previewing and approving old-config migration with `/maestro-mcp-migrate`, then restore the native manager.
+
+- `search` replaces `ffgrep`: literal/regex/fuzzy matching and lines/files/count output; bounded `rg` handles unavailable indexes and root-wide plain/regex searches. Fuzzy still requires the index. Narrow path/glob for large projects.
+- `open-code-review` needs a separately installed `ocr` CLI. `preview`/`rules` resolve files/rules only; `review` performs OCR-managed review with the runtime model; `health` checks connectivity. Configure the model via `/api-manager open-code-review`; see `packages/pi-maestro-flow/optional/OCR-SETUP.md` for installation.
+- Optional Ask transports race the local TUI and cancel the other surface; Mobile cancellation also closes the local wizard. Plan confirm/review exposes an optional transport seam with revision checks, not a promise that every client already has a Plan UI.
+- Native Quiet mode toggles live without activating extra tools; initial resumed-history rendering and third-party execution-only overrides remain limitations. See the docs-site [Cockpit guide](../docs-site/src/content/docs/guides/cockpit.md).
 
 ### Registered Tools Overview
 
@@ -1226,7 +1235,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.30.0
+pi install npm:pi-maestro-flow@0.31.3
 
 # ─── Knowledge ───
 maestro search "query" --code

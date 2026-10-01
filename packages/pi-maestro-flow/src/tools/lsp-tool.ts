@@ -109,7 +109,7 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
       if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
-      const isError = (result as { isError?: boolean }).isError === true;
+      const isError = ctx.isError || (result as { isError?: boolean }).isError === true;
       const action = String(ctx.args.action ?? "?");
       const file = ctx.args.file ? ` ${String(ctx.args.file)}${ctx.args.line ? `:${ctx.args.line}` : ""}` : "";
       return toolResultLine(theme, {

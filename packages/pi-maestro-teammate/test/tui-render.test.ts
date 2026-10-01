@@ -25,7 +25,7 @@ function makeResult(): SingleResult {
   };
 }
 
-test("background multi-task call leaves rendering to the result snapshot", () => {
+test("background multi-task call shows a placeholder before the result snapshot", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "scan", prompt: "find auth" },
@@ -35,10 +35,11 @@ test("background multi-task call leaves rendering to the result snapshot", () =>
     background: true,
   }, theme as never, { expanded: false }).render(80);
 
-  assert.deepEqual(rendered, []);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /teammate.*@scan/);
 });
 
-test("foreground multi-task call leaves rendering to streaming progress", () => {
+test("foreground multi-task call shows a placeholder before streaming progress", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "pkgs", prompt: "inspect packages" },
@@ -47,10 +48,11 @@ test("foreground multi-task call leaves rendering to streaming progress", () => 
     background: false,
   }, theme as never, { expanded: false }).render(80);
 
-  assert.deepEqual(rendered, []);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /teammate.*@pkgs/);
 });
 
-test("expanded multi-task call leaves DAG rendering to progress", () => {
+test("expanded multi-task call shows a placeholder before DAG progress", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "a", prompt: "find auth" },
@@ -60,7 +62,8 @@ test("expanded multi-task call leaves DAG rendering to progress", () => {
     background: true,
   }, theme as never, { expanded: true }).render(80);
 
-  assert.deepEqual(rendered, []);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /teammate.*@a/);
 });
 
 test("expanded multi-result rows trust results over lifecycle-pending progress snapshots", () => {

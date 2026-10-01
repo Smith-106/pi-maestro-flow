@@ -2845,7 +2845,7 @@ test("recursive abort follows descendants without expanding through controller i
   assert.equal(state.namedAgents.has("child-name"), false);
 });
 
-test("structured_output tool completion settles the child without waiting for agent_end", async () => {
+test("structured_output waits for outer settlement and absorbs late child events", async () => {
   const payload = {
     path: ["runtime"],
     findings: ["settled"],
@@ -2869,6 +2869,9 @@ test("structured_output tool completion settles the child without waiting for ag
   const progress: AgentProgress[] = [];
   let killed = false;
   let completionObserverCalled = false;
+  let childStdout: PassThrough | undefined;
+  let submissionCompleted!: () => void;
+  const submissionReady = new Promise<void>((resolve) => { submissionCompleted = resolve; });
   const spawnChildProcess = adaptFakeSpawn(() => {
     const child = createFakeProcess();
     const stdin = new PassThrough();
@@ -2890,6 +2893,7 @@ test("structured_output tool completion settles the child without waiting for ag
         return true;
       },
     });
+    childStdout = stdout;
     setTimeout(() => {
       stdout.write(`${JSON.stringify({
         type: "assistant",
@@ -2897,31 +2901,52 @@ test("structured_output tool completion settles the child without waiting for ag
       })}\n`);
       stdout.write(`${JSON.stringify({ type: "tool_execution_start", toolName: "structured_output" })}\n`);
       stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
-      // These lines model stdout already buffered when settlement terminates
-      // the child. None may restart progress or alter the published result.
-      stdout.write(`${JSON.stringify({ type: "tool_result", toolName: "structured_output", content: "Structured output saved." })}\n`);
-      stdout.write(`${JSON.stringify({ type: "turn_start" })}\n`);
-      stdout.write(`${JSON.stringify({ type: "message_end", content: "late assistant wake" })}\n`);
-      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      submissionCompleted();
     }, 0);
     return child;
   });
 
-  const result = await Promise.race([
-    runSingleTeammate(
-      { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
-      {
-        baseCwd: process.cwd(),
-        spawnChildProcess,
-        onProgress: (entry) => progress.push({ ...entry, recentTools: [...entry.recentTools] }),
-        onTurnComplete() {
-          completionObserverCalled = true;
-          throw new Error("observer failed after publication");
-        },
+  const abortController = new AbortController();
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const pending = runSingleTeammate(
+    { agent: "general", task: "Return structured output", context: "fork", outputSchema: schema, timeoutMs: 2_000 },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      childPiVersion: "0.99.0",
+      signal: abortController.signal,
+      onProgress: (entry) => progress.push({ ...entry, recentTools: [...entry.recentTools] }),
+      onTurnComplete() {
+        completionObserverCalled = true;
+        throw new Error("observer failed after publication");
       },
-    ),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("settlement timed out")), 500)),
-  ]);
+    },
+  );
+  const result = await Promise.race([
+    (async () => {
+      await submissionReady;
+      assert.equal(completionObserverCalled, false, "tool completion is not outer settlement");
+      assert.equal(killed, false, "completed submissions must not reclaim an active session");
+      assert.equal(progress.some((entry) => entry.resultReadyAt !== undefined), false);
+      // Native children cannot fall back to legacy agent_end, even without
+      // willRetry. Only their authoritative idle boundary may settle the task.
+      childStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      assert.equal(completionObserverCalled, false);
+      assert.equal(killed, false);
+      childStdout!.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+      // These lines model stdout already buffered when settlement terminates
+      // the child. None may restart progress or alter the published result.
+      childStdout!.write(`${JSON.stringify({ type: "tool_result", toolName: "structured_output", content: "Structured output saved." })}\n`);
+      childStdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+      childStdout!.write(`${JSON.stringify({ type: "message_end", content: "late assistant wake" })}\n`);
+      childStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      return await pending;
+    })(),
+    new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("settlement timed out")), 500); }),
+  ]).finally(() => {
+    clearTimeout(deadline);
+    abortController.abort();
+  });
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(result.structuredOutput, payload);
@@ -3102,6 +3127,7 @@ test("structured output above 256 KiB survives echoed JSONL arguments and result
       ] } })}\n`);
       stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false,
         result: { details: payload } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
     }, 0);
     return child;
   });
@@ -3217,6 +3243,7 @@ test("a valid persisted output wins when the event payload is schema-invalid", a
       })}\n`);
       fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
       stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
     }, 0);
     return child;
   });
@@ -3260,6 +3287,7 @@ test("a valid event payload wins when the persisted output is schema-invalid", a
       })}\n`);
       fs.writeFileSync(outputFile, JSON.stringify({ ok: "invalid" }));
       stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
     }, 0);
     return child;
   });

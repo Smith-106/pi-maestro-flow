@@ -45,8 +45,9 @@ test("lookupBuiltinPricing prefers the catalog matching the channel's API driver
   assert.equal(azure?.cost.cacheWrite, 5);
   const codex = lookupBuiltinPricing("gpt-5.6-sol", "openai-codex-responses");
   assert.equal(codex?.source, "openai-codex");
+  // Pi 0.99 catalogs this model under OpenCode, not a dedicated DeepSeek provider.
   const deepseek = lookupBuiltinPricing("deepseek-v4-flash", "openai-completions");
-  assert.equal(deepseek?.source, "deepseek");
+  assert.equal(deepseek?.source, "opencode");
   assert.equal(deepseek?.cost.input, 0.14);
 });
 
