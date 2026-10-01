@@ -272,8 +272,13 @@ test("attached images inject delegated analysis when the configured chain is tex
   try {
     writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
     let delegated = 0;
+    let responseAttribution: unknown;
     const runtime = harness(cwd, undefined, {
-      visionAnalyzer: async () => { delegated += 1; return { text: "A disabled checkbox is visible.", model: "helper/vision", cached: false }; },
+      visionAnalyzer: async (_ctx, _image, options) => {
+        delegated += 1;
+        responseAttribution = options.onResponse;
+        return { text: "A disabled checkbox is visible.", model: "helper/vision", cached: false };
+      },
     });
     await runtime.emit("session_start");
     const result = await runtime.emit("before_agent_start", {
@@ -288,6 +293,7 @@ test("attached images inject delegated analysis when the configured chain is tex
       };
     };
     assert.equal(delegated, 1);
+    assert.equal(typeof responseAttribution, "function", "native helper responses retain API-key attribution");
     assert.equal(result.message?.customType, "maestro-vision-analysis");
     assert.equal(result.message?.display, false);
     assert.match(result.message?.content ?? "", /\[image:vision\]/);

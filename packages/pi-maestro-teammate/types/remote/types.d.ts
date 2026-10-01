@@ -118,6 +118,10 @@ export interface RemoteUsage {
 }
 export interface RemoteToolEvent {
     toolCallId: string;
+    parentToolCallId?: string;
+    /** Full bounded live result; never reconstructed from nestedCalls telemetry. */
+    result?: unknown;
+    complete?: boolean;
     toolName: string;
     phase: "start" | "end";
     isError?: boolean;

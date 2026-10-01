@@ -280,7 +280,7 @@ export function normalizeDevinModels(
 /** `undefined` marks a level the ladder does not serve; supported levels keep their name. */
 function thinkingLevelMap(
   byEffort: Partial<Record<DevinThinkingLevel, string>>,
-): ProviderModelConfig["thinkingLevelMap"] {
+): Partial<Record<DevinThinkingLevel, string | null>> {
   const map: Record<string, string | null> = {};
   for (const level of THINKING_LEVELS) {
     map[level] = byEffort[level] !== undefined ? level : null;

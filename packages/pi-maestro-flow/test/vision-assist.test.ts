@@ -54,7 +54,7 @@ function harness(agentDir: string, completeFn: any, breaker?: ModelCircuitBreake
     getActiveTools() { return [...active]; },
     setActiveTools(next: string[]) { active = [...next]; },
   } as any;
-  registerVisionDelegation(pi, { agentDir, completeFn, ...(breaker ? { breaker } : {}) });
+  registerVisionDelegation(pi, { agentDir, completeFn, hostVersion: "0.98.0", ...(breaker ? { breaker } : {}) });
   return { handlers, tools, commands, get active() { return active; }, setActive(next: string[]) { active = [...next]; } };
 }
 
@@ -396,7 +396,7 @@ test("attached image analysis is available to failover integration", async () =>
     const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("attached")]);
     const result = await analyzeAttachedImage({ cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) } as any,
       { data: pngBytes.toString("base64"), mimeType: "image/png" },
-      { agentDir: dir, completeFn: async () => assistant("attached analysis") as any });
+      { agentDir: dir, hostVersion: "0.98.0", completeFn: async () => assistant("attached analysis") as any });
     assert.equal(result.text, "attached analysis"); assert.equal(result.model, "p/vision");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -452,13 +452,13 @@ test("attached image MIME is validated against magic bytes", async () => {
     const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("payload")]);
     const ok = await analyzeAttachedImage({ cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) } as any,
       { data: pngBytes.toString("base64"), mimeType: "image/jpeg" },
-      { agentDir: dir, completeFn: async () => assistant("analysis") as any });
+      { agentDir: dir, hostVersion: "0.98.0", completeFn: async () => assistant("analysis") as any });
     assert.equal(ok.text, "analysis");
     // A non-image payload with a declared image MIME must be rejected.
     await assert.rejects(
       analyzeAttachedImage({ cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) } as any,
         { data: Buffer.from("not an image at all").toString("base64"), mimeType: "image/png" },
-        { agentDir: dir, completeFn: async () => assistant("unused") as any }),
+        { agentDir: dir, hostVersion: "0.98.0", completeFn: async () => assistant("unused") as any }),
       /unsupported attached image/,
     );
   } finally { rmSync(dir, { recursive: true, force: true }); }

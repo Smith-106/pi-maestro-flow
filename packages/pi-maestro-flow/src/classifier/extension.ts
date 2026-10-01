@@ -23,9 +23,10 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   classify,
+  bindClassifierRuntime,
   classifierStatus,
   configureClassifier,
   listClassifyDomains,
@@ -115,6 +116,7 @@ export default function registerClassifier(pi: ExtensionAPI): void {
       return config;
     }
     if (configCwd === cwd) return config;
+    bindClassifierRuntime({ hostVersion: VERSION, runtime: ctx.modelRegistry });
     configCwd = cwd;
     const loaded = applyClassifierEnvOverrides(await loadClassifierConfig(cwd));
     applyConfig(loaded);

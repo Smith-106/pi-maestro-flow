@@ -45,6 +45,12 @@ import type {
   CompletionDispatchSeed,
   CompletionResource,
 } from "../public/v1/completion-durability.ts";
+import { TEAMMATE_TOOL_EXECUTION_EVENT } from "../public/v1/events.ts";
+import {
+  ParallelCompletionController,
+  formatParallelCompletionMessage,
+  type ParallelCompletionDelivery,
+} from "./parallel-completion.ts";
 import {
   formatCompact,
   formatVerbose,
@@ -83,6 +89,7 @@ import {
   taskDependencyNames,
   hasRpcTurnSidecar,
   sendRpcMessage,
+  sendRpcMessageWithReceipt,
   truncateUtf8Tail,
   truncateUtf8Head,
   checkDepthGuard,
@@ -1300,21 +1307,26 @@ export async function handleProxyRequest(
           sender: proxySender(),
         }));
       }
+      const graphMode = normalizedTasks ? inferGraphMode(normalizedTasks) : undefined;
       const completionReplyTarget = routedParams.reply_to ?? "caller";
       const completionSessionId = completionReplyTarget === "main"
         ? state.currentSessionId ?? undefined
         : parentSessionId;
-      const completionSeed: CompletionDispatchSeed | undefined = authority.completion && completionSessionId
+      const completionTarget = authority.completion && completionSessionId
+        ? {
+            workspaceId: authority.completion.workspaceId,
+            sessionId: completionSessionId,
+            ...(completionReplyTarget === "caller" && parentCid ? { correlationId: parentCid } : {}),
+          }
+        : undefined;
+      let parallelCompletion: ParallelCompletionController<SingleResult> | undefined;
+      const completionSeed: CompletionDispatchSeed | undefined = completionTarget && graphMode !== "parallel"
         ? {
             dispatchId: cid,
             deliveryGroupId: cid,
             reservationId: randomUUID(),
-            mode: normalizedTasks ? inferGraphMode(normalizedTasks) : "single",
-            target: {
-              workspaceId: authority.completion.workspaceId,
-              sessionId: completionSessionId,
-              ...(completionReplyTarget === "caller" && parentCid ? { correlationId: parentCid } : {}),
-            },
+            mode: graphMode ?? "single",
+            target: completionTarget,
             replyTarget: completionReplyTarget,
             originCwd: dispatchOriginCwd,
             expectedTasks: normalizedTasks ? taskCorrelationIds : [cid],
@@ -1323,20 +1335,36 @@ export async function handleProxyRequest(
         : undefined;
       let completionDurable = false;
       let completionNotificationRequired = false;
-      if (completionSeed && authority.completion) {
-        try {
+      try {
+        if (graphMode === "parallel") {
+          parallelCompletion = completionTarget && authority.completion
+            ? await ParallelCompletionController.admit({
+                parentDispatchId: cid,
+                taskCorrelationIds,
+                target: completionTarget,
+                replyTarget: completionReplyTarget,
+                originCwd: dispatchOriginCwd,
+                coordinator: authority.completion.coordinator,
+              })
+            : ParallelCompletionController.nonDurable({
+                parentDispatchId: cid,
+                taskCorrelationIds,
+                originCwd: dispatchOriginCwd,
+              });
+          completionDurable = parallelCompletion.durable;
+        } else if (completionSeed && authority.completion) {
           completionDurable = (await authority.completion.coordinator.beginDispatch(completionSeed)).durable;
-        } catch (error) {
-          reply({ type: "teammate_proxy_result", requestId, result: {
-            content: [{
-              type: "text",
-              text: `Nested teammate dispatch rejected before spawn: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-            isError: true,
-            details: { mode: normalizedTasks ? inferGraphMode(normalizedTasks) : "single", results: [] },
-          }});
-          return;
         }
+      } catch (error) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `Nested teammate dispatch rejected before spawn: ${error instanceof Error ? error.message : String(error)}`,
+          }],
+          isError: true,
+          details: { mode: graphMode ?? "single", results: [] },
+        }});
+        return;
       }
       const progressState = new Map<number, AgentProgressSnapshot>();
       normalizedTasks?.forEach((task, index) => {
@@ -1503,6 +1531,10 @@ export async function handleProxyRequest(
         result: SingleResult;
         resourceAcknowledged: boolean;
       }>();
+      const primaryCompletionSeedFor = (taskCorrelationId: string): CompletionDispatchSeed | undefined =>
+        parallelCompletion?.durable
+          ? parallelCompletion.seedFor(taskCorrelationId)
+          : completionSeed;
       const finishProxyDispatchTracking = (): boolean => {
         const cancelled = state.cancelledProxyDispatches?.get(requestId) === cid;
         if (state.proxyDispatchByRequest?.get(requestId) === cid) {
@@ -1531,6 +1563,112 @@ export async function handleProxyRequest(
             outcome,
           };
         });
+      const deliverNestedParallelCompletion = (
+        delivery: ParallelCompletionDelivery<SingleResult>,
+      ): void => {
+        const controller = parallelCompletion;
+        const result = delivery.value;
+        if (!controller || !result.publicationId) return;
+        const summary = formatParallelCompletionMessage({
+          label: result.name ?? result.agent,
+          correlationId: result.correlationId,
+          resourceUri: `agent://${result.publicationId}`,
+          resultSummary: displayMessageForResult(result),
+          snapshot: delivery.snapshot,
+        });
+        const envelope = {
+          customType: "teammate-complete" as const,
+          content: summary,
+          display: true as const,
+          details: {
+            mode: "parallel" as const,
+            results: [result],
+            progress: progressSnapshot(),
+            ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
+          },
+        };
+        const fallbackDelivery = (): void => {
+          if (!ownsDispatchGeneration()
+            || state.cancelledProxyDispatches?.get(requestId) === cid) {
+            controller.finishDelivery(result.correlationId, true);
+            return;
+          }
+          const delivered = deliverTeammateCompleteNotification({
+            pi,
+            state,
+            envelope,
+            replyTarget: completionReplyTarget,
+            parentCid,
+            parentSessionId,
+            sessionGeneration: dispatchGeneration,
+            parentRuntimeGeneration,
+          });
+          if (!delivered) markSettledResultInspectable(state, result.correlationId);
+          controller.finishDelivery(result.correlationId, true);
+        };
+        const seed = controller.durable ? controller.seedFor(result.correlationId) : undefined;
+        if (!seed || !authority.completion) {
+          fallbackDelivery();
+          return;
+        }
+        const outcome = result.terminalStatus === "terminated"
+          ? "terminated" as const
+          : result.exitCode === 0 ? "completed" as const : "failed" as const;
+        void authority.completion.coordinator.publishCompletion({
+          dispatchId: seed.dispatchId,
+          reservationId: seed.reservationId,
+          kind: "single",
+          outcome,
+          summary,
+          resources: nestedResources([result]),
+          finalizedAt: Date.now(),
+        }).then((published) => {
+          if (!ownsDispatchGeneration()) {
+            controller.finishDelivery(result.correlationId, true);
+            return;
+          }
+          if (!published.finalized) {
+            markSettledResultInspectable(state, result.correlationId);
+            controller.finishDelivery(result.correlationId, true);
+            return;
+          }
+          const record = published.record;
+          if (record?.replyTarget === "caller") {
+            const delivered = deliverTeammateCompleteNotification({
+              pi,
+              state,
+              envelope: authority.completion!.coordinator.deliveryEnvelope(record, false),
+              replyTarget: "caller",
+              parentCid,
+              parentSessionId,
+              sessionGeneration: dispatchGeneration,
+              parentRuntimeGeneration,
+            });
+            if (!delivered) markSettledResultInspectable(state, result.correlationId);
+          }
+          controller.finishDelivery(result.correlationId, true);
+        }, (error) => {
+          if (!ownsDispatchGeneration()) {
+            controller.finishDelivery(result.correlationId, true);
+            return;
+          }
+          logDiagnosticWarn("[pi-maestro-teammate] durable nested parallel completion could not confirm finalization; retaining inspectable result:", error);
+          markSettledResultInspectable(state, result.correlationId);
+          controller.finishDelivery(result.correlationId, true);
+        }).catch((error) => {
+          controller.finishDelivery(result.correlationId, true);
+          logDiagnosticWarn("[pi-maestro-teammate] post-finalize nested parallel delivery handler failed; durable recovery retained:", error);
+        });
+      };
+      const deliverNestedParallelCompletions = (
+        deliveries: readonly ParallelCompletionDelivery<SingleResult>[],
+      ): void => {
+        for (const delivery of deliveries) deliverNestedParallelCompletion(delivery);
+      };
+      const activateNestedParallelCompletions = async (): Promise<void> => {
+        if (!parallelCompletion) return;
+        deliverNestedParallelCompletions(await parallelCompletion.activateNotifications("single"));
+      };
       const requireNestedNotification = async (kind: "single" | "graph" | "failure"): Promise<void> => {
         if (!completionDurable || !completionSeed || !authority.completion) return;
         await authority.completion.coordinator.requireNotification({
@@ -2065,7 +2203,11 @@ export async function handleProxyRequest(
           target.resultReadyAt = undefined;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
-        onChildEvent: (childEvent) => handleChildLifecycleEvent(state, childEvent),
+        onChildEvent: (childEvent) => {
+          if (!ownsDispatchGeneration()) return;
+          if (typeof childEvent.type === "string" && childEvent.type.startsWith("tool_execution_")) pi.events.emit(TEAMMATE_TOOL_EXECUTION_EVENT, childEvent);
+          handleChildLifecycleEvent(state, childEvent);
+        },
         onChildClosed: (childId, generation, details) => {
           const target = state.activeRuns.get(childId);
           if (!target || (target.runtimeGeneration ?? 0) !== (generation ?? 0)) return;
@@ -2121,12 +2263,13 @@ export async function handleProxyRequest(
           }
           nestedAdditionalNotification.set(result, notifyAdditional);
           const previousPublication = nestedPublishedResultsByCorrelation.get(result.correlationId);
+          const primaryCompletionSeed = primaryCompletionSeedFor(result.correlationId);
           const retriesMainPublication = publicationCount > 1
             && completionDurable
-            && completionSeed !== undefined
+            && primaryCompletionSeed !== undefined
             && previousPublication?.resourceAcknowledged === false;
           let resultSeed = publicationCount === 1 || retriesMainPublication
-            ? completionSeed
+            ? primaryCompletionSeed
             : undefined;
           let resultDurable = publicationCount === 1 || retriesMainPublication
             ? completionDurable
@@ -2134,11 +2277,11 @@ export async function handleProxyRequest(
           if (publicationCount > 1
             && !retriesMainPublication
             && notifyAdditional
-            && completionSeed
+            && primaryCompletionSeed
             && authority.completion
             && result.publicationId) {
             const additionalSeed: CompletionDispatchSeed = {
-              ...completionSeed,
+              ...primaryCompletionSeed,
               dispatchId: result.publicationId,
               deliveryGroupId: result.publicationId,
               reservationId: randomUUID(),
@@ -2166,12 +2309,24 @@ export async function handleProxyRequest(
               : result.exitCode === 0 ? "completed" : "failed";
           }
           const publication = await emitTeammateResultPublished(pi, result, originCwd);
-          const isMainPublication = resultSeed?.dispatchId === completionSeed?.dispatchId;
-          if (!previousPublication || (!previousPublication.resourceAcknowledged && isMainPublication)) {
+          const isPrimaryPublication = resultSeed?.dispatchId === primaryCompletionSeed?.dispatchId;
+          if (!previousPublication || (!previousPublication.resourceAcknowledged && isPrimaryPublication)) {
             nestedPublishedResultsByCorrelation.set(result.correlationId, {
               result,
               resourceAcknowledged: publication.resourceAcknowledged,
             });
+          }
+          if (parallelCompletion
+            && isPrimaryPublication
+            && ownsDispatchGeneration()
+            && state.cancelledProxyDispatches?.get(requestId) !== cid
+            && (publication.resourceAcknowledged || !parallelCompletion.durable)) {
+            const delivery = parallelCompletion.record(
+              result.correlationId,
+              result,
+              resultIsError(result),
+            );
+            if (delivery) deliverNestedParallelCompletion(delivery);
           }
           return resultDurable ? publication : undefined;
         },
@@ -2598,24 +2753,27 @@ export async function handleProxyRequest(
         taskCorrelationId: string,
         agent: string,
         message: string,
-      ): SingleResult => ({
-        agent,
-        ...(task?.name ? { name: task.name } : {}),
-        task: task?.prompt ?? singleTask.prompt,
-        exitCode: 1,
-        messages: [{ role: "assistant", content: message }],
-        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 0 },
-        model: task?.model ?? "",
-        correlationId: taskCorrelationId,
-        publicationId: randomUUID(),
-        originCwd: task?.cwd ?? dispatchOriginCwd,
-        durationMs: Date.now() - activeAgent.startedAt,
-        wakeable: false,
-        terminalStatus: "failed",
-        completionDispatchId: completionSeed?.dispatchId,
-        completionReservationId: completionSeed?.reservationId,
-        completionOutcome: "failed",
-      });
+      ): SingleResult => {
+        const primarySeed = primaryCompletionSeedFor(taskCorrelationId);
+        return {
+          agent,
+          ...(task?.name ? { name: task.name } : {}),
+          task: task?.prompt ?? singleTask.prompt,
+          exitCode: 1,
+          messages: [{ role: "assistant", content: message }],
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 0 },
+          model: task?.model ?? "",
+          correlationId: taskCorrelationId,
+          publicationId: randomUUID(),
+          originCwd: task?.cwd ?? dispatchOriginCwd,
+          durationMs: Date.now() - activeAgent.startedAt,
+          wakeable: false,
+          terminalStatus: "failed",
+          completionDispatchId: primarySeed?.dispatchId,
+          completionReservationId: primarySeed?.reservationId,
+          completionOutcome: "failed",
+        };
+      };
       const publishNestedCanonicalFailureResult = async (result: SingleResult): Promise<void> => {
         const publication = await emitTeammateResultPublished(pi, result, result.originCwd ?? dispatchOriginCwd);
         nestedPublishedResultsByCorrelation.set(result.correlationId, {
@@ -2667,6 +2825,15 @@ export async function handleProxyRequest(
 
       const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
       const runningLabel = singleTask.name ?? activeAgent.agent;
+      const failNestedNotificationAdmission = (error: unknown): void => {
+        const message = settleNestedExecutionFailure(error);
+        finishProxyDispatchTracking();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Nested completion notification admission failed: ${message}` }],
+          isError: true,
+          details: { mode, results: [] },
+        } });
+      };
 
       const completeNestedInBackground = (
         nestedPromise: ReturnType<typeof executeNested>,
@@ -2683,16 +2850,19 @@ export async function handleProxyRequest(
         }
         void nestedPromise.then((completed) => {
           if (!ownsDispatchGeneration()) {
+            void parallelCompletion?.abandon("stale nested parallel dispatch completed");
             finishProxyDispatchTracking();
             return;
           }
           if (state.cancelledProxyDispatches?.get(requestId) === cid) {
+            void parallelCompletion?.abandon("cancelled nested parallel dispatch completed");
             finishProxyDispatchTracking();
             return;
           }
-          publishNestedCompletion(completed, true);
+          publishNestedCompletion(completed, mode !== "parallel");
         }).catch((error) => {
           const cancelled = finishProxyDispatchTracking();
+          void parallelCompletion?.abandon("nested parallel graph dispatch failed");
           if (cancelled || !ownsDispatchGeneration()) return;
           settleNestedExecutionFailure(error);
           void deliverDurableFailureWithFallback({
@@ -2748,6 +2918,7 @@ export async function handleProxyRequest(
             deadline.promise.then(() => ({ status: "timeout" as const })),
           ]);
         } catch (error) {
+          await parallelCompletion?.abandon("nested foreground setup failed");
           cancelProxyDispatch(state, requestId, "nested foreground setup failed");
           if (state.cancelledProxyDispatches?.get(requestId) === cid) {
             state.cancelledProxyDispatches.delete(requestId);
@@ -2762,7 +2933,9 @@ export async function handleProxyRequest(
         if (race.status === "failed") {
           const cancelled = finishProxyDispatchTracking();
           if (cancelled || !ownsDispatchGeneration()) return;
-          if (completionDurable && completionSeed && authority.completion) {
+          if (parallelCompletion) {
+            await parallelCompletion.abandon("nested foreground parallel dispatch failed");
+          } else if (completionDurable && completionSeed && authority.completion) {
             await authority.completion.coordinator.abandon(completionSeed, "nested foreground dispatch failed");
           }
           const failureMessage = settleNestedExecutionFailure(race.error);
@@ -2789,7 +2962,9 @@ export async function handleProxyRequest(
             return;
           }
           publishNestedCompletion(completed, false);
-          if (completionDurable && completionSeed && authority.completion) {
+          if (parallelCompletion) {
+            await parallelCompletion.settleForeground();
+          } else if (completionDurable && completionSeed && authority.completion) {
             await authority.completion.coordinator.settleForeground(completionSeed);
           }
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
@@ -2797,10 +2972,17 @@ export async function handleProxyRequest(
         }
 
         if (!ownsDispatchGeneration()) {
+          await parallelCompletion?.abandon("stale nested parallel dispatch detached");
           finishProxyDispatchTracking();
           return;
         }
-        await requireNestedNotification(normalizedTasks ? "graph" : "single");
+        try {
+          if (mode === "parallel") await activateNestedParallelCompletions();
+          else await requireNestedNotification(normalizedTasks ? "graph" : "single");
+        } catch (error) {
+          failNestedNotificationAdmission(error);
+          return;
+        }
         completeNestedInBackground(nestedPromise);
         const detachText = race.status === "timeout"
           ? `@${runningLabel} moved to background after ${waitMs}ms.`
@@ -2820,7 +3002,13 @@ export async function handleProxyRequest(
         return;
       }
 
-      await requireNestedNotification(normalizedTasks ? "graph" : "single");
+      try {
+        if (mode === "parallel") await activateNestedParallelCompletions();
+        else await requireNestedNotification(normalizedTasks ? "graph" : "single");
+      } catch (error) {
+        failNestedNotificationAdmission(error);
+        return;
+      }
       const nestedPromise = executeNested();
       completeNestedInBackground(nestedPromise);
       reply({ type: "teammate_proxy_result", requestId, result: {
@@ -3375,18 +3563,35 @@ export async function handleProxyRequest(
         : requestedMode;
       const deliveredProvenance = proxyProvenanceWithMode(localProvenance, mode);
       const turnTracked = hasRpcTurnSidecar(agent.stdin);
-      const sent = sendRpcMessage(
+      const acceptanceStream = agent.stdin;
+      const acceptanceGeneration = agent.runtimeGeneration;
+      const receipt = await sendRpcMessageWithReceipt(
         agent.stdin,
         deliveryMessage,
         mode,
         agent.lease ? leaseToken(agent.lease) : undefined,
         deliveredProvenance,
       );
-      if (!sent) {
+      if (!ownsDispatchGeneration() || state.activeRuns.get(cid) !== agent
+        || agent.stdin !== acceptanceStream || agent.runtimeGeneration !== acceptanceGeneration) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "The originating runtime changed during input acceptance; receipt is stale. Do not resend without new evidence." }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      if (!receipt.accepted) {
         restoreDeferredAgentContext(agent, deferredContext);
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Failed to send message to "${to}".` }],
           isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      if (receipt.disposition === "handled") {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Message handled by Pi input hooks for "${to}"; no agent run started.` }],
+          isError: false, details: { delivered: true, disposition: receipt.disposition },
         }});
         return;
       }
@@ -3431,7 +3636,11 @@ export async function handleProxyRequest(
         { triggerTurn: true },
       );
 
-      const modeLabel = mode === "steer" ? "active turn cancelled + prompt injected" : mode === "abort" ? "aborted" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
+      const modeLabel = receipt.disposition === "transport-written" ? "written to the legacy transport (acceptance/consumption unconfirmed)"
+        : receipt.disposition === "legacy-accepted" ? "accepted by legacy RPC (no disposition; consumption unconfirmed)"
+        : mode === "interrupt" ? "interrupt requested (cancellation acknowledgement pending)"
+        : mode === "steer" ? "queued for turn-boundary injection (does not interrupt tool calls)"
+        : mode === "abort" ? "aborted" : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{ type: "text", text: `Message ${modeLabel} for "${to}".` }],
         isError: false, details: { delivered: true },

@@ -8,7 +8,24 @@
 1. **注册 MCP 服务器** — 写入 MCP 配置文件（含 `mcpServers` 映射）
 2. **OAuth 认证** — 对需要 OAuth 的 server 完成授权流程
 
-成功标准：`/mcp` 列出已注册 server，`/mcp auth <name>` 对 OAuth server 完成 token 获取，AI 能调用 server 暴露的工具。
+成功标准：`/mcp` 列出已注册 server；Pi 0.99+ 用 `/mcp login <name>`（或 shell 中 `pi mcp login <name>`）完成 OAuth；AI 能调用 server 暴露的工具。
+
+## HOST OWNERSHIP（先判断）
+
+- **Pi 0.99+：只使用 Pi 原生 MCP。** 新 server 用 `pi mcp add` 写入原生 `mcp.json`，用 `pi mcp list` 验证，用 `pi mcp login <name>` 登录，再 `/reload`。不要运行 Maestro legacy `mcp` tool、`/mcp auth` 或第二套 manager。
+- **Pi 0.87–0.98：** 才使用下文的 Maestro legacy manager 兼容流程。
+- **已有 legacy 配置升级：** 首次启动时先禁用 `builtin:mcp`，运行 `/maestro-mcp-migrate` 预览；只有用户明确批准后才 apply。OAuth token 不迁移，启用原生 MCP 后重新 `login`。Apps、Fabric 自定义 transport、旧 SSE 等不能无损映射的项必须作为 blocker 处理。
+
+### Pi 0.99+ 原生流程
+
+```bash
+pi mcp add <name> -- <command> [args...]
+# HTTP 示例：pi mcp add docs --url https://example.com/mcp --exposure direct
+pi mcp list
+pi mcp login <name>   # 仅 OAuth server；需要用户浏览器批准
+```
+
+项目 server 加 `-l` 写入 `<cwd>/.pi/mcp.json`；个人 server 写入 `~/.pi/agent/mcp.json`。原生只支持 stdio 与 streamable HTTP，不支持 legacy SSE。工具命名为 `mcp__<server>__<tool>`，暴露策略使用 `codemode`、`codemode-deferred`、`deferred`、`direct` 或 `hidden`。配置变更后运行 `/reload`。
 
 ## PREREQUISITES
 
@@ -16,7 +33,9 @@
 - 目标 MCP server 的接入信息（server URL / npm 包名 / 命令行 + args）
 - 浏览器可用（OAuth 流程需要）
 
-## 配置文件位置（重要）
+## Legacy 0.87–0.98 配置参考（0.99+ 不使用）
+
+### 配置文件位置（重要）
 
 MCP 配置**多源发现**，不是单一文件（见 `src/mcp/config.ts` 的 `getConfigSources`）。按优先级：
 

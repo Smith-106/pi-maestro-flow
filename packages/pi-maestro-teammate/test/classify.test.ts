@@ -39,6 +39,7 @@ const JEV_FILE_VALUE_RESPONSE: JevResponse = {
 function baseConfig(overrides: Partial<ClassifierConfig> = {}): ClassifierConfig {
   return {
     enabled: true,
+    hostVersion: "0.98.0",
     endpoint: "openrouter",
     apiKey: "test-key",
     fetchFn: fakeFetch(JEV_FILE_VALUE_RESPONSE),

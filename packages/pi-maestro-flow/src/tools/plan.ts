@@ -100,6 +100,8 @@ export interface PlanCompactionSnapshot {
   handoffStatus: PlanHandoffStatus;
   handoffKey?: string;
   path?: string;
+  /** Approval identity, not an authorization to restart completed execution. */
+  checksum?: string;
 }
 
 /** Immutable Plan material carried by a Plan-aware deterministic context reset. */
@@ -1852,7 +1854,12 @@ export function getPlanCompactionSnapshot(): PlanCompactionSnapshot {
     revision: latestRevision,
     handoffStatus: getPlanHandoffStatus(),
     ...(latestHandoffKey ? { handoffKey: latestHandoffKey } : {}),
-    ...(currentStore?.currentPath ? { path: currentStore.currentPath } : {}),
+    ...(currentStore ? {
+      path: latestStatus === "approved" && latestApprovedPath
+        ? join(currentStore.plansDir, latestApprovedPath)
+        : currentStore.currentPath,
+    } : {}),
+    ...(latestStatus === "approved" && latestApprovedChecksum ? { checksum: latestApprovedChecksum } : {}),
   };
 }
 

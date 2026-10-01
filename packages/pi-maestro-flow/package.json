@@ -18,7 +18,7 @@
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
     "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
     "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-prompt-context.test.ts test/cockpit-ownership.test.ts",
-    "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts test/compaction-image.test.ts test/compaction-settings.test.ts test/compaction-tui.test.ts test/tool-result-spill.test.ts test/lossless.test.ts test/cache-gate.test.ts test/relevance.test.ts test/dedup.test.ts test/content-detector.test.ts test/evidence-index.test.ts",
+    "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts test/compaction-image.test.ts test/compaction-settings.test.ts test/compaction-tui.test.ts test/tool-result-spill.test.ts test/lossless.test.ts test/cache-gate.test.ts test/relevance.test.ts test/dedup.test.ts test/content-detector.test.ts test/evidence-index.test.ts test/new-context.test.ts test/recovery-focus.test.ts",
     "test:settings": "node --experimental-transform-types --test test/settings-provider.test.ts test/api-manager-settings-provider.test.ts test/mcp-settings-provider.test.ts test/skills-settings-provider.test.ts test/smart-search-settings-provider.test.ts test/teammate-backends-settings-provider.test.ts test/settings-provider-wiring.test.ts test/settings-catalogs.test.ts test/tui-locale.test.ts test/resource-lock.test.ts",
     "test:gui": "node --experimental-transform-types --test test/gui-server.test.ts test/gui-state.test.ts test/gui-events.test.ts test/gui-tools.test.ts test/gui-invoke.test.ts test/gui-e2e.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
@@ -166,14 +166,14 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.87.0",
-    "@earendil-works/pi-ai": "0.87.0",
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "@earendil-works/pi-tui": "0.87.0",
+    "@earendil-works/pi-agent-core": "0.99.0",
+    "@earendil-works/pi-ai": "0.99.0",
+    "@earendil-works/pi-coding-agent": "0.99.0",
+    "@earendil-works/pi-tui": "0.99.0",
     "@types/cross-spawn": "6.0.6",
     "@types/ssh2": "1.15.5",
     "@types/ws": "^8.5.13",
-    "typebox": "1.3.7",
+    "typebox": "1.3.27",
     "typescript": "5.7.3",
     "vitest": "^4.1.10"
   },

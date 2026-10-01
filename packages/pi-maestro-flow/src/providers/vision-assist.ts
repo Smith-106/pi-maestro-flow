@@ -8,7 +8,7 @@ import { extname, isAbsolute, join, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, complete } from "@earendil-works/pi-ai/compat";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   isRetryableProviderError,
@@ -16,6 +16,8 @@ import {
   type AcquiredModelCandidate,
 } from "pi-maestro-teammate/v1/retry";
 import { Type } from "typebox";
+import { getPiFeatureOwner } from "pi-maestro-settings-core/v1";
+import { recordProviderResponse } from "./api-provider-config.ts";
 import { loadSsrfConfig, validateRemoteUrl } from "../tools/web-access/ssrf-protection.ts";
 
 export const DESCRIBE_IMAGE_TOOL_NAME = "describe_image";
@@ -68,6 +70,8 @@ export type VisionManagerContext = Pick<ExtensionContext, "ui" | "model" | "mode
 export interface VisionDelegationOptions {
   agentDir?: string;
   completeFn?: typeof complete;
+  hostVersion?: string;
+  onResponse?: import("@earendil-works/pi-ai").ModelsSimpleStreamOptions["onResponse"];
   /** Circuit breaker for delegated vision health; defaults to a vision-only
    *  process instance so helper failures cannot open the main model circuit. */
   breaker?: ModelCircuitBreaker;
@@ -267,7 +271,7 @@ export async function analyzeAttachedImage(
   if (!config.enabled) throw new Error("Vision delegation is disabled");
   const image = normalizeAttachedImage(input, config.maxImageBytes);
   const cache = visionCacheFor(agentDir, config.cache.maxEntries);
-  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete, options.breaker ?? sharedVisionModelCircuitBreaker, options.telemetry ?? noopVisionTelemetry());
+  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete, options.breaker ?? sharedVisionModelCircuitBreaker, options.telemetry ?? noopVisionTelemetry(), options.hostVersion ?? VERSION, options.onResponse);
 }
 
 export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelegationOptions = {}): void {
@@ -452,7 +456,8 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
       if (isMultimodalModel(ctx.model)) return toolError("The active model supports images natively.", "native_model");
       try {
         const image = await loadImage(params.image_path, ctx.cwd, config.maxImageBytes, signal);
-        const result = await delegateImage(ctx, image, params.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, signal, completeFn, breaker, telemetry);
+        const result = await delegateImage(ctx, image, params.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, signal, completeFn, breaker, telemetry, options.hostVersion ?? VERSION,
+          options.onResponse ?? ((response, model) => recordProviderResponse(pi, model.provider, response.status, ctx, join(agentDir, "models.json"))));
         return { content: [{ type: "text", text: result.text }], details: { mode: "delegate", ...result, source: image.source } };
       } catch (error) {
         return toolError(`Vision delegation failed: ${message(error)}`, error instanceof Error && error.name === "AbortError" ? "aborted" : "vision_error");
@@ -585,6 +590,8 @@ async function delegateImage(
   completeFn: typeof complete,
   breaker: ModelCircuitBreaker = sharedVisionModelCircuitBreaker,
   telemetry: VisionTelemetry = noopVisionTelemetry(),
+  hostVersion = VERSION,
+  onResponse?: VisionDelegationOptions["onResponse"],
 ): Promise<VisionAnalysisResult> {
   await refreshModelRegistryBestEffort(ctx);
   const references = candidateReferences(ctx, config);
@@ -602,7 +609,7 @@ async function delegateImage(
     telemetry.emit({ type: "cache_miss", model: references[0] });
   }
   const started = Date.now();
-  const result = await callCandidates(ctx, references, image, prompt, config, signal, completeFn, breaker, telemetry);
+  const result = await callCandidates(ctx, references, image, prompt, config, signal, completeFn, breaker, telemetry, hostVersion, onResponse);
   if (config.cache.enabled) cache.set(key, result);
   telemetry.emit({ type: "result", model: result.model, cached: false, durationMs: Date.now() - started });
   return { ...result, cached: false };
@@ -618,6 +625,8 @@ async function callCandidates(
   completeFn: typeof complete,
   breaker: ModelCircuitBreaker = sharedVisionModelCircuitBreaker,
   telemetry: VisionTelemetry = noopVisionTelemetry(),
+  hostVersion = VERSION,
+  onResponse?: VisionDelegationOptions["onResponse"],
 ): Promise<CachedResult> {
   const failures: string[] = [];
   for (const reference of references) {
@@ -645,7 +654,9 @@ async function callCandidates(
         failures.push(`${reference}: unavailable or text-only`);
         continue;
       }
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      const owner = getPiFeatureOwner(hostVersion, typeof ctx.modelRegistry.streamSimple === "function");
+      if (owner === "unavailable") throw new Error("Native Vision runtime unavailable");
+      const auth = owner === "legacy" ? await ctx.modelRegistry.getApiKeyAndHeaders(model) : { ok: true as const, apiKey: undefined, headers: undefined };
       if (!auth.ok) {
         settle("release");
         failures.push(`${reference}: authentication unavailable (${auth.error})`);
@@ -660,18 +671,21 @@ async function callCandidates(
         telemetry.emit({ type: "attempt", model: reference, attempt, timeoutMs: config.timeoutMs });
         const guard = completionGuard(signal, config.timeoutMs);
         try {
-          const running = Promise.resolve().then(() => completeFn(safeModel, {
+          const context = {
             systemPrompt: config.customPrompt,
-            messages: [{ role: "user", content: [
-              { type: "image", data: image.data, mimeType: image.mimeType },
-              { type: "text", text: prompt },
+            messages: [{ role: "user" as const, content: [
+              { type: "image" as const, data: image.data, mimeType: image.mimeType },
+              { type: "text" as const, text: prompt },
             ], timestamp: Date.now() }],
-          }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), reasoningEffort, signal: guard.signal }));
+          };
+          const running = Promise.resolve().then(() => owner === "native"
+            ? ctx.modelRegistry.streamSimple(model, context, { maxTokens: Math.min(model.maxTokens, 8_192), reasoning: reasoningEffort, signal: guard.signal, onResponse }).result()
+            : completeFn(safeModel, context, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), reasoningEffort, signal: guard.signal }));
           void running.catch(() => undefined);
           const response = await Promise.race([running, guard.deadline]);
           const text = assistantText(response);
           settle("success");
-          return { text, model: reference };
+          return { text, model: owner === "native" ? `${response.provider}/${response.model}` : reference };
         } catch (error) {
           if (signal?.aborted) {
             settle("release");
@@ -891,7 +905,7 @@ function splitReference(value: string): [string, string] { const slash = value.i
  *  Mirror the main-session convention (createSummarizationOptions): forward the
  *  session thinking level, clamped to the model's supported levels; fall back
  *  to a non-off level when the runtime did not provide one. */
-function visionReasoningEffort(model: Model<Api> | undefined, sessionLevel: ModelThinkingLevel | undefined): string | undefined {
+function visionReasoningEffort(model: Model<Api> | undefined, sessionLevel: ModelThinkingLevel | undefined): Exclude<ModelThinkingLevel, "off"> | undefined {
   if (!model?.reasoning) return undefined;
   const requested: ModelThinkingLevel = sessionLevel && sessionLevel !== "off" ? sessionLevel : "high";
   const capped = capVisionReasoningLevel(requested);

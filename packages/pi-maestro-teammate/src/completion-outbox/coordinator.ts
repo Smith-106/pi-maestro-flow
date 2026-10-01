@@ -557,7 +557,9 @@ export class CompletionDeliveryCoordinator {
 
   deliveryEnvelope(record: CompletionOutboxRecord, replayed: boolean): CompletionDeliveryEnvelope {
     const resources = record.resources.map((resource) => resource.uri);
-    const suffix = resources.length > 0 ? `\n\nResults: ${resources.join(", ")}` : "";
+    const suffix = resources.length > 0
+      && !(record.mode === "parallel" && resources.length === 1 && record.summary.includes(resources[0]!))
+      ? `\n\nResults: ${resources.join(", ")}` : "";
     const provenance: VerifiedMessageProvenanceV1 = {
       version: MESSAGE_PROVENANCE_VERSION,
       messageId: record.dispatchId,
@@ -577,7 +579,7 @@ export class CompletionDeliveryCoordinator {
         contentRevision: receiptRevision(record),
         targetSessionId: record.target.sessionId,
         dispatchId: record.dispatchId,
-        mode: record.kind === "graph" ? "graph" : "single",
+        mode: record.mode ?? (record.kind === "graph" ? "graph" : "single"),
         resources,
         replayed,
         provenance,

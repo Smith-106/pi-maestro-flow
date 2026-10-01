@@ -19,6 +19,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { bindClassifierRuntime, unbindClassifierRuntime } from "../classify/engine.ts";
+import { modelOnlyControlTool } from "./native-tool-policy.ts";
+import { nativeChildBuiltinArgs, probePiChildVersion } from "../runs/native-child.ts";
+import { TEAMMATE_TOOL_EXECUTION_EVENT } from "../public/v1/events.ts";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
@@ -223,6 +227,7 @@ import {
   taskDependencyNames,
   hasRpcTurnSidecar,
   sendRpcMessage,
+  sendRpcMessageWithReceipt,
   truncateUtf8Tail,
   truncateUtf8Head,
   checkDepthGuard,
@@ -650,6 +655,11 @@ import type {
   CompletionDispatchSeed,
   CompletionResource,
 } from "../public/v1/completion-durability.ts";
+import {
+  ParallelCompletionController,
+  formatParallelCompletionMessage,
+  type ParallelCompletionDelivery,
+} from "./parallel-completion.ts";
 
 /** Shared-process bridge key: the root host publishes the live v1 mailbox registry here. */
 export { MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
@@ -776,7 +786,7 @@ export default function registerTeammateExtension(
   }
   const originalRegisterTool = pi.registerTool.bind(pi);
   (pi as unknown as { registerTool: (tool: unknown) => unknown }).registerTool = (tool: unknown) => {
-    const projected = projectConditionalTeammateTool(tool as ToolDefinition);
+    const projected = modelOnlyControlTool(projectConditionalTeammateTool(tool as ToolDefinition), PI_VERSION);
     const candidate = projected as { name?: unknown; execute?: unknown };
     if (!isChild && candidate && typeof candidate.name === "string" && typeof candidate.execute === "function" && isGuiTeammateToolAllowed(candidate.name, "pi-maestro-teammate")) {
       try {
@@ -788,6 +798,16 @@ export default function registerTeammateExtension(
     return originalRegisterTool(projected);
   };
   let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
+  let virtualModelIds: string[] = [];
+  let classifierRuntime: ExtensionContext["modelRegistry"] | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    classifierRuntime = ctx.modelRegistry;
+    bindClassifierRuntime({ hostVersion: PI_VERSION, runtime: classifierRuntime });
+  });
+  pi.on("session_shutdown", () => {
+    if (classifierRuntime) unbindClassifierRuntime(classifierRuntime);
+    classifierRuntime = undefined;
+  });
   let monitorInteractionModeActive = false;
   let monitorToolExposure: MonitorToolExposureController | undefined;
 
@@ -814,6 +834,7 @@ export default function registerTeammateExtension(
 
   const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
     const hostEntries = ctx.modelRegistry?.getAvailable?.() ?? [];
+    virtualModelIds = hostEntries.filter((model) => model.api === "pi-virtual").map((model) => `${model.provider}/${model.id}`);
     const pair = modelRegistryPairSync(ctx.cwd, { hostModels: hostEntries });
     if (pair !== undefined) sharedModelHealthCoordinator.reconcileProjection(pair.dispatch);
     const entries = pair === undefined
@@ -830,7 +851,9 @@ export default function registerTeammateExtension(
           healthy: sharedModelHealthCoordinator.isHealthy(route.modelRegistrationId),
         }),
       }).entries;
-    const next = createModelCatalogSnapshot(entries);
+    const next = createModelCatalogSnapshot(pair === undefined
+      ? entries
+      : [...entries, ...hostEntries.filter((model) => model.api === "pi-virtual")]);
     if (next.signature !== modelCatalog.signature) modelCatalog = next;
     return modelCatalog;
   };
@@ -2758,12 +2781,12 @@ export default function registerTeammateExtension(
     }
   }
 
-  const injectLocalAgentMessage = (
+  const injectLocalAgentMessage = async (
     correlationId: string,
     targetLabel: string,
     delivery: { body: string; from: string; provenance: MessageProvenanceV1 },
     requestedMode: "steer" | "follow_up" | "interrupt",
-  ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
+  ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean; disposition?: string }> => {
     const messageFrom = delivery.from;
     const agent = state.activeRuns.get(correlationId);
     if (!agent) return { delivered: false, error: `Agent "${targetLabel}" is no longer available.` };
@@ -2828,16 +2851,27 @@ export default function registerTeammateExtension(
         : requestedMode;
     const provenance = provenanceWithDeliveryMode(delivery.provenance, mode);
     const turnTracked = hasRpcTurnSidecar(agent.stdin);
-    const sent = sendRpcMessage(
+    const acceptanceFence = captureRootSessionFence();
+    const acceptanceStream = agent.stdin;
+    const acceptanceGeneration = agent.runtimeGeneration;
+    const receipt = await sendRpcMessageWithReceipt(
       agent.stdin,
       message,
       mode,
       leaseToken(agent.lease),
       provenance,
     );
-    if (!sent) {
+    if (!ownsRootSessionFence(acceptanceFence) || state.activeRuns.get(correlationId) !== agent
+      || agent.stdin !== acceptanceStream || agent.runtimeGeneration !== acceptanceGeneration) {
+      return { delivered: false, error: "The originating runtime changed during Pi input acceptance; receipt is stale. Do not resend without new evidence." };
+    }
+    if (!receipt.accepted) {
       restoreDeferredAgentContext(agent, deferredContext);
-      return { delivered: false, error: `Failed to send message to "${targetLabel}".` };
+      return { delivered: false, error: receipt.error ?? `Failed to send message to "${targetLabel}".` };
+    }
+    if (receipt.disposition === "handled") {
+      acknowledgeDeferredAgentContext(deferredContext);
+      return { delivered: true, mode, disposition: receipt.disposition };
     }
     acknowledgeDeferredAgentContext(deferredContext);
 
@@ -2872,7 +2906,7 @@ export default function registerTeammateExtension(
       isSend: true,
     });
     markWorkspacePeerDirty();
-    return { delivered: true, mode, wasSleeping };
+    return { delivered: true, mode, wasSleeping, disposition: receipt.disposition };
   };
 
   // Durable mailbox host — bound per session so the workspace id derives from
@@ -2938,7 +2972,7 @@ export default function registerTeammateExtension(
           return "deferred";
         }
         const mode: "steer" | "follow_up" = envelope.mode === "steer" ? "steer" : "follow_up";
-        const delivery = injectLocalAgentMessage(
+        const delivery = await injectLocalAgentMessage(
           envelope.recipientCorrelationId,
           target.name ?? target.correlationId,
           prepared,
@@ -2961,7 +2995,7 @@ export default function registerTeammateExtension(
           source: "mailbox",
           deliveryMode: request.mode ?? "follow_up",
         });
-        const delivery = injectLocalAgentMessage(
+        const delivery = await injectLocalAgentMessage(
           request.recipientCorrelationId,
           request.recipientLabel ?? request.recipientCorrelationId,
           prepared,
@@ -2987,7 +3021,7 @@ export default function registerTeammateExtension(
           source: "mailbox",
           deliveryMode: request.mode ?? "follow_up",
         });
-        const delivery = injectLocalAgentMessage(
+        const delivery = await injectLocalAgentMessage(
           request.recipientCorrelationId,
           request.recipientLabel ?? request.recipientCorrelationId,
           prepared,
@@ -3021,7 +3055,7 @@ export default function registerTeammateExtension(
       provenance?: MessageProvenanceV1;
       preparedDelivery?: { body: string; from: string; provenance: MessageProvenanceV1 };
     },
-  ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean; contextDeferred?: boolean }> => {
+  ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean; contextDeferred?: boolean; disposition?: string }> => {
     const fence = captureRootSessionFence();
     const prepared = options?.preparedDelivery ?? prepareLocalAgentDelivery(message, {
       ...options,
@@ -3221,6 +3255,7 @@ export default function registerTeammateExtension(
         ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
         ...(result.wasSleeping ? { wasSleeping: true } : {}),
         ...(result.contextDeferred ? { contextDeferred: true } : {}),
+        ...(result.disposition ? { inputDisposition: result.disposition } : {}),
       },
     };
   };
@@ -4474,16 +4509,20 @@ export default function registerTeammateExtension(
       }
 
       const completionSessionId = ctx.sessionManager?.getSessionId?.();
-      const completionSeed: CompletionDispatchSeed | undefined = completionSessionId
+      const completionTarget = completionSessionId
+        ? {
+            workspaceId: workspaceIdForCwd(ctx.cwd),
+            sessionId: completionSessionId,
+          }
+        : undefined;
+      let parallelCompletion: ParallelCompletionController<SingleResult> | undefined;
+      const completionSeed: CompletionDispatchSeed | undefined = completionTarget && graphMode !== "parallel"
         ? {
             dispatchId: correlationId,
             deliveryGroupId: correlationId,
             reservationId: randomUUID(),
             mode: graphMode ?? "single",
-            target: {
-              workspaceId: workspaceIdForCwd(ctx.cwd),
-              sessionId: completionSessionId,
-            },
+            target: completionTarget,
             replyTarget: params.reply_to ?? "caller",
             originCwd: baseCwd,
             expectedTasks: isMultiTask ? taskCorrelationIds : [correlationId],
@@ -4492,23 +4531,40 @@ export default function registerTeammateExtension(
         : undefined;
       let completionDurable = false;
       let completionNotificationRequired = false;
-      if (completionSeed) {
-        try {
+      try {
+        if (graphMode === "parallel") {
+          parallelCompletion = completionTarget
+            ? await ParallelCompletionController.admit({
+                parentDispatchId: correlationId,
+                taskCorrelationIds,
+                target: completionTarget,
+                replyTarget: params.reply_to ?? "caller",
+                originCwd: baseCwd,
+                coordinator: completionCoordinator,
+              })
+            : ParallelCompletionController.nonDurable({
+                parentDispatchId: correlationId,
+                taskCorrelationIds,
+                originCwd: baseCwd,
+              });
+          completionDurable = parallelCompletion.durable;
+        } else if (completionSeed) {
           completionDurable = (await completionCoordinator.beginDispatch(completionSeed)).durable;
-        } catch (error) {
-          signal.removeEventListener("abort", abortForward);
-          return {
-            content: [{
-              type: "text",
-              text: `Teammate dispatch rejected before spawn: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-            isError: true,
-            details: { mode: (graphMode ?? "single") as Details["mode"], results: [] },
-          };
         }
+      } catch (error) {
+        signal.removeEventListener("abort", abortForward);
+        return {
+          content: [{
+            type: "text",
+            text: `Teammate dispatch rejected before spawn: ${error instanceof Error ? error.message : String(error)}`,
+          }],
+          isError: true,
+          details: { mode: (graphMode ?? "single") as Details["mode"], results: [] },
+        };
       }
 
       if (signal.aborted || !ownsDispatchGeneration()) {
+        await parallelCompletion?.abandon("parallel dispatch cancelled before spawn");
         return cancelledBeforeStart();
       }
 
@@ -4667,6 +4723,10 @@ export default function registerTeammateExtension(
         const target = state.activeRuns.get(result.correlationId);
         return result.wakeable !== false || Boolean(target?.restart && target.sessionFile);
       };
+      const primaryCompletionSeedFor = (taskCorrelationId: string): CompletionDispatchSeed | undefined =>
+        parallelCompletion?.durable
+          ? parallelCompletion.seedFor(taskCorrelationId)
+          : completionSeed;
       const durableResources = (results: readonly SingleResult[]): CompletionResource[] =>
         results.map((result) => {
           if (!result.publicationId) {
@@ -4716,6 +4776,76 @@ export default function registerTeammateExtension(
         });
         return publishResult.finalized;
       };
+      const deliverParallelCompletion = (
+        delivery: ParallelCompletionDelivery<SingleResult>,
+      ): void => {
+        const controller = parallelCompletion;
+        const result = delivery.value;
+        if (!controller || !result.publicationId) return;
+        const summary = formatParallelCompletionMessage({
+          label: result.name ?? result.agent,
+          correlationId: result.correlationId,
+          resourceUri: `agent://${result.publicationId}`,
+          resultSummary: displayMessageForResult(result),
+          snapshot: delivery.snapshot,
+        });
+        const fallbackDelivery = (): void => {
+          if (!ownsDispatchGeneration()) {
+            controller.finishDelivery(result.correlationId, true);
+            return;
+          }
+          const delivered = safeSendMessage(
+            pi,
+            {
+              customType: "teammate-complete",
+              content: summary,
+              display: true,
+              details: {
+                mode: "parallel",
+                results: [result],
+                progress: progressSnapshot(),
+                ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+              },
+            },
+            { triggerTurn: true },
+          );
+          if (!delivered) markSettledResultInspectable(state, result.correlationId);
+          controller.finishDelivery(result.correlationId, true);
+        };
+        const seed = controller.durable ? controller.seedFor(result.correlationId) : undefined;
+        if (!seed) {
+          fallbackDelivery();
+          return;
+        }
+        const outcome = result.terminalStatus === "terminated"
+          ? "terminated" as const
+          : result.exitCode === 0 ? "completed" as const : "failed" as const;
+        void completionCoordinator.publishCompletion({
+          dispatchId: seed.dispatchId,
+          reservationId: seed.reservationId,
+          kind: "single",
+          outcome,
+          summary,
+          resources: durableResources([result]),
+          finalizedAt: Date.now(),
+        }).then((published) => {
+          if (!published.finalized) markSettledResultInspectable(state, result.correlationId);
+          controller.finishDelivery(result.correlationId, true);
+        }).catch((error) => {
+          logDiagnosticWarn("[pi-maestro-teammate] durable parallel completion could not confirm finalization; retaining inspectable result:", error);
+          markSettledResultInspectable(state, result.correlationId);
+          controller.finishDelivery(result.correlationId, true);
+        });
+      };
+      const deliverParallelCompletions = (
+        deliveries: readonly ParallelCompletionDelivery<SingleResult>[],
+      ): void => {
+        for (const delivery of deliveries) deliverParallelCompletion(delivery);
+      };
+      const activateParallelCompletions = async (): Promise<void> => {
+        if (!parallelCompletion) return;
+        deliverParallelCompletions(await parallelCompletion.activateNotifications("single"));
+      };
       const failureResult = (
         task: NormalizedTask | undefined,
         taskCorrelationId: string,
@@ -4742,8 +4872,8 @@ export default function registerTeammateExtension(
         durationMs: Date.now() - activeAgent.startedAt,
         wakeable: false,
         terminalStatus: "failed",
-        completionDispatchId: completionSeed?.dispatchId,
-        completionReservationId: completionSeed?.reservationId,
+        completionDispatchId: primaryCompletionSeedFor(taskCorrelationId)?.dispatchId,
+        completionReservationId: primaryCompletionSeedFor(taskCorrelationId)?.reservationId,
         completionOutcome: "failed",
       });
       const publishCanonicalFailureResult = async (result: SingleResult): Promise<void> => {
@@ -5119,6 +5249,7 @@ export default function registerTeammateExtension(
             ? {}
             : { fabricRouteResolverOf: fabricRouteResolverBinding }),
           modelCapabilities: dispatchModelCatalog.models,
+          virtualModelIds: [...virtualModelIds],
           ...(dispatchModelRegistryAuthority === undefined
             ? {}
             : { modelRegistryAuthority: dispatchModelRegistryAuthority }),
@@ -5163,7 +5294,11 @@ export default function registerTeammateExtension(
           target.resultReadyAt = undefined;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
           },
-          onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, event),
+          onChildEvent: (event: Record<string, unknown>) => {
+            if (!ownsDispatchGeneration()) return;
+            if (typeof event.type === "string" && event.type.startsWith("tool_execution_")) pi.events.emit(TEAMMATE_TOOL_EXECUTION_EVENT, event);
+            handleChildLifecycleEvent(state, event);
+          },
           onChildClosed: (childId, generation, details) => {
             const target = state.activeRuns.get(childId);
             if (!target || (target.runtimeGeneration ?? 0) !== (generation ?? 0)) return;
@@ -5213,12 +5348,13 @@ export default function registerTeammateExtension(
                 }
                 additionalNotificationByResult.set(result, notifyAdditional);
                 const previousPublication = publishedResultsByCorrelation.get(result.correlationId);
+                const primaryCompletionSeed = primaryCompletionSeedFor(result.correlationId);
                 const retriesMainPublication = publicationCount > 1
                   && completionDurable
-                  && completionSeed !== undefined
+                  && primaryCompletionSeed !== undefined
                   && previousPublication?.resourceAcknowledged === false;
                 let resultCompletionSeed = publicationCount === 1 || retriesMainPublication
-                  ? completionSeed
+                  ? primaryCompletionSeed
                   : undefined;
                 let resultCompletionDurable = publicationCount === 1 || retriesMainPublication
                   ? completionDurable
@@ -5226,10 +5362,10 @@ export default function registerTeammateExtension(
                 if (publicationCount > 1
                   && !retriesMainPublication
                   && notifyAdditional
-                  && completionSeed
+                  && primaryCompletionSeed
                   && result.publicationId) {
                   const additionalSeed: CompletionDispatchSeed = {
-                    ...completionSeed,
+                    ...primaryCompletionSeed,
                     dispatchId: result.publicationId,
                     deliveryGroupId: result.publicationId,
                     reservationId: randomUUID(),
@@ -5257,12 +5393,23 @@ export default function registerTeammateExtension(
                     : result.exitCode === 0 ? "completed" : "failed";
                 }
                 const publication = await emitTeammateResultPublished(pi, result, originCwd);
-                const isMainPublication = resultCompletionSeed?.dispatchId === completionSeed?.dispatchId;
-                if (!previousPublication || (!previousPublication.resourceAcknowledged && isMainPublication)) {
+                const isPrimaryPublication = resultCompletionSeed?.dispatchId === primaryCompletionSeed?.dispatchId;
+                if (!previousPublication || (!previousPublication.resourceAcknowledged && isPrimaryPublication)) {
                   publishedResultsByCorrelation.set(result.correlationId, {
                     result,
                     resourceAcknowledged: publication.resourceAcknowledged,
                   });
+                }
+                if (parallelCompletion
+                  && isPrimaryPublication
+                  && ownsDispatchGeneration()
+                  && (publication.resourceAcknowledged || !parallelCompletion.durable)) {
+                  const delivery = parallelCompletion.record(
+                    result.correlationId,
+                    result,
+                    resultIsError(result),
+                  );
+                  if (delivery) deliverParallelCompletion(delivery);
                 }
                 // A durable dispatch must fail closed when canonical capture is
                 // rejected. Observer errors are already separated by the
@@ -5610,7 +5757,7 @@ export default function registerTeammateExtension(
             refreshModelCatalog(ctx).models,
             (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
             publishChildCallStatus,
-            runtimeOptions,
+            { ...runtimeOptions, virtualModelIds: [...virtualModelIds] },
             (() => {
               const activeMailboxHost = mailboxHost && mailboxHost.mode === "authoritative" ? mailboxHost : undefined;
               return activeMailboxHost
@@ -5659,6 +5806,7 @@ export default function registerTeammateExtension(
           },
         };
         if (runtimeOptions.spawnChildProcess) options.spawnChildProcess = runtimeOptions.spawnChildProcess;
+        if (runtimeOptions.childPiVersion) options.childPiVersion = runtimeOptions.childPiVersion;
         if (runtimeOptions.resultReadyGraceMs !== undefined) {
           options.resultReadyGraceMs = runtimeOptions.resultReadyGraceMs;
         }
@@ -5905,10 +6053,11 @@ export default function registerTeammateExtension(
             return { results, hasError, totalDur, summaries, structuredOutput, progress };
           };
 
-          const failGraphDispatch = (error: unknown): void => {
+          const failGraphDispatch = (error: unknown, notify = true): void => {
             if (!ownsDispatchGeneration()) return;
             const message = error instanceof Error ? error.message : String(error);
             abortController.abort(error);
+            void parallelCompletion?.abandon("parallel graph dispatch failed");
             taskCorrelationIds.forEach((taskId) => {
               if (graphTerminalIds.has(taskId)) return;
               graphTerminalIds.add(taskId);
@@ -5916,7 +6065,7 @@ export default function registerTeammateExtension(
               settleGraphTaskAgent(state, taskId, 1, message, false, "terminated");
             });
             settleGraphContainerAgent(state, correlationId, 1, message, false);
-            notifyFailureWithFallback(activeGraphMode, error, true);
+            if (notify) notifyFailureWithFallback(activeGraphMode, error, true);
           };
 
           const completeGraphInBackground = (
@@ -5933,7 +6082,7 @@ export default function registerTeammateExtension(
                 mode: activeGraphMode,
                 // The aggregate owns no child process; only physical task rows are wakeable.
                 wakeable: false,
-              }, true);
+              }, activeGraphMode !== "parallel");
             }).catch((error) => {
               failGraphDispatch(error);
             });
@@ -5981,7 +6130,9 @@ export default function registerTeammateExtension(
                 // The aggregate owns no child process; only physical task rows are wakeable.
                 wakeable: false,
               }, false);
-              if (completionDurable && completionSeed) {
+              if (parallelCompletion) {
+                await parallelCompletion.settleForeground();
+              } else if (completionDurable && completionSeed) {
                 await completionCoordinator.settleForeground(completionSeed);
               }
 
@@ -5999,7 +6150,17 @@ export default function registerTeammateExtension(
             }
 
             // Manual and timed detach share the same background completion path.
-            await requireDurableNotification("graph");
+            try {
+              if (activeGraphMode === "parallel") await activateParallelCompletions();
+              else await requireDurableNotification("graph");
+            } catch (error) {
+              failGraphDispatch(error, false);
+              return {
+                content: [{ type: "text", text: `Teammate completion notification admission failed: ${String(error)}` }],
+                isError: true,
+                details: { mode: activeGraphMode, results: [], progress: progressSnapshot() },
+              };
+            }
             detached = true;
             // Stop forwarding the caller tool-call signal abort into the graph
             // run so background model candidates survive the tool-call teardown.
@@ -6018,7 +6179,17 @@ export default function registerTeammateExtension(
             };
           }
 
-          await requireDurableNotification("graph");
+          try {
+            if (activeGraphMode === "parallel") await activateParallelCompletions();
+            else await requireDurableNotification("graph");
+          } catch (error) {
+            failGraphDispatch(error, false);
+            return {
+              content: [{ type: "text", text: `Teammate completion notification admission failed: ${String(error)}` }],
+              isError: true,
+              details: { mode: activeGraphMode, results: [], progress: progressSnapshot() },
+            };
+          }
           const bgPromise = executeGraph();
           completeGraphInBackground(bgPromise);
 
@@ -6157,6 +6328,11 @@ export default function registerTeammateExtension(
         };
       } finally {
         foregroundUpdateOpen = false;
+        if (parallelCompletion?.state === "buffering") {
+          await parallelCompletion.abandon("dispatch ended without a notification requirement").catch((error) => {
+            logDiagnosticWarn("[pi-maestro-teammate] parallel completion dispatch cleanup failed:", error);
+          });
+        }
         if (completionDurable && completionSeed && !completionNotificationRequired) {
           await completionCoordinator.abandon(completionSeed, "dispatch ended without a notification requirement").catch((error) => {
             logDiagnosticWarn("[pi-maestro-teammate] completion dispatch cleanup failed:", error);
@@ -6264,13 +6440,17 @@ export default function registerTeammateExtension(
               details: { delivered: false },
             };
           }
-          const queuedHint = receipt.receipt === "queued" || receipt.receipt === "accepted"
-            ? " Receipt confirms enqueueing only, not model consumption; do not resend without new evidence."
-            : "";
+          const queuedHint = receipt.disposition === "handled"
+            ? " Pi input hooks handled this input; no agent run starts for it."
+            : receipt.disposition === "legacy-accepted"
+              ? " Legacy response has no disposition; acceptance does not confirm consumption or completion."
+              : receipt.receipt === "queued" || receipt.receipt === "accepted"
+                ? " Receipt confirms acceptance only, not model consumption or completion; do not resend without new evidence."
+                : "";
           return {
             content: [{
               type: "text",
-              text: `Message ${receipt.receipt} for remote target "${params.to}" (kind ${messageKind}, requested ${mode}, effective ${receipt.effectiveMode}).${queuedHint}`,
+              text: `Message ${receipt.disposition ?? receipt.receipt} for remote target "${params.to}" (kind ${messageKind}, requested ${mode}, effective ${receipt.effectiveMode}).${queuedHint}`,
             }],
             isError: false,
             details: { delivered: true },
@@ -6385,11 +6565,19 @@ export default function registerTeammateExtension(
         };
       }
 
-      const modeLabel = delivery.receipt?.contextDeferred
+      const modeLabel = delivery.receipt?.inputDisposition === "handled"
+        ? "handled by Pi input hooks (no agent run started)"
+        : delivery.receipt?.inputDisposition === "transport-written"
+          ? "written to the legacy transport (acceptance/consumption unconfirmed)"
+        : delivery.receipt?.inputDisposition === "legacy-accepted"
+          ? "accepted by the legacy RPC response (no disposition; consumption unconfirmed)"
+        : delivery.receipt?.inputDisposition === "started"
+          ? "accepted and started (not completed)"
+        : delivery.receipt?.contextDeferred
         ? "stored as context for the next substantive turn"
         : delivery.receipt?.wasSleeping
           ? "woken up + prompt"
-          : delivery.receipt?.mode === "interrupt" ? "active turn cancelled + prompt injected"
+          : delivery.receipt?.mode === "interrupt" ? "interrupt requested (cancellation acknowledgement pending)"
           : delivery.receipt?.mode === "steer" ? "queued for turn-boundary injection (does not interrupt tool calls)"
           : "queued until AgentSession would otherwise stop (tool return is not a delivery boundary)";
       return {
@@ -7186,6 +7374,8 @@ export default function registerTeammateExtension(
       buildManagedWindowPiArgs({ sessionName, presentation, forkSessionFile }),
     );
     const env = managedWindowSpawnEnv();
+    const childVersion = await probePiChildVersion(piCommand.command, piCommand.argsPrefix, cwd, env);
+    piCommand.args.push(...nativeChildBuiltinArgs({ version: childVersion, cwd, env }));
     const launch = presentation === "interactive"
       ? getInteractiveTerminalLaunchSpec(piCommand, cwd, { title: `Pi worker · ${name}`, env })
       : { command: piCommand.command, args: piCommand.args, cwd };

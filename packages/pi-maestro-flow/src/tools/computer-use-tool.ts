@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import {
@@ -107,7 +107,13 @@ const POINTER_ACTIONS = new Set(["click", "double_click", "right_click", "move",
 const VISION_ACTIONS = new Set(["ocr", "detect"]);
 const SOURCE_ACTIONS = new Set(["screenshot", "ocr", "detect", "find_block"]);
 
-export function createComputerUseTool(manager: ComputerUseManagerLike = computerUseManager): ToolDefinition<typeof ComputerUseParams, ComputerUseToolDetails> {
+export type ComputerUseToolDefinition = ToolDefinition<typeof ComputerUseParams, ComputerUseToolDetails> & {
+  execute: ToolDefinition<typeof ComputerUseParams, ComputerUseToolDetails>["execute"] & (
+    (id: string, params: never, signal: AbortSignal, onUpdate: undefined, ctx: ExtensionContext) => Promise<AgentToolResult<ComputerUseToolDetails>>
+  );
+};
+
+export function createComputerUseTool(manager: ComputerUseManagerLike = computerUseManager): ComputerUseToolDefinition {
   return {
     name: "computer_use",
     label: "Computer Use",

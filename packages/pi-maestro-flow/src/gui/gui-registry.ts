@@ -1,4 +1,23 @@
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+
+export type GuiDirectToolExecute = (
+  toolCallId: string,
+  params: never,
+  signal: AbortSignal,
+  onUpdate: ((partial: AgentToolResult<unknown>) => void) | undefined,
+  ctx: ExtensionContext,
+) => Promise<AgentToolResult<unknown>>;
+
+/** Locked GUI tools are audited not to require nested executeTool capability. */
+export type GuiDirectToolDefinition = Omit<ToolDefinition, "execute"> & {
+  execute: GuiDirectToolExecute;
+};
+
+/** Explicit direct-call contract; no synthetic ExtensionToolContext is created. */
+export function asGuiDirectTool(def: ToolDefinition): GuiDirectToolDefinition {
+  return def as GuiDirectToolDefinition;
+}
 
 /**
  * Cross-extension shared registry of GUI-invocable tools.
@@ -11,7 +30,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
  */
 export interface GuiToolEntry {
   name: string;
-  execute: ToolDefinition["execute"];
+  execute: GuiDirectToolExecute;
   /** Canonical TypeBox parameter schema captured with the executable definition. */
   parameters?: ToolDefinition["parameters"];
   executionMode?: "sequential" | "parallel";
@@ -63,7 +82,7 @@ const READ_ONLY_TOOLS = new Set([
   "search_tool_bm25",
 ]);
 
-export function registerGuiTool(def: ToolDefinition, owner: string): void {
+export function registerGuiTool(def: GuiDirectToolDefinition, owner: string): void {
   if (!isGuiToolAllowed(def.name, owner)) return;
   getRegistry().tools.set(def.name, {
     name: def.name,

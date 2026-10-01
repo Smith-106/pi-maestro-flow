@@ -279,8 +279,12 @@ export function renderAgents(
 		required: false,
 		dropRank: agentDropRank(entry.row.status),
 	}));
-	// Reserve 1 row for the overflow marker when truncation occurs.
-	const composedAgents = composeByPriority(agentGroups, Math.max(1, budget - 1));
+	// Reserve 1 row for the overflow marker only when the roster exceeds either
+	// the height allowance or the width-specific row cap. An exact height fit
+	// must not hide an agent behind a marker.
+	const agentCapacity = Math.min(widthCap, budget);
+	const agentBudget = tree.length > agentCapacity ? Math.max(0, budget - 1) : budget;
+	const composedAgents = composeByPriority(agentGroups, agentBudget);
 	const visibleIndices = new Set(composedAgents.map((g) => Number(g.name.split(":")[1])));
 	const visible = tree.filter((_, i) => visibleIndices.has(i));
 	const hidden = tree.length - visible.length;

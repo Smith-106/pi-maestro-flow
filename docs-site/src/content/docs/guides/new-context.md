@@ -141,10 +141,10 @@ Todo completion checkpoint 决定是否适合切换上下文，pressure 只决�
 Recovery Capsule v2 最大 32 KiB，由运行时确定性生成，主要包含：
 
 - Session 与 checkpoint 身份；
-- Todo revision、活动任务、任务 frontier 和状态计数；
-- Goal 状态；
-- Plan 状态与批准交接；
-- Workflow Session/Run 身份；
+- Todo revision、调用 actor 的恢复焦点、活动任务、frontier 和执行任务计数（不等于目标验收覆盖率）；
+- Goal 状态、已有暂停原因及最近验证失败证据（历史记录，不是新一次验证）；
+- Plan 身份、批准快照路径、revision、handoff key、checksum 与按进展的读取指引，默认不展开正文；
+- Workflow Session/Run 身份与 canonical gate 状态计数（包含记录的 waived/skipped，不是参数验证分子）；
 - `carryForward`；
 - Todo transition 与 standalone 请求携带的资源引用；
 - 可恢复的 session/resource lineage；
@@ -152,15 +152,26 @@ Recovery Capsule v2 最大 32 KiB，由运行时确定性生成，主要包含�
 
 ### Handoff 感知的恢复选择（v0.29+）
 
-capsule 中的 Todo handoff 不是全量堆叠，而是按相关性确定性选择的：优先取本次 reset 请求自带的 handoff，其次取调用 actor 名下仍活跃任务的 handoff，最后回退到最近已完成任务的 handoff；`nextSteps` 与 `required` / `conditional` 文件按当前 Goal 与已批准 Plan 的 scope 过滤，无关 scope 的条目会被省略并计数。payload 整体有界，超限时按 `skip` 优先、`unknown` 次之的顺序省略，并输出 checkpoint 与文件加载指导（哪些文件必须读、哪些仅在 `when` 条件满足时读）。因此 `handoff.nextSteps` 要写“下一阶段的第一动作”，`files` 要标准确的 `value` 与 `when`——它们直接决定 reset 后新上下文能看到什么。
+capsule 中的 Todo handoff 按 actor 和当前阶段选择：请求补充优先于 active Todo；没有 active 时，以该 actor 的 runnable/blocked frontier 锚定范围，再考虑同范围的完成历史。明确 Plan scope 时只继承同 Plan；只有 Goal scope 时按 Goal 隔离；无 scope 不借入有 scope 的旧动作。**范围没有匹配项就为空，不回退到全部完成历史。**
 
-Reset 完成后，系统发送 follow-up：
+`handoff.nextSteps: []` 会保留清空修订，阻止旧建议复活；`handoff.files: []` 同样保留文件清空截止点，后续显式新增路径仍可进入恢复。未提供字段表示保持原值，不等同于清空。普通路径更新不会清掉其他仍有效的路径。当前任务身份和下一动作先于可选注记、历史文件进入预算；正向文件、skip、unknown 的省略仍有界。
 
-```text
-Continue from the recovery capsule and the active Todo's exact next action. If a required current-session fact is absent, use session_history with scope=current_session.
-```
+### Plan 按进展描述，Agent 按需读取
 
-Agent 应先读取 capsule 和活动 Todo 的精确下一步；只有当前会话事实缺失时，才通过 `session_history` 的 `current_session` scope 读取最小切片。需要查找相似的既往 workspace 会话时，仍须先完成 Maestro 知识检索，再使用 `workspace_sessions`，最后用 `resource` 按精确引用复核。
+Plan 默认只提供身份与来源，不把全文复制到每个新上下文。root 与 child 的胶囊及 continuation 使用相同的恢复焦点规则：
+
+| 当前进展 | 恢复指引 |
+|---|---|
+| 草稿 / Plan 模式 | 读取所需草稿内容继续讨论，保持只读，不把草稿当执行授权 |
+| 已批准、尚无绑定任务 | 首次读取并验证批准快照与精确 handoff key，确认授权和没有既有分解后再分解 |
+| 当前 actor 有活动或可运行任务 | 恢复该 Todo / 对应 Workflow 的精确下一动作；需理解约束时自行读取相关 Plan，不重新分解 |
+| 阻塞 / 暂停 | 保留权威原因与依赖，不以“继续”自动解除门禁 |
+| 绑定任务已完成、任务属于其他 actor 或 Plan 与当前工作无关 | Plan 仅供参考；不抢占当前动作、不重建任务，也不据 Todo 数宣布 Goal 完成 |
+| 请求 Plan 身份与 live snapshot 冲突 | 先核对身份，不混用 checksum，也不自动切换或重启另一计划 |
+
+批准快照、权限和 Workflow/Goal 检查仍然适用；少携带正文不等于少遵守边界。Reset 后发送的是与当前进展相符的 follow-up，而非固定要求先读旧 Plan 的消息。
+
+Agent 应先读取 capsule 的 **Recovery Focus** 和活动 Todo 的精确下一步；只有当前会话事实缺失时，才通过 `session_history` 的 `current_session` scope 读取最小切片。需要查找相似的既往 workspace 会话时，仍须先完成 Maestro 知识检索，再使用 `workspace_sessions`，最后用 `resource` 按精确引用复核。
 
 ## Session History — 当前恢复与历史线索的统一入口
 
@@ -219,7 +230,7 @@ flowchart TD
 
 Plan 确认后的 handoff 现在统一通过 New Context 调度：`scheduleNewContext` 使用 `source: "plan-confirm"`，先完成确定性 reset，再由内存回调 `continueAfterReset` 自动排入批准计划的执行消息，因此无需用户再次发送继续指令。若 Session generation 变化、新用户消息到达等原因让请求在续跑前过期，`onCancelled` 会清理对应的 stale handoff，避免以后误执行。
 
-- Plan handoff 的 `carryForward` 使用独立的 `NEW_CONTEXT_MAX_PLAN_HANDOFF_BYTES` 预算，最大 **20 KiB UTF-8**；普通 standalone `carryForward` 仍为 4 KiB；
+- Plan handoff 请求内部的 `carryForward` 接受最大 **20 KiB UTF-8**，但胶囊只展示最多 **4 KiB** 注记，避免挤掉当前动作；完整批准契约由来源路径按需读取。普通 standalone `carryForward` 仍为 4 KiB；
 - Plan 正在执行确定性 handoff 时，New Context 会等待；
 - `clean-context` Plan handoff 与无独有 payload 的请求等价时可以合并；
 - 请求带有独有 `carryForward/resourceUris` 时不会被错误吞掉，而是在 Plan compact 后继续执行。
@@ -301,7 +312,9 @@ Automatic compaction、arbiter 和 pressure estimator 是内部容量安全机�
 
 ### Reset 后缺少某段历史
 
-先检查 capsule 中的 `resourceUris` 和 lineage；再按以下顺序恢复，不要把完整聊天复制进 `carryForward`：
+New Context **不是已确认事实台账**。普通模型摘要中保留的用户回答，不会仅因为出现在上一份摘要中就自动进入下次确定性胶囊；reset-local 的 `carryForward` 也不自动变成长期事实。关键非敏感输入、结论和确认证据应在 reset 前写入 Todo context/summary 与精确 `resourceUris`。这些记录是证据，不能把模型推断升级成用户确认或操作授权。本轮没有新增统一事实/决策台账。
+
+先检查 capsule 中的 `resourceUris` 和 lineage；若已有事实只是未投影，先查精确证据，不重复向用户索取。再按以下顺序恢复，不要把完整聊天复制进 `carryForward`：
 
 ```javascript
 session_history({ action: "timeline", scope: "current_session" })

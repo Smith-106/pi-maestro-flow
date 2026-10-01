@@ -20,9 +20,12 @@ export declare function isManagedWorkerWindow(): boolean;
 export interface TeammateChildExtensionRegistration {
     path: string;
     tools: readonly string[];
+    /** Exact provider/model ids whose router factory this extension re-registers in children. */
+    virtualModels?: readonly string[];
 }
 export interface RegisterTeammateChildExtensionOptions {
     tools?: readonly string[];
+    virtualModels?: readonly string[];
 }
 export interface RegisterTeammateAuthorityOptions {
     /** Stable package/session authority key. Re-registering the same key replaces its prior generation. */

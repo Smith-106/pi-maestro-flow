@@ -27,7 +27,14 @@ import {
   type TodoContext,
 } from "../src/tools/todo.ts";
 import { TodoModelParams, TodoToolParams } from "../src/extension/schemas.ts";
-import { TODO_GET_FIELDS, TODO_GET_MAX_LIMIT, type TodoHandoffInput } from "../src/tools/todo-contract.ts";
+import {
+  TODO_GET_FIELDS,
+  TODO_GET_MAX_LIMIT,
+  cloneTodoHandoff,
+  normalizeTodoHandoff,
+  readTodoHandoff,
+  type TodoHandoffInput,
+} from "../src/tools/todo-contract.ts";
 import {
   TODO_CONTENT_ENTRY_TYPE,
   TODO_STATE_ENTRY_TYPE,
@@ -378,7 +385,7 @@ test("todo next bounds a stopped Goal's text while preserving its instructions a
   }
 });
 
-test("Todo v8 persistence deduplicates heavy content and restores references", async () => {
+test("Todo persistence deduplicates heavy content and restores references", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-content-ref-"));
   const loader = new TodoSkillLoader({ cwd: root });
   const journal: Array<{ type: "custom"; customType: string; data: unknown }> = [];
@@ -1630,8 +1637,8 @@ test("todo widget unifies root and teammate tasks sorted by status priority", as
   }
 });
 
-test("todo state version remains 8 for content-reference persistence", () => {
-  assert.equal(getTodoCompactionSnapshot().stateVersion, 8);
+test("todo state version is 9 for persistent handoff clear revisions", () => {
+  assert.equal(getTodoCompactionSnapshot().stateVersion, 9);
 });
 
 test("todo handoff persists, merges partial annotations, clears explicitly, and reloads defensively", async () => {
@@ -1737,7 +1744,11 @@ test("todo handoff persists, merges partial annotations, clears explicitly, and 
     assert.ok(getVisibleTasks()[0]!.handoff!.files[0]!.annotationRevision > reloadedRevision);
 
     await executeTodo({ action: "update", id, handoff: { files: [] } }, ctx);
-    assert.equal(getVisibleTasks()[0]!.handoff, undefined, "clearing the final child removes the empty handoff");
+    const cleared = getVisibleTasks()[0]!.handoff!;
+    assert.deepEqual(cleared.nextSteps, []);
+    assert.deepEqual(cleared.files, []);
+    assert.equal(cleared.nextStepsRevision, beforeInvalid!.nextStepsRevision);
+    assert.ok(cleared.filesClearedRevision! > reloadedRevision);
 
     await executeTodo({
       action: "create",
@@ -1757,6 +1768,116 @@ test("todo handoff persists, merges partial annotations, clears explicitly, and 
     }, ctx);
     assert.equal(atomicFailure.isError, true);
     assert.deepEqual(getVisibleTasks().slice(-2).map((task) => task.handoff), beforeBatch);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo handoff clear revisions survive normalization, cloning, and defensive reads", () => {
+  assert.equal(normalizeTodoHandoff({}, undefined, 1), undefined);
+  assert.equal(readTodoHandoff({ nextSteps: [], files: [] }), undefined, "legacy empty collections have no clear evidence");
+
+  for (const input of [{ nextSteps: [] }, { files: [] }, { nextSteps: [], files: [] }]) {
+    const cleared = normalizeTodoHandoff(input, undefined, 7)!;
+    assert.deepEqual(cleared.nextSteps, []);
+    assert.deepEqual(cleared.files, []);
+    assert.equal(cleared.nextStepsRevision, "nextSteps" in input ? 7 : undefined);
+    assert.equal(cleared.filesClearedRevision, "files" in input ? 7 : undefined);
+    assert.deepEqual(cloneTodoHandoff(cleared), cleared);
+    assert.notEqual(cloneTodoHandoff(cleared), cleared);
+    assert.deepEqual(readTodoHandoff(JSON.parse(JSON.stringify(cleared))), cleared);
+    assert.deepEqual(normalizeTodoHandoff({}, cleared, 8), cleared, "omitted children preserve tombstones");
+  }
+
+  for (const revision of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "7", null]) {
+    assert.equal(readTodoHandoff({ nextSteps: [], files: [], nextStepsRevision: revision, filesClearedRevision: revision }), undefined);
+  }
+  assert.deepEqual(readTodoHandoff({ nextSteps: [], files: [], filesClearedRevision: 0 }), {
+    nextSteps: [], files: [], filesClearedRevision: 0,
+  });
+});
+
+test("todo handoff file merges preserve clear history without creating a new clear", () => {
+  const initial = normalizeTodoHandoff({
+    nextSteps: ["Continue"],
+    files: [
+      { path: "src/a.ts", value: "required", reason: "A" },
+      { path: "src/b.ts", value: "required", reason: "B" },
+    ],
+  }, undefined, 1)!;
+  const merged = normalizeTodoHandoff({
+    files: [{ path: "./src/a.ts", value: "skip", reason: "Already read" }],
+  }, initial, 2)!;
+  assert.equal(merged.filesClearedRevision, undefined, "a path update is not a collection clear");
+  assert.deepEqual(merged.files.map((file) => [file.path, file.annotationRevision]), [["src/a.ts", 2], ["src/b.ts", 1]]);
+
+  const cleared = normalizeTodoHandoff({ files: [] }, merged, 3)!;
+  assert.equal(cleared.filesClearedRevision, 3);
+  assert.deepEqual(cleared.nextSteps, initial.nextSteps);
+  assert.equal(cleared.nextStepsRevision, initial.nextStepsRevision);
+  const readded = normalizeTodoHandoff({
+    files: [{ path: "src/c.ts", value: "required", reason: "C" }],
+  }, cleared, 4)!;
+  assert.equal(readded.filesClearedRevision, 3, "new files preserve the historical recovery cutoff");
+  assert.deepEqual(readded.files.map((file) => [file.path, file.annotationRevision]), [["src/c.ts", 4]]);
+  assert.deepEqual(readTodoHandoff(JSON.parse(JSON.stringify(readded))), readded);
+  const stepsCleared = normalizeTodoHandoff({ nextSteps: [] }, readded, 5)!;
+  assert.deepEqual(stepsCleared.files, readded.files);
+  assert.equal(stepsCleared.filesClearedRevision, 3);
+  assert.equal(stepsCleared.nextStepsRevision, 5);
+  assert.deepEqual(normalizeTodoHandoff({}, stepsCleared, 6), stepsCleared);
+});
+
+test("todo handoff clear revisions persist through content references and branch reload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-clear-revision-"));
+  const loader = new TodoSkillLoader({ cwd: root });
+  const journal: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+  initTodo({ appendEntry(customType: string, data: unknown) {
+    journal.push({ type: "custom", customType, data: structuredClone(data) });
+  } } as never);
+  let todoContext: TodoContext = {
+    cwd: root,
+    ui: { setStatus() {} },
+    skillLoader: loader,
+    sessionManager: { getBranch: () => [], getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({ action: "create", tasks: [
+      { subject: "Steps clear", description: "Keep description", context: "Keep context", resourceUris: ["agent://saved"], handoff: { nextSteps: ["Old step"] } },
+      { subject: "Files clear", handoff: { files: [{ path: "src/old.ts", value: "required", reason: "Old file" }] } },
+      { subject: "Unchanged", handoff: { files: [{ path: "src/other.ts", value: "required", reason: "Other task file" }] } },
+    ] }, ctx);
+    const [steps, files, other] = getVisibleTasks();
+    const otherHandoff = structuredClone(other!.handoff);
+    await executeTodo({ action: "update", id: steps!.id, handoff: { nextSteps: [] } }, ctx);
+    await executeTodo({ action: "update", id: files!.id, handoff: { files: [] } }, ctx);
+    const expected = getVisibleTasks().map((task) => structuredClone(task.handoff));
+    assert.equal(typeof expected[0]!.nextStepsRevision, "number");
+    assert.equal(typeof expected[1]!.filesClearedRevision, "number");
+    await executeTodo({ action: "update", id: files!.id, subject: "Renamed", handoff: {} }, ctx);
+    assert.deepEqual(getVisibleTasks().map((task) => task.handoff), expected);
+    assert.deepEqual(getVisibleTasks()[2]!.handoff, otherHandoff);
+
+    const saved = structuredClone(journal);
+    onSessionShutdown(todoContext);
+    initTodo({ appendEntry() {} } as never);
+    todoContext = {
+      cwd: root,
+      ui: { setStatus() {} },
+      skillLoader: loader,
+      sessionManager: { getBranch: () => saved, getEntries: () => [] },
+    };
+    onSessionStart(todoContext);
+    assert.deepEqual(getVisibleTasks().map((task) => task.handoff), expected);
+    const restored = getVisibleTasks()[0]!;
+    assert.equal(restored.description, "Keep description");
+    assert.equal(restored.context, "Keep context");
+    assert.deepEqual(restored.resourceUris, ["agent://saved"]);
+    assert.deepEqual(restored.createdBy, steps!.createdBy);
+    assert.deepEqual(restored.assignee, steps!.assignee);
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });

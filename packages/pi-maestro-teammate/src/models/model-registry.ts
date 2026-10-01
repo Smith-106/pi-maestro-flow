@@ -848,6 +848,7 @@ function projectCliTools(
 function normalizedHostModels(models: readonly AvailableModelEntry[]): AvailableModelEntry[] {
   const unique = new Map<string, AvailableModelEntry>();
   for (const model of models) {
+    if (model.api === "pi-virtual") continue;
     const provider = model.provider.trim();
     const id = model.id.trim();
     if (!provider || !id) continue;

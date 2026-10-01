@@ -386,6 +386,10 @@ export interface RunTeammateOptions {
   ) => void;
   /** @internal Test seam for child lifecycle regression coverage. */
   spawnChildProcess?: typeof crossSpawn;
+  /** @internal Version of the fixture child, never inherited from the parent. */
+  childPiVersion?: string;
+  /** Native host selections requiring a child-inheritable router extension. */
+  virtualModelIds?: readonly string[];
   /** @internal Test seam for retry scheduling. */
   waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
   /** @internal Test seam for the first child activity deadline. */
@@ -1774,6 +1778,9 @@ export interface PiLaunchDiagnostic {
   type: "teammate_pi_launch_diagnostic";
   source: PiLaunchSource;
   phase: "spawn" | "child-error" | "close";
+  /** Measured from the selected child executable, not the parent SDK. */
+  childVersion?: string;
+  hostMode?: "native" | "legacy" | "unknown";
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   stderrTail: string;
@@ -1799,6 +1806,7 @@ export function piLaunchDiagnostic(
 export function formatPiLaunchDiagnostic(diagnostic: PiLaunchDiagnostic): string {
   return `source=${diagnostic.source}, phase=${diagnostic.phase}, exit=${diagnostic.exitCode ?? "null"}, `
     + `signal=${diagnostic.signal ?? "none"}`
+    + (diagnostic.hostMode ? `, childVersion=${diagnostic.childVersion ?? "unverified"}, hostMode=${diagnostic.hostMode}` : "")
     + (diagnostic.stderrTail ? `\nstderr tail:\n${diagnostic.stderrTail}` : "");
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,13 @@ test("install registry declares ten items with stable ids", () => {
   assert.match(`${browserBridge.title}\n${browserBridge.description}\n${browserBridge.promptIntro}`, /显式|app\.channel='extension'/);
   assert.match(browserBridge.promptIntro, /browser status/);
   assert.match(browserBridge.promptIntro, /断连不回退 managed/);
+  const mcp = INSTALL_ITEMS.find((item) => item.id === "mcp")!;
+  assert.match(mcp.promptIntro, /Pi 0\.99\+.*pi mcp add\/list\/login/);
+  assert.doesNotMatch(mcp.promptIntro, /\/mcp auth/);
+  const mcpDoc = readFileSync(join(packageRoot, "optional", mcp.docFile), "utf8");
+  assert.match(mcpDoc, /Pi 0\.99\+：只使用 Pi 原生 MCP/);
+  assert.match(mcpDoc, /pi mcp login <name>/);
+  assert.match(mcpDoc, /Legacy 0\.87–0\.98/);
   const openAiTunnel = INSTALL_ITEMS.find((item) => item.id === "openai-tunnel")!;
   assert.equal(openAiTunnel.category, "external");
   assert.match(`${openAiTunnel.title}\n${openAiTunnel.description}\n${openAiTunnel.promptIntro}`, /实验|experimental/i);

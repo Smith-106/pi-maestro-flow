@@ -38,6 +38,8 @@ export interface CompletionOutboxRecord {
   dispatchId: string;
   reservationId: string;
   kind: CompletionIntent["kind"];
+  /** Present on new records; absent on legacy outbox records. */
+  mode?: CompletionIntent["mode"];
   target: CompletionTarget;
   replyTarget: CompletionIntent["replyTarget"];
   summary: string;

@@ -10,7 +10,8 @@
  *   - name: addressability + variable referencing
  *   - reply_to: result routing (caller | main)
  */
-import { Type, type Static } from "typebox";
+import { Type, type Static, type TSchema } from "typebox";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { TeammatePlacementV1 } from "pi-maestro-fabric-core/v1/placement";
 export declare const TaskSpec: Type.TObject<{
     prompt: Type.TString;
@@ -156,4 +157,5 @@ export declare const RemoteWorkerParams: Type.TObject<{
     objective: Type.TOptional<Type.TString>;
     runId: Type.TOptional<Type.TString>;
 }>;
+export declare function projectConditionalTeammateTool<T extends TSchema, D>(tool: ToolDefinition<T, D>): ToolDefinition<T, D>;
 export {};

@@ -741,7 +741,9 @@ test("browser manager drives a real local Chromium tab when an executable is ava
 });
 
 test("browser manager scopes request interception listeners to one run", async (t) => {
-  const server = http.createServer((_request, response) => {
+  const requestedPaths: string[] = [];
+  const server = http.createServer((request, response) => {
+    requestedPaths.push(request.url ?? "");
     response.writeHead(200, { "content-type": "text/html" });
     response.end("<!doctype html><title>Interception</title>");
   });
@@ -768,6 +770,27 @@ test("browser manager scopes request interception listeners to one run", async (
       `, process.cwd(), undefined, 15_000),
       /expected run failure/,
     );
+    await assert.rejects(
+      () => manager.run("interception", `
+        page.on("request", (request) => { request.continue(); });
+        try { await page.goto(${JSON.stringify(`${baseUrl}disabled`)}); } catch (error) { print(error.message); }
+        await wait(75);
+        await page.goto(${JSON.stringify(`${baseUrl}late-from-failed-run`)});
+      `, process.cwd(), undefined, 15_000),
+      /Request Interception is not enabled![\s\S]*named tab was closed/,
+    );
+    assert.equal(await manager.close("interception"), false, "failed run must already have closed its tab");
+    await manager.open({ name: "interception", cwd: process.cwd(), url: `${baseUrl}reopened`, timeoutMs: 15_000 });
+    await assert.rejects(
+      () => manager.run("interception", `
+        await page.setRequestInterception(true);
+        page.once("request", async () => { throw new Error("expected async handler failure"); });
+        await page.goto(${JSON.stringify(`${baseUrl}callback-failure`)});
+      `, process.cwd(), undefined, 15_000),
+      /expected async handler failure/,
+    );
+    assert.equal(await manager.close("interception"), false, "failed run must already have closed its tab");
+    await manager.open({ name: "interception", cwd: process.cwd(), url: `${baseUrl}reopened-again`, timeoutMs: 15_000 });
     const first = await manager.run("interception", `
       const baseline = page.listenerCount("request");
       const requestHandler = (request) => { request.continue(); };
@@ -788,6 +811,7 @@ test("browser manager scopes request interception listeners to one run", async (
       return { title: await page.title(), requestListeners: page.listenerCount("request") };
     `, process.cwd(), undefined, 15_000);
     assert.deepEqual(second.returnValue, { title: "Interception", requestListeners: firstResult.baseline });
+    assert.equal(requestedPaths.includes("/late-from-failed-run"), false);
   } finally {
     await manager.closeAll();
     server.closeAllConnections();

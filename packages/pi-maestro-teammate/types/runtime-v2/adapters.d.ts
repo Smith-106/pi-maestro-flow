@@ -8,10 +8,12 @@ export interface RuntimeAdapterContextV2 {
 export type PiRuntimeSignalV2 = {
     type: "tool_execution_start";
     toolCallId: string;
+    parentToolCallId?: string;
     toolName: string;
 } | {
     type: "tool_execution_end" | "tool_end";
     toolCallId: string;
+    parentToolCallId?: string;
     toolName: string;
     isError?: boolean;
 } | {

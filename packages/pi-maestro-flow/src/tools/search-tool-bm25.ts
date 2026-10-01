@@ -2,6 +2,8 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine } from "pi-cockpit/src/quiet-tools.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
 import { Type } from "typebox";
 import {
   buildToolSearchIndex,
@@ -170,7 +172,8 @@ export function deferLowFrequencyTools(
   return active.filter((name) => deferredNames.has(name));
 }
 
-export function registerSearchToolBm25(pi: ExtensionAPI): void {
+export function registerSearchToolBm25(pi: ExtensionAPI, hostVersion: unknown = VERSION): void {
+  if (getPiHostMode(hostVersion) !== "legacy") return;
   let deferredThisSession = new Set<string>();
   let activeSessionId: string | undefined;
   const registry = deferredSessionRegistry();

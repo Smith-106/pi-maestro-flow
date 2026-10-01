@@ -5057,6 +5057,19 @@ test("the first tool call after the hard threshold interrupts and compacts at se
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "compaction resumes the interrupted tool loop");
 });
 
+test("a nested hard-threshold gate aborts the outer operation before settlement", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+
+  const gate = fx.guard.onToolCall(fx.ctx, "outer-codemode");
+  assert.equal(gate?.block, true);
+  assert.equal(gate?.terminate, true);
+  assert.equal(fx.aborted(), 1, "nested terminate is locally consumed, so the outer host operation must abort");
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1, "agent settlement remains the sole compaction submitter");
+});
+
 test("submitted mid-turn intent stays durable until settlement and recovers after restart", async () => {
   const fx = loopCriticalFixture();
   fx.guard.onSessionStart(fx.ctx);

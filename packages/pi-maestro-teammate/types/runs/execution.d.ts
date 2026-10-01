@@ -13,8 +13,8 @@ import type { NormalizedTask, RunSingleTeammateParams, RunTeammateOptions, RunTe
 import type { AttemptOutcome, BackendCapabilities, BackendRun } from "pi-maestro-backend-core/v1/backend";
 import type { BackendRegistry } from "pi-maestro-backend-core/v1/registry";
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
-export { TOOL_EXECUTION_HEARTBEAT_MS, resolveAgentCacheRetention, hasRpcTurnSidecar, sendRpcMessage, sendChildIpcMessage, dispatchChildIpcMessage, } from "./pi-subprocess-attempt.ts";
-export type { RpcMessageMode } from "./pi-subprocess-attempt.ts";
+export { TOOL_EXECUTION_HEARTBEAT_MS, resolveAgentCacheRetention, hasRpcTurnSidecar, sendRpcMessage, sendRpcMessageWithReceipt, sendChildIpcMessage, dispatchChildIpcMessage, } from "./pi-subprocess-attempt.ts";
+export type { RpcMessageMode, RpcInputDisposition, RpcReceipt } from "./pi-subprocess-attempt.ts";
 export declare function hostRegistryResultProvenance(result: SingleResult): TeammateExecutionProvenance | undefined;
 /**
  * Convert a backend's progress payload into the host's progress record.

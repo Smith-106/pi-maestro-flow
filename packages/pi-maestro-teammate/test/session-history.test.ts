@@ -25,6 +25,13 @@ function writeTranscript(dir: string, name: string, lines: unknown[]): string {
 function header(id: string): unknown {
   return { type: "session", version: 3, id, timestamp: "2026-08-01T00:00:00.000Z", cwd: "/workspace" };
 }
+function writeLargeTranscript(dir: string, id: string, mebibytes: number): string {
+  const file = writeTranscript(dir, `${id}.jsonl`, [header(id)]);
+  const padding = `${" ".repeat(1024 * 1024 - 1)}\n`;
+  for (let index = 0; index < mebibytes; index += 1) fs.appendFileSync(file, padding);
+  fs.appendFileSync(file, `${JSON.stringify(user("u1", null, "large history needle"))}\n`);
+  return file;
+}
 function user(id: string, parentId: string | null, content: string): unknown {
   return { type: "message", id, parentId, timestamp: "2026-08-01T00:00:01.000Z", message: { role: "user", content, timestamp: 1 } };
 }
@@ -150,22 +157,52 @@ test("single limit bounds list, search, and selected-turn entries", async () => 
   assert.equal(emptySelection.turn?.userText, "");
 });
 
-test("same-handle bounded reads fail closed for symlinks and oversized files", async () => {
+test("same-handle reads fail closed for symlinks and invalid headers", async (t) => {
   const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const target = writeTranscript(dir, "target.jsonl", [header("target"), user("u1", null, "target")]);
   const link = path.join(dir, "link.jsonl");
   let linked = false;
   try { fs.symlinkSync(target, link, "file"); linked = true; } catch { /* Windows privilege policy. */ }
-  const oversized = path.join(dir, "oversized.jsonl");
-  const handle = fs.openSync(oversized, "w");
-  fs.ftruncateSync(handle, MAX_SESSION_HISTORY_BYTES + 1);
-  fs.closeSync(handle);
-  const result = await new SessionHistoryService(inventory(...(linked ? [link] : []), oversized)).list();
+  const invalid = writeTranscript(dir, "invalid.jsonl", [user("u1", null, "not a header")]);
+  const result = await new SessionHistoryService(inventory(...(linked ? [link] : []), invalid)).list();
   assert.equal(result.sessions.length, 0);
-  assert.equal(result.omissions.some((item) => item.reason === "over-budget"), true);
+  assert.equal(result.omissions.some((item) => item.reason === "invalid-header"), true);
   if (linked && process.platform !== "win32") {
     assert.equal(result.omissions.some((item) => item.reason === "symlink"), true);
   }
+});
+
+test("history list, search, turn and URI reads accept files larger than 32 MiB", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = writeLargeTranscript(dir, "large-session", 49);
+  const size = fs.statSync(file).size;
+  const service = new SessionHistoryService([{ ...inventory(file)[0]!, sizeBytes: size * 2 }]);
+  assert.equal(MAX_SESSION_HISTORY_BYTES, Infinity);
+  const listed = await service.list();
+  assert.equal(listed.sessions[0]?.sizeBytes, size);
+  assert.equal(listed.bytesRead, size);
+  assert.equal(listed.truncated, false);
+  assert.deepEqual(listed.omissions, []);
+  assert.equal((await service.search("needle")).matches[0]?.sessionId, "large-session");
+  const read = await service.read({ sessionId: "large-session", turn: 1 });
+  assert.equal(read.found, true);
+  assert.equal(read.turn?.userText, "large history needle");
+  const entry = await service.readUri(sessionEntryUri("large-session", "u1"));
+  assert.equal(entry.selectedEntry?.entries[0]?.text, "large history needle");
+});
+
+test("history scans have no cumulative byte budget", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const one = writeLargeTranscript(dir, "large-one", 17);
+  const two = writeLargeTranscript(dir, "large-two", 17);
+  const result = await new SessionHistoryService(inventory(one, two)).search("needle");
+  assert.ok(result.bytesRead > 32 * 1024 * 1024);
+  assert.deepEqual(result.matches.map((match) => match.sessionId), ["large-one", "large-two"]);
+  assert.equal(result.truncated, false);
+  assert.deepEqual(result.omissions, []);
 });
 
 test("search match count and snippets stay bounded", async () => {

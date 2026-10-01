@@ -320,6 +320,8 @@ function reportBrowserDialogError(error: unknown): void {
 }
 
 interface RequestListenerScope {
+  failure: Promise<unknown>;
+  settle(): Promise<void>;
   cleanup(): void;
 }
 
@@ -781,6 +783,7 @@ export class BrowserManager implements BrowserManagerLike {
     entry.browser.on("targetdestroyed", onTargetDestroyed);
     let requestScope: RequestListenerScope | undefined;
     let runFailed = false;
+    let requestFailed = false;
     let cleanupFailed = false;
     try {
       if (entry.requestScope) {
@@ -811,7 +814,17 @@ export class BrowserManager implements BrowserManagerLike {
       const print = (...values: unknown[]) => output.pushDisplay(displays, { type: "text", text: values.map(formatDisplay).join(" ") });
       const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
       const execute = compileRunCode(code);
-      const returnValue = await raceAbort(execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
+      const execution = (async () => {
+        const value = await execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, signal, capturedConsole);
+        await requestScope!.settle();
+        return value;
+      })();
+      const requestFailure = requestScope.failure.then((error) => {
+        requestFailed = true;
+        requestScope!.cleanup();
+        throw error;
+      });
+      const returnValue = await raceAbort(Promise.race([execution, requestFailure]), signal, timeoutMs);
       output.reserve(returnValue);
       const afterUrl = entry.page.isClosed() ? "" : entry.page.url();
       const navigated = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl);
@@ -836,10 +849,16 @@ export class BrowserManager implements BrowserManagerLike {
         }
       }
       output.reserve({ url: afterUrl, navigated: navigated || undefined });
+      await raceAbort(Promise.race([requestScope.settle(), requestFailure]), signal, timeoutMs);
       return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
     } catch (error) {
       runFailed = true;
-      if (isInterruptError(error)) await this.close(name);
+      if (requestFailed || isInterruptError(error)) await this.close(name);
+      if (requestFailed && error instanceof Error) {
+        error.message += "\nBrowser run hint: a request handler failed; the named tab was closed to stop unfinished run code. " +
+          "Reopen it before retrying. Before continue/abort/respond, await page.setRequestInterception(true) in the same run, " +
+          "and return or await the request resolution promise.";
+      }
       throw browserRunErrorHint(error);
     } finally {
       entry.browser.off("targetcreated", onTargetCreated);
@@ -2342,21 +2361,74 @@ async function pickPage(browser: Browser, target?: string): Promise<Page | undef
   return pages.find((page) => page.url() !== "about:blank") ?? pages[0];
 }
 
-function installRequestListenerScope(page: Page): RequestListenerScope {
-  const mutablePage = page as Page & { on: Page["on"]; off: Page["off"] };
+export function installRequestListenerScope(page: Page): RequestListenerScope {
   const originalOn = page.on;
   const originalOff = page.off;
+  const originalOnce = page.once;
   const callOn = originalOn.bind(page) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page;
   const callOff = originalOff.bind(page) as unknown as (type: PageEventType, handler?: GenericPageHandler) => Page;
+  const wrappers = new Map<GenericPageHandler, GenericPageHandler>();
   const ownedHandlers: GenericPageHandler[] = [];
+  const trackedRequests = new WeakSet<HTTPRequest>();
+  const pending = new Set<Promise<void>>();
   let active = true;
+  let failed = false;
+  let failureReason: unknown;
+  let reportFailure!: (error: unknown) => void;
+  const failure = new Promise<unknown>((resolve) => {
+    reportFailure = (error) => {
+      if (!active || failed) return;
+      failed = true;
+      failureReason = error;
+      resolve(error);
+    };
+  });
+  const track = (promise: Promise<unknown>): void => {
+    const observed = promise.then(() => {}, reportFailure).finally(() => { pending.delete(observed); });
+    pending.add(observed);
+  };
+  const trackRequest = (request: HTTPRequest): void => {
+    if (trackedRequests.has(request)) return;
+    trackedRequests.add(request);
+    // Keep request identity intact and observe even fire-and-forget resolutions.
+    for (const method of ["continue", "abort", "respond"] as const) {
+      const original = request[method].bind(request) as (...args: never[]) => Promise<void>;
+      request[method] = ((...args: never[]) => {
+        const result = (async () => {
+          if (!active) throw new Error("Browser request handler belongs to a finished run.");
+          return await original(...args);
+        })();
+        track(result);
+        return result;
+      }) as typeof request[typeof method];
+    }
+  };
   const scopedOn = (type: PageEventType, handler: GenericPageHandler): Page => {
-    const result = callOn(type, handler);
-    if (type === "request") ownedHandlers.push(handler);
+    if (type !== "request") return callOn(type, handler);
+    let wrapper = wrappers.get(handler);
+    if (!wrapper) {
+      wrapper = (...args: never[]) => {
+        // Puppeteer queues handlers; off() cannot cancel already queued calls.
+        if (!active) return;
+        const work = (async () => {
+          try {
+            trackRequest(args[0] as HTTPRequest);
+            await handler(...args);
+          } catch (error) {
+            reportFailure(error);
+          }
+        })();
+        track(work);
+        return work;
+      };
+      wrappers.set(handler, wrapper);
+    }
+    const result = callOn(type, wrapper);
+    ownedHandlers.push(handler);
     return result;
   };
   const scopedOff = (type: PageEventType, handler?: GenericPageHandler): Page => {
-    const result = callOff(type, handler);
+    const result = callOff(type, type === "request" && handler ? wrappers.get(handler) ?? handler : handler);
     if (type === "request") {
       if (handler === undefined) {
         ownedHandlers.length = 0;
@@ -2367,9 +2439,23 @@ function installRequestListenerScope(page: Page): RequestListenerScope {
     }
     return result;
   };
-  mutablePage.on = scopedOn as unknown as Page["on"];
-  mutablePage.off = scopedOff as unknown as Page["off"];
+  const scopedOnce = (type: PageEventType, handler: GenericPageHandler): Page => {
+    if (type !== "request") return originalOnce.call(page, type, handler);
+    const onceHandler: GenericPageHandler = (...args) => {
+      try { return handler(...args); }
+      finally { scopedOff(type, onceHandler); }
+    };
+    return scopedOn(type, onceHandler);
+  };
+  page.on = scopedOn as unknown as Page["on"];
+  page.off = scopedOff as unknown as Page["off"];
+  page.once = scopedOnce as unknown as Page["once"];
   return {
+    failure,
+    async settle() {
+      while (pending.size > 0) await Promise.all([...pending]);
+      if (failed) throw failureReason;
+    },
     cleanup() {
       if (!active) return;
       active = false;
@@ -2377,15 +2463,17 @@ function installRequestListenerScope(page: Page): RequestListenerScope {
       try {
         for (let index = ownedHandlers.length - 1; index >= 0; index -= 1) {
           try {
-            callOff("request", ownedHandlers[index]!);
+            callOff("request", wrappers.get(ownedHandlers[index]!)!);
           } catch (error) {
             firstError ??= error;
           }
         }
       } finally {
         ownedHandlers.length = 0;
-        mutablePage.on = originalOn;
-        mutablePage.off = originalOff;
+        wrappers.clear();
+        page.on = originalOn;
+        page.off = originalOff;
+        page.once = originalOnce;
       }
       if (firstError) throw firstError;
     },

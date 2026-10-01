@@ -544,7 +544,7 @@ export function createResourceTool(
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
 - \`agent://<id>[/key[/index[/field]]]\` — published teammate output. Exact correlation and publication IDs resolve globally across workspace buckets; task-name discovery remains scoped to the caller's workspace/subtree and may return a disambiguation list. A correlation ID follows that task's latest publication, while a publication ID pins one immutable result; use task names only to discover candidates, then retain an exact ID. Bare \`agent://<id>\` returns the whole output; optional path segments load one nested field, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\`. Agent resources are not cached: reuse content already present in the current context instead of loading the same immutable URI again.
-- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from host-authorized session history. Obtain exact URIs from \`session_history\`; arbitrary transcript paths, unauthorized sessions, hidden rows, thinking blocks, abandoned branches, and tool-call arguments are rejected or omitted. Session reads are never cached.
+- \`session://<sessionId>/entry/<entryId>\` — one visible active-chain entry from host-authorized session history. Obtain exact URIs from \`session_history\`; this URI API rejects filesystem paths and unauthorized sessions and omits hidden rows, thinking blocks, abandoned branches, and tool-call arguments. Session reads are never cached.
 - \`artifact://<artifactId>\` — a Fabric artifact's identity and state (metadata only; fetching bytes is an explicit-destination download).
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
@@ -552,7 +552,7 @@ Read local files with the built-in read tool — resource is for protocol resour
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent://, session:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent://, session:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "For session:// entry resources, first obtain the exact URI from session_history; reads revalidate the host-authorized active chain and never expose paths, hidden rows, thinking, or tool arguments.",
+      "For session:// entry resources, first obtain the exact URI from session_history; this API revalidates the host-authorized active chain and never exposes paths, hidden rows, thinking, or tool arguments.",
       "For teammate results, use task names only to discover candidates; retain an exact correlation ID for that task's latest result or a publication ID for one immutable result. Exact IDs resolve globally; task-name lookup stays workspace-scoped.",
       "Load the smallest required agent://<exact-id>/key/index subtree, never append /json, and do not reload an unchanged immutable URI already present in the current context.",
     ],

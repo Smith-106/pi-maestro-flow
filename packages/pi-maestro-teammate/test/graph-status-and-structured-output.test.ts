@@ -1568,8 +1568,8 @@ test("foreground timeout moves single and graph dispatches to background without
     assert.equal(killed, 0);
     assert.equal(
       sentMessages.filter((message) => message.customType === "teammate-complete").length,
-      1,
-      "detached dispatch must publish exactly one completion notification",
+      taskCount,
+      "detached independent tasks must each publish one completion notification",
     );
 
     setPersistentUi(undefined);
@@ -1756,7 +1756,7 @@ test("foreground rejection cleans its deadline and terminal listener", async () 
   }
 });
 
-test("graph foreground Alt+B detach keeps children running and publishes one background completion", async () => {
+test("parallel foreground Alt+B detach keeps children running and publishes per-task background completions", async () => {
   const stdouts: PassThrough[] = [];
   let killed = 0;
   let terminalInput: ((data: string) => void) | undefined;
@@ -1813,8 +1813,7 @@ test("graph foreground Alt+B detach keeps children running and publishes one bac
   assert.equal(killed, 0, "Alt+B detach must not terminate any child");
   assert.equal(removed, 1, "manual graph detach must remove the shared listener once");
 
-  // Children finish in the background; the aggregate publishes exactly one
-  // teammate-complete notification.
+  // Children finish in the background and publish one notification each.
   for (const stdout of stdouts) {
     const terminal = `${JSON.stringify({ type: "agent_end" })}\n`;
     stdout.write(terminal);
@@ -1824,8 +1823,8 @@ test("graph foreground Alt+B detach keeps children running and publishes one bac
   assert.equal(killed, 0);
   assert.equal(
     sentMessages.filter((message) => message.customType === "teammate-complete").length,
-    1,
-    "detached graph dispatch must publish exactly one completion notification",
+    2,
+    "detached independent tasks must each publish one completion notification",
   );
 
   setPersistentUi(undefined);
@@ -2273,8 +2272,10 @@ test("child lifecycle commit wins over a later handback failure recovery", () =>
   const registrationStart = source.indexOf("export default function registerTeammateExtension(");
   assert.ok(handlerStart >= 0 && handlerStart < registrationStart);
   assert.equal(source.match(/function handleChildLifecycleEvent\(/g)?.length, 1);
-  assert.match(source, /onChildEvent: \(event: Record<string, unknown>\) => handleChildLifecycleEvent\(state, event\)/);
-  assert.match(source, /onChildEvent: \(childEvent\) => handleChildLifecycleEvent\(state, childEvent\)/);
+  assert.match(source, /onChildEvent: \(event: Record<string, unknown>\) => \{/);
+  assert.match(source, /handleChildLifecycleEvent\(state, event\)/);
+  assert.match(source, /onChildEvent: \(childEvent\) => \{/);
+  assert.match(source, /handleChildLifecycleEvent\(state, childEvent\)/);
   assert.doesNotMatch(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.(?:event|childEvent),\s*correlationId(?:: cid)?,/s);
 
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lifecycle-state-"));
@@ -2562,7 +2563,7 @@ test("nested teammate-send republishes a running lifecycle when it wakes an agen
   assert.equal(messageEvent?.payload.correlationId, target.correlationId);
   assert.equal(messageEvent?.payload.mode, "prompt");
   assert.equal(messageEvent?.payload.lastActivityAt, target.lastActivityAt);
-  assert.match(JSON.stringify(reply), /queued until AgentSession would otherwise stop/);
+  assert.match(JSON.stringify(reply), /written to the legacy transport \(acceptance\/consumption unconfirmed\)/);
 
   await handleProxyRequest(
     pi,

@@ -281,7 +281,7 @@ test("Provider enable/disable preserves config and controls runtime registration
   };
   await commands.get("api-manager").handler("enable openai", ctx);
   assert.equal(registered.at(-1)?.name, "maestro-openai");
-  assert.deepEqual(registered.at(-1)?.config.models.map((model: any) => model.id), ["model-a"]);
+  assert.equal(registered.at(-1)?.config.models, undefined, "native registration leaves the models.json operation catalog intact");
   await commands.get("api-manager").handler("disable openai", ctx);
   assert.equal(registered.at(-1)?.name, "maestro-openai");
   assert.deepEqual(registered.at(-1)?.config.models, []);
@@ -331,7 +331,7 @@ test("registers configured providers and the /api-manager command", async (t) =>
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
-  } as any, { modelsPath });
+  } as any, { modelsPath, hostVersion: "0.98.0" });
 
   assert.deepEqual(registered.map((entry) => entry.name), ["maestro-openai", "maestro-qwen", "maestro-anthropic"]);
   assert.equal(registered[0].config.name, undefined);

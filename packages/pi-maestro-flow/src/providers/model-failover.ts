@@ -41,6 +41,7 @@ import {
   type RetryErrorKind,
 } from "pi-maestro-teammate/v1/retry";
 import { classifySync, retryErrorDomain } from "pi-maestro-teammate/v1/classify";
+import { recordProviderResponse } from "./api-provider-config.ts";
 
 export interface ModelFailoverConfig {
   enabled: boolean;
@@ -781,6 +782,13 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
             agentDir: options.visionAgentDir,
             signal,
             prompt: `Analyze attached image ${index + 1} for the primary coding agent. Extract visible text, structure, UI state, diagrams, and details relevant to the user's request.`,
+            onResponse: (response, model) => recordProviderResponse(
+              pi,
+              model.provider,
+              response.status,
+              ctx,
+              path.join(options.visionAgentDir ?? getAgentDir(), "models.json"),
+            ),
           });
           routes.push({ imageIndex: index + 1, route: "vision", model: result.model });
           sections.push(`### Attached image ${index + 1} [image:vision] (${result.model})\n${result.text}`);

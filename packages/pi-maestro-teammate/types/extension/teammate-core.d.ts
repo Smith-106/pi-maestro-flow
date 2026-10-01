@@ -82,7 +82,7 @@ export declare function toStructuredResults(results: readonly SingleResult[], or
 export declare function emitTeammateResultPublished(pi: ExtensionAPI, result: SingleResult, originCwd: string): Promise<TeammateResultPublicationResult>;
 /** Replace the retained turn value; undefined intentionally clears stale data. */
 export declare function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void;
-export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {
+export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "childPiVersion" | "virtualModelIds" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {
     /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
     onRunOptionsCreated?: (options: RunTeammateOptions) => void;
 };

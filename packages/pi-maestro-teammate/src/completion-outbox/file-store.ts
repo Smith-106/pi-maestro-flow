@@ -308,6 +308,7 @@ function recordSemantic(record: Omit<CompletionOutboxRecord, "contentRevision">)
     dispatchId: record.dispatchId,
     reservationId: record.reservationId,
     kind: record.kind,
+    ...(record.mode === undefined ? {} : { mode: record.mode }),
     target: record.target,
     replyTarget: record.replyTarget,
     summary: record.summary,
@@ -343,6 +344,7 @@ function validRecord(value: unknown): value is CompletionOutboxRecord {
     || typeof record.dispatchId !== "string" || !SAFE_ID.test(record.dispatchId)
     || typeof record.reservationId !== "string" || !SAFE_ID.test(record.reservationId)
     || !["single", "graph", "additional", "failure"].includes(String(record.kind))
+    || (record.mode !== undefined && !["single", "parallel", "chain", "graph"].includes(record.mode))
     || !validTarget(record.target)
     || (record.replyTarget !== "main" && record.replyTarget !== "caller")
     || typeof record.summary !== "string" || Buffer.byteLength(record.summary, "utf8") > COMPLETION_OUTBOX_MAX_SUMMARY_BYTES
@@ -1356,6 +1358,7 @@ export class CompletionOutboxFileStore {
         dispatchId: intent.dispatchId,
         reservationId: intent.reservationId,
         kind: intent.kind,
+        mode: intent.mode,
         target: intent.target,
         replyTarget: intent.replyTarget,
         summary: intent.summary,

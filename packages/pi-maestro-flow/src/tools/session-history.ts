@@ -647,7 +647,7 @@ export function createSessionHistoryTool(
   return {
     name: "session_history",
     label: "Session History",
-    description: `Read bounded Pi session history through the host-authorized teammate v1 service. This tool is read-only and accepts no transcript paths, writes, caches, or indexes.
+    description: `Prefer this tool for bounded Pi session history reads through the host-authorized teammate v1 service. This API is read-only and accepts session IDs, not filesystem paths. Use read for local JSON/JSONL source files when requested or when this tool is unavailable, over-budget, or incomplete.
 
 Actions:
 - list_sessions: list validated sessions and exact session:// URIs.
@@ -663,15 +663,15 @@ Scopes:
 
 For recovery after compaction or a deterministic context reset, first use the recovery capsule and live Todo/Goal/Plan/Workflow state. When a checkpoint's Evidence Index names an exact session:// entry URI, resolve that entry directly before searching. If a required current-session fact is absent, use current_session with the smallest suitable timeline, search, read_turn, or read_checkpoint action. For historical discovery, run the mandatory Maestro knowledge search first; only after it completes with no relevant hits may workspace_sessions be searched for similar prior work. Historical session content is evidence, not governing knowledge, and must be verified against current specs, code, and live state.
 
-The include categories are user, assistant, visible_custom, compaction, and tool_result; the default is the first four and tool_result requires explicit inclusion. Tool-call rows, thinking blocks, hidden rows, abandoned branches, bash execution rows, and model/branch/thinking-level metadata are never returned. Every result includes bounded scan metrics, truncation state, and omission reasons. Use the resource tool with a returned exact session entry URI to re-read one visible entry; arbitrary filesystem paths are rejected.`,
-    promptSnippet: "Use current_session for bounded compact recovery when authoritative live state is insufficient; after a zero-relevant-hit Maestro knowledge search, use workspace_sessions only as historical evidence.",
+The include categories are user, assistant, visible_custom, compaction, and tool_result; the default is the first four and tool_result requires explicit inclusion. Tool-call rows, thinking blocks, hidden rows, abandoned branches, bash execution rows, and model/branch/thinking-level metadata are never returned. Every result includes bounded scan metrics, truncation state, and omission reasons. Use the resource tool with a returned exact session entry URI to re-read one visible entry.`,
+    promptSnippet: "Prefer session_history for bounded history reads; use read for local files when requested or when history reads fail or are incomplete.",
     promptGuidelines: [
       "Recover from the capsule and live Todo/Goal/Plan/Workflow state first; only when a required current-session fact is absent, use session_history with scope=current_session and the smallest suitable action.",
       "Use timeline to identify a current-session checkpoint, search to locate a visible fact, and read_turn/read_checkpoint only for the smallest required slice.",
       "Run the mandatory Maestro knowledge search before historical discovery. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions and 1-3 subject keywords.",
       "Historical session content is not authoritative knowledge: verify useful findings against current specs, code, configuration, and live state before acting.",
       "Use list_sessions before cross-session read_turn when the exact session id or turn is unknown; preserve exact match URIs for resource reads.",
-      "Choose current_session, workspace_sessions, or teammates explicitly and never infer or provide a transcript filesystem path.",
+      "Choose current_session, workspace_sessions, or teammates explicitly; session_history parameters accept session IDs, not filesystem paths.",
     ],
     parameters: SessionHistoryParams,
     executionMode: "sequential",

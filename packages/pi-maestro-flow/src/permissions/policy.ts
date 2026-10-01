@@ -56,6 +56,7 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "plan-exit",
   "plan-status",
   "search_tool_bm25",
+  "tool_search",
   "resource",
   "session_history",
 ]);

@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { FileFinderApi, GrepCursor, GrepMatch } from "@ff-labs/fff-node";
 import {
-  MAX_SESSION_HISTORY_BYTES,
   MAX_SESSION_HISTORY_FILES,
 } from "pi-maestro-teammate/v1/session-history";
 import {
@@ -147,7 +146,7 @@ test("session history FFF accelerator is lazy, literal, paginated, and path boun
         };
       },
       fileSearch() { throw new Error("unused"); },
-      glob() { throw new Error("unused"); },
+      glob() { return { ok: true, value: { items: [], scores: [], totalMatched: 0, totalFiles: 0 } }; },
       directorySearch() { throw new Error("unused"); },
       mixedSearch() { throw new Error("unused"); },
       multiGrep() { throw new Error("unused"); },
@@ -182,7 +181,7 @@ test("session history FFF accelerator is lazy, literal, paginated, and path boun
     for (const call of calls) {
       assert.equal(call.options.mode, "plain");
       assert.equal(call.options.smartCase, false);
-      assert.equal(call.options.maxFileSize, MAX_SESSION_HISTORY_BYTES);
+      assert.equal(call.options.maxFileSize, Number.MAX_SAFE_INTEGER);
       assert.equal(call.options.maxMatchesPerFile, 1);
       assert.equal(call.options.pageSize, SESSION_HISTORY_FFF_PAGE_SIZE);
       assert.equal(call.options.beforeContext, 0);
@@ -218,6 +217,7 @@ test("session history FFF candidate inventory is capped and incomplete paginatio
       isDestroyed: false,
       destroy() { finder.isDestroyed = true; },
       async waitForScan() { return { ok: true as const, value: true }; },
+      glob() { return { ok: true, value: { items: [], scores: [], totalMatched: 0, totalFiles: 0 } }; },
       grep() {
         calls += 1;
         return {
@@ -242,6 +242,44 @@ test("session history FFF candidate inventory is capped and incomplete paginatio
     assert.equal(result.complete, false);
     assert.ok(calls <= 2 * SESSION_HISTORY_FFF_MAX_PAGES);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("native FFF discovers history files larger than 32 MiB", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-large-"));
+  const accelerator = createSessionHistoryFffAccelerator();
+  try {
+    const current = join(root, "current.jsonl");
+    const large = join(root, "large.jsonl");
+    await writeFile(current, `${header("current")}\n${user("u1", "ordinary")}\n`, "utf8");
+    await writeFile(large, `${header("large")}\n`, "utf8");
+    const padding = "x".repeat(1024 * 1024);
+    for (let index = 0; index < 49; index += 1) {
+      await appendFile(large, `${JSON.stringify({
+        type: "custom_message", id: `padding-${index}`, parentId: null,
+        customType: "padding", content: padding, display: false,
+      })}\n`);
+    }
+    await appendFile(large, `${user("u1", "large history needle")}\n`);
+    const ctx = context(root, current);
+    const candidates = await accelerator.search("needle", ctx);
+    assert.equal(candidates.available, true);
+    assert.equal(candidates.complete, true);
+    assert.ok(candidates.entries.some((entry) => entry.path === large));
+    const result = await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "needle" },
+      ctx,
+      { candidateAccelerator: accelerator },
+    );
+    const payload = JSON.parse(resultText(result)) as {
+      matches: Array<{ sessionId: string }>;
+      truncated: boolean;
+    };
+    assert.deepEqual(payload.matches.map((match) => match.sessionId), ["large"]);
+    assert.equal(payload.truncated, false);
+  } finally {
+    accelerator.destroy();
     await rm(root, { recursive: true, force: true });
   }
 });

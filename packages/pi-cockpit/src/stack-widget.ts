@@ -73,16 +73,37 @@ export function visibleAgentRows(rows: AgentRow[]): AgentRow[] {
 
 export function activeAgentTreeRows(rows: AgentRow[]): AgentRow[] {
 	const visible = visibleAgentRows(rows);
-	const byId = new Map(visible.map((row) => [row.correlationId, row]));
+	const byId = new Map(rows.map((row) => [row.correlationId, row]));
+	const children = new Map<string, AgentRow[]>();
+	for (const row of rows) {
+		if (!row.parentCorrelationId || row.parentCorrelationId === row.correlationId) continue;
+		const siblings = children.get(row.parentCorrelationId) ?? [];
+		siblings.push(row);
+		children.set(row.parentCorrelationId, siblings);
+	}
+
 	const required = new Set<string>();
-	for (const row of visible) {
+	const activeGraphs = new Set<string>();
+	for (const row of rows) {
 		if (row.status !== "running" && row.status !== "retrying") continue;
 		let current: AgentRow | undefined = row;
 		const visited = new Set<string>();
 		while (current && !visited.has(current.correlationId)) {
 			visited.add(current.correlationId);
 			required.add(current.correlationId);
+			if (current.agent.startsWith("graph(")) activeGraphs.add(current.correlationId);
 			current = current.parentCorrelationId ? byId.get(current.parentCorrelationId) : undefined;
+		}
+	}
+	for (const graphId of activeGraphs) {
+		const pending = [...(children.get(graphId) ?? [])];
+		const visited = new Set<string>();
+		while (pending.length > 0) {
+			const row = pending.pop()!;
+			if (visited.has(row.correlationId)) continue;
+			visited.add(row.correlationId);
+			required.add(row.correlationId);
+			pending.push(...(children.get(row.correlationId) ?? []));
 		}
 	}
 	return visible.filter((row) => required.has(row.correlationId));
@@ -115,8 +136,8 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 				const key = [liveWidth, refId(paint), cfg.todoMode, expanded, cfg.icons.mode, opts.maxRows, todoItemsKey(todos)].join(";");
 				return memo(key, () => renderTodos(todos, expanded ? "list" : cfg.todoMode, liveWidth, paint, UTILS, opts));
 			},
-			invalidate(): void {},
-			dispose(): void {},
+			invalidate(): void { memo.clear(); },
+			dispose(): void { memo.clear(); },
 		};
 	};
 }
@@ -152,22 +173,18 @@ export function makeActiveAgentWidget(deps: ActiveAgentWidgetDeps) {
 					liveWidth, rowBudget, refId(paint), cfg.icons.mode, cfg.quietMode,
 					agentRowsKey(contextRows),
 				].join(";");
-				return memo(key, () => {
-					const lines = renderAgents(rows, "list", liveWidth, paint, UTILS, {
-						glyphs: g,
-						spin: g.dotRunning,
-						now: projectionNow,
-						maxRows: rowBudget,
-						hideLiveDuration: true,
-						agentContextRows: contextRows,
-						withHead: false,
-					});
-					return [...lines, ...Array.from({ length: Math.max(0, rowBudget - lines.length) }, () => "")]
-						.slice(0, rowBudget);
-				});
+				return memo(key, () => renderAgents(rows, "list", liveWidth, paint, UTILS, {
+					glyphs: g,
+					spin: g.dotRunning,
+					now: projectionNow,
+					maxRows: rowBudget,
+					hideLiveDuration: true,
+					agentContextRows: contextRows,
+					withHead: false,
+				}));
 			},
-			invalidate(): void {},
-			dispose(): void {},
+			invalidate(): void { memo.clear(); },
+			dispose(): void { memo.clear(); },
 		};
 	};
 }
@@ -300,8 +317,8 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				].join(";");
 				return memo(memoKey, () => renderRoster(agents, cfg, g, now, liveWidth));
 			},
-			invalidate(): void {},
-			dispose(): void {},
+			invalidate(): void { memo.clear(); },
+			dispose(): void { memo.clear(); },
 		};
 	};
 }

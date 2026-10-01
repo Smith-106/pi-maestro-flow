@@ -2,6 +2,8 @@ import { type TeammateThinkingLevel } from "../shared/thinking.ts";
 export interface AvailableModelEntry {
     provider: string;
     id: string;
+    /** Virtual selections require an inherited router, not a physical registration. */
+    api?: string;
     name?: string;
     reasoning?: boolean;
     thinkingLevelMap?: Partial<Record<TeammateThinkingLevel, string | null>>;

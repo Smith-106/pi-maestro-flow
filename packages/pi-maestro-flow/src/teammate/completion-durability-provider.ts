@@ -512,8 +512,11 @@ export class FlowCompletionDurabilityProvider implements CompletionDurabilityPro
       manifest.notificationRequiredAt ?? manifest.updatedAt,
       ...manifest.published.map((entry) => entry.committedAt ?? entry.stagedAt),
     );
-    const summary = resources.map((resource) => resource.summary).filter(Boolean).join("\n")
+    const resultSummary = resources.map((resource) => resource.summary).filter(Boolean).join("\n")
       || `${resources.length} teammate result${resources.length === 1 ? "" : "s"} completed.`;
+    const summary = manifest.mode === "parallel" && resources.length === 1
+      ? `${resultSummary}\n\nRecovered result; sibling status unavailable.`
+      : resultSummary;
     await this.finalizeDelivery({
       dispatchId: manifest.dispatchId,
       reservationId: manifest.reservationId,

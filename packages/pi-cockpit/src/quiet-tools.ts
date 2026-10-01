@@ -3,7 +3,7 @@
 // a config-driven SPECS table + shared render functions. Execution is delegated
 // to the original built-in tools — only the rendering is replaced.
 //
-// Scope boundary: only the seven built-in tools (read/bash/edit/write/grep/find/ls)
+// Legacy-host scope only: the seven built-in tools (read/bash/edit/write/grep/find/ls)
 // are compressed. Compression works by re-registering the tool name and delegating
 // execution back to pi's exported creators. MCP/extension tools (todo, teammate,
 // mcp, lsp, ...) cannot be compressed this way: registerTool is first-name-wins and
@@ -26,6 +26,7 @@ import type {
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import {
+	VERSION,
 	createBashTool,
 	createEditTool,
 	createFindTool,
@@ -37,6 +38,7 @@ import {
 import { Text, type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { quietStatusMark } from "pi-maestro-settings-core/ui";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
 import type { CockpitConfig } from "./types.ts";
 import { resolveGlyphs, type IconGlyphs } from "./icons.ts";
 import {
@@ -274,17 +276,21 @@ function renderResultLine(
  * when config.quietMode is true. Tools delegate execution to the built-in
  * implementations; only the visual shell is replaced.
  */
-export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitConfig): void {
+export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitConfig, hostVersion: unknown = VERSION): void {
+	// The native host owns all base-tool metadata and execution. Until it offers
+	// a render-only hook, quiet rendering is limited to Maestro-owned tools.
+	if (getPiHostMode(hostVersion) !== "legacy") return;
 	for (const spec of SPECS) {
 		const original = (getBuiltInTools(process.cwd()) as any)[spec.name];
 		const guardedEdit = spec.name === "edit";
 		pi.registerTool({
+			...original,
 			name: spec.name,
 			label: spec.name,
 			description: guardedEdit ? GUARDED_EDIT_DESCRIPTION : original.description,
 			parameters: guardedEdit ? GUARDED_EDIT_PARAMETERS : original.parameters,
 			prepareArguments: guardedEdit ? prepareGuardedEditArguments : original.prepareArguments,
-			executionMode: guardedEdit ? "sequential" : undefined,
+			executionMode: guardedEdit ? "sequential" : original.executionMode,
 			renderShell: "self",
 
 			async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: ExtensionContext) {
@@ -335,13 +341,13 @@ interface ResultLike {
 	content: Array<{ type: string; text?: string }>;
 }
 
-function lineComponent(text: string): Component {
+function lineComponent(text: () => string): Component {
 	return {
 		render(width: number): string[] {
 			const safeWidth = Math.max(1, width);
 			if (safeWidth <= 1) return [];
 			const liveWidth = safeWidth - 1;
-			return text.split("\n").map((line) => truncateToWidth(line, liveWidth, "…"));
+			return text().split("\n").map((line) => truncateToWidth(line, liveWidth, "…"));
 		},
 		invalidate(): void {},
 	};
@@ -349,7 +355,7 @@ function lineComponent(text: string): Component {
 
 export function toolCallLine(theme: QuietTheme, name: string, arg = ""): Component {
 	const bold = theme.bold ?? ((text: string) => text);
-	return lineComponent(
+	return lineComponent(() =>
 		`  ${theme.fg("warning", quietStatusMark("running"))} ${theme.fg("toolTitle", bold(name))}${arg ? ` ${theme.fg("accent", arg)}` : ""}`,
 	);
 }
@@ -367,12 +373,14 @@ export function toolResultLine(
 	},
 ): Component {
 	const bold = theme.bold ?? ((text: string) => text);
-	const mark = o.mark ?? (o.ok === false
-		? theme.fg("error", quietStatusMark("failure"))
-		: theme.fg("success", quietStatusMark("success")));
-	let line = `  ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
-	if (o.expanded && o.detail && o.detail.trim()) line += `\n${theme.fg("dim", o.detail)}`;
-	return lineComponent(line);
+	return lineComponent(() => {
+		const mark = o.mark ?? (o.ok === false
+			? theme.fg("error", quietStatusMark("failure"))
+			: theme.fg("success", quietStatusMark("success")));
+		let line = `  ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
+		if (o.expanded && o.detail && o.detail.trim()) line += `\n${theme.fg("dim", o.detail)}`;
+		return line;
+	});
 }
 
 export function toolResultCard(
@@ -388,11 +396,11 @@ export function toolResultCard(
 	},
 ): Component {
 	const bold = theme.bold ?? ((text: string) => text);
-	const mark = o.ok === false
-		? theme.fg("error", quietStatusMark("failure"))
-		: theme.fg("success", quietStatusMark("success"));
 	return {
 		render(width: number): string[] {
+			const mark = o.ok === false
+				? theme.fg("error", quietStatusMark("failure"))
+				: theme.fg("success", quietStatusMark("success"));
 			const safeWidth = Math.max(1, width);
 			if (safeWidth <= 1) return [];
 			const label = `${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;

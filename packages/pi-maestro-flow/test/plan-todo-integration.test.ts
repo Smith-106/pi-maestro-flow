@@ -16,6 +16,7 @@ import { evaluatePermission } from "../src/permissions/policy.ts";
 import { TodoSkillLoader } from "../src/skills/skill-loader.ts";
 import {
   getPlanCompactionSnapshot,
+  getPlanNewContextPayload,
   getPlanHandoffStatus,
   initPlan,
   onSessionShutdownPlan,
@@ -148,7 +149,11 @@ test("an approved Plan is only handed off by a Todo carrying its own handoff key
     assert.equal(snapshot.revision, confirmed.details.revision);
     assert.equal(snapshot.handoffStatus, "todo-required");
     assert.equal(snapshot.handoffKey, handoffKey);
-    assert.equal(snapshot.path, confirmed.details.path);
+    const approval = getPlanNewContextPayload();
+    assert.equal(snapshot.path, approval?.path);
+    assert.equal(snapshot.checksum, approval?.checksum);
+    assert.match(snapshot.path!.replaceAll("\\", "/"), /\/approvals\//);
+    assert.notEqual(snapshot.path, confirmed.details.path, "recovery reads the immutable approval, not the editable draft");
 
     // Approved, but nothing to execute yet.
     assert.equal(getPlanHandoffStatus(), "todo-required");

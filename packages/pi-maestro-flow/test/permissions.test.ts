@@ -17,6 +17,15 @@ import {
 
 const empty = { allow: [], ask: [], deny: [] };
 
+test("native tool discovery is pre-approved without pre-approving codemode execution", () => {
+  const search = { toolName: "tool_search", input: { query: "browser" } };
+  assert.equal(evaluatePermission(search, "dontAsk", empty).behavior, "allow");
+  assert.equal(evaluatePermission(search, "default", { ...empty, deny: ["tool_search"] }).behavior, "deny");
+  const code = { toolName: "codemode", input: { code: "await tools.write({path: 'x', content: 'x'})" } };
+  assert.equal(evaluatePermission(code, "default", empty).behavior, "ask");
+  assert.equal(evaluatePermission(code, "dontAsk", empty).behavior, "deny");
+});
+
 test("permission settings default to YOLO when no scope configures a mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-permissions-default-yolo-"));
   try {
@@ -79,6 +88,18 @@ test("bypassPermissions is true YOLO and ignores explicit deny rules", () => {
   );
   assert.equal(decision.behavior, "allow");
   assert.match(decision.reason, /YOLO/);
+});
+
+test("local JSON and JSONL history reads have no file-type ban", () => {
+  for (const filePath of ["settings.json", "sessions/history.jsonl"]) {
+    const call = { toolName: "read", input: { path: filePath } };
+    for (const mode of ["default", "dontAsk", "plan"] as const) {
+      assert.equal(evaluatePermission(call, mode, empty).behavior, "allow");
+    }
+    assert.equal(evaluatePermission(call, "default", {
+      ...empty, deny: [`Read(${filePath})`],
+    }).behavior, "deny");
+  }
 });
 
 test("permission modes each enforce their own behavior", () => {

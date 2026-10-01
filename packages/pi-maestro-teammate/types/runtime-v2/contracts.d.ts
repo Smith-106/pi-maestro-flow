@@ -32,11 +32,13 @@ interface RuntimeEventBaseV2 {
 export interface RuntimeToolStartedEventV2 extends RuntimeEventBaseV2 {
     kind: "tool.started";
     toolCallId: string;
+    parentToolCallId?: string;
     toolName: string;
 }
 export interface RuntimeToolFinishedEventV2 extends RuntimeEventBaseV2 {
     kind: "tool.finished";
     toolCallId: string;
+    parentToolCallId?: string;
     toolName: string;
     outcome: "succeeded" | "failed";
 }

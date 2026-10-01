@@ -56,8 +56,16 @@ export declare const TOOL_EXECUTION_HEARTBEAT_MS = 10000;
 export declare function resolveAgentCacheRetention(env?: NodeJS.ProcessEnv): string;
 export declare function runSingleAttempt(params: RunSingleTeammateParams, agentConfig: AgentConfig, cwd: string, correlationId: string, replyTo: ReplyTarget, startTime: number, modelOverride: string | undefined, options: RunTeammateOptions): Promise<SingleResult>;
 export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort" | "interrupt";
+export type RpcInputDisposition = "handled" | "queued" | "started" | "legacy-accepted" | "transport-written" | "interrupt-requested";
+export type RpcReceipt = {
+    accepted: boolean;
+    disposition?: RpcInputDisposition;
+    error?: string;
+};
+/** Model-input acceptance is independent of its eventual AgentSession settlement. */
+export declare function sendRpcMessageWithReceipt(stdin: Writable, message: string, mode?: RpcMessageMode, token?: LeaseToken, provenance?: MessageProvenanceV1): Promise<RpcReceipt>;
 export declare function hasRpcTurnSidecar(stdin: Writable): boolean;
-export declare function sendRpcMessage(stdin: Writable, message: string, mode?: RpcMessageMode, token?: LeaseToken, provenance?: MessageProvenanceV1): boolean;
+export declare function sendRpcMessage(stdin: Writable, message: string, mode?: RpcMessageMode, token?: LeaseToken, provenance?: MessageProvenanceV1, requestId?: string): boolean;
 export declare function sendChildIpcMessage(child: ChildProcess, message: Record<string, unknown>): boolean;
 export declare function dispatchChildIpcMessage(message: Record<string, unknown>, onRequest: RunTeammateOptions["onChildRequest"], onEvent: RunTeammateOptions["onChildEvent"], reply: (message: unknown) => void): "request" | "event";
 export {};

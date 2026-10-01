@@ -30,20 +30,32 @@ export function refId(value: unknown): string {
  * compute closure reads; callers are responsible for including the wall-clock
  * second when (and only when) a live duration is on screen.
  */
-export function memoizedLines(): (key: string, compute: () => string[]) => string[] {
+export interface RenderMemo<T> {
+	(key: string, compute: () => T): T;
+	/** Host theme proxies keep their identity when the palette changes. */
+	clear(): void;
+}
+
+export function memoizedLines(): RenderMemo<string[]> {
 	return memoized<string[]>();
 }
 
 /** Generic one-entry memo; see memoizedLines for the contract. */
-export function memoized<T>(): (key: string, compute: () => T) => T {
+export function memoized<T>(): RenderMemo<T> {
 	let lastKey: string | undefined;
 	let lastValue: T | undefined;
-	return (key, compute) => {
+	const memo: RenderMemo<T> = (key, compute) => {
 		if (key === lastKey) return lastValue as T;
+		const value = compute();
 		lastKey = key;
-		lastValue = compute();
-		return lastValue;
+		lastValue = value;
+		return value;
 	};
+	memo.clear = () => {
+		lastKey = undefined;
+		lastValue = undefined;
+	};
+	return memo;
 }
 
 interface AgentRowLike {

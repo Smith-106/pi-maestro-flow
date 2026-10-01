@@ -22,11 +22,13 @@
  * the engine never reads files, the env, or UI surfaces itself — except the
  * two documented env lookups delegated to `resolveJevEndpoint`.
  */
-import { type JevEndpoint } from "./client.ts";
+import { type ClassifierRuntime, type JevEndpoint } from "./client.ts";
 import type { ClassifierDomainMode, ClassifyDomain, ClassifyResult, ClassifyShadowRecord } from "./types.ts";
 export interface ClassifierConfig {
     /** Master switch. When false, every call is L0-only regardless of domain modes. */
     enabled: boolean;
+    /** Explicit host version for host-free callers; unknown hosts cannot use HTTP. */
+    hostVersion?: string;
     /** Preferred endpoint; when absent, inferred from which API key env exists. */
     endpoint?: JevEndpoint;
     /** Explicit API key; when absent, read from the endpoint's env var. */
@@ -62,6 +64,12 @@ export interface ClassifierStatus {
     cacheSize: number;
     domains: Record<string, ClassifierDomainStatus>;
 }
+/** Bind only the current process's host facade, never a child/remote runtime. */
+export declare function bindClassifierRuntime(binding: {
+    hostVersion: string;
+    runtime: ClassifierRuntime;
+}): void;
+export declare function unbindClassifierRuntime(runtime: ClassifierRuntime): void;
 /** Inject classifier configuration (host loads `.pi/classifier.json` / env). */
 export declare function configureClassifier(next: ClassifierConfig): void;
 export declare function classifierConfig(): ClassifierConfig;

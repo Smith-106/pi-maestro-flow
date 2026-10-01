@@ -278,6 +278,23 @@ class FakeActorHost implements RuntimeActorHostClient {
   async stop(): Promise<void> {}
 }
 
+test("AgentRun live nested interleaving survives progress-tail eviction without rewriting call IDs", async () => {
+  const host = new FakeActorHost();
+  const actor = await AgentRunRuntimeActor.start("native-run", {}, { baseCwd: process.cwd(), runtimeActorHost: host });
+  const wired = actor.wrap({ baseCwd: process.cwd() });
+  wired.onChildEvent?.({ type: "tool_execution_start", toolCallId: "outer", toolName: "codemode" });
+  wired.onChildEvent?.({ type: "tool_execution_start", toolCallId: "nested", parentToolCallId: "outer", toolName: "read" });
+  // The bounded progress tail has dropped the older running call.
+  actor.progressAfterV1({ agent: "general", status: "running", recentTools: [], toolCount: 0, tokens: 0, durationMs: 0, lastActivityAt: 1, startedAt: 1 });
+  wired.onChildEvent?.({ type: "tool_execution_end", toolCallId: "nested", parentToolCallId: "outer", toolName: "read", isError: false });
+  wired.onChildEvent?.({ type: "tool_execution_end", toolCallId: "outer", toolName: "codemode", isError: false });
+  await actor.finish();
+  const tools = host.batches.flat().filter((event) => event.kind === "tool.started" || event.kind === "tool.finished");
+  assert.deepEqual(tools.map((event) => event.toolCallId), ["outer", "nested", "nested", "outer"]);
+  assert.equal(tools[2]?.parentToolCallId, "outer");
+  assert.equal(tools.length, 4);
+});
+
 test("sqlite actor reconnects and replays a lost acquire with the exact stable requestId", async () => {
   const lease: ActorLease = {
     actorId: "actor-lease",

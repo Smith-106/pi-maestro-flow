@@ -1,7 +1,7 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
-import { getAgentDir, keyText, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
+import { VERSION, getAgentDir, keyText, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield, capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -50,7 +50,8 @@ import { TodoOverlay } from "./todo-overlay.ts";
 import { AgentOverlay } from "./agent-overlay.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
 import { registerTeammateMessageRenderer } from "./teammate-message.ts";
-import { registerGuardedEditTool } from "./edit-guard.ts";
+import { registerGuardedEditTool, registerNativeEditPolicy } from "./edit-guard.ts";
+import { navigateHostThemeSettings } from "./host-ui.ts";
 import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts";
 import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
@@ -388,18 +389,18 @@ export default function (pi: ExtensionAPI): void {
 	let viewportStabilityPatch: ViewportStabilityPatch | undefined;
 	let compactionStylePatch: CompactionStylePatch | undefined;
 
-	// pi-tui versions the host patches were validated against. A mismatch does
+	// Host SDK versions the TUI patches were validated against. A mismatch does
 	// not block anything — every patch fails closed — but the user should know
 	// the cockpit is running on an unverified host shape.
-	const VERIFIED_PI_TUI = /^(0\.83\.|0\.84\.)/;
+	const VERIFIED_PI_TUI = /^(0\.83\.|0\.84\.|0\.99\.0$)/;
 	let hostVersionWarned = false;
 	const checkHostVersion = (ctx: ExtensionContext): void => {
 		if (hostVersionWarned) return;
 		try {
-			const require = createRequire(import.meta.url);
-			const pkgPath = require.resolve("@earendil-works/pi-tui/package.json");
-			const version = (JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string }).version;
-			if (!version || VERIFIED_PI_TUI.test(version)) return;
+			// Public coding-agent VERSION is the host compatibility diagnostic;
+			// package.json deep exports are not part of the SDK contract.
+			const version = VERSION;
+			if (VERIFIED_PI_TUI.test(version)) return;
 			hostVersionWarned = true;
 			ctx.ui.notify(tuiT("notice.hostVersion", { version }), "warning");
 		} catch {
@@ -518,13 +519,14 @@ export default function (pi: ExtensionAPI): void {
 		getGlyphs: () => resolveGlyphs(config.icons.mode),
 	});
 	reportPatch("compaction-style", compactionStylePatch.active, compactionStylePatch.reason);
-	// Guarded edit replaces the built-in edit (same name, same execution, plus a
-	// UTF-8 gate): editing a non-UTF-8 file would otherwise corrupt its bytes.
+	// Legacy edit keeps the frozen/occurrence extension. Native edit keeps every
+	// SDK field untouched and uses a tool_call UTF-8 policy (including nested calls).
 	registerGuardedEditTool(pi);
+	registerNativeEditPolicy(pi);
 	registerTeammateMessageRenderer(pi, () => config.enabled);
 	// Reads config live, so toggling static mode re-throttles without re-registering.
 	setUsageThrottle(() => (config.staticMode ? USAGE_REFRESH_THROTTLE_MS : 0));
-	if (config.quietMode) {
+	if (config.quietMode && getPiHostMode(VERSION) === "legacy") {
 		registerQuietTools(pi, () => config);
 		quietToolsRegistered = true;
 	}
@@ -825,7 +827,7 @@ export default function (pi: ExtensionAPI): void {
 		// rendering) can follow quiet mode regardless of which path toggled it.
 		publishUiOwnership();
 		if (now && !was) {
-			if (!quietToolsRegistered) {
+			if (!quietToolsRegistered && getPiHostMode(VERSION) === "legacy") {
 				registerQuietTools(pi, () => config);
 				quietToolsRegistered = true;
 			}
@@ -1366,8 +1368,8 @@ export default function (pi: ExtensionAPI): void {
 						zenNavRows = stack.navIds;
 						return stack.lines;
 					},
-					invalidate(): void { todoWidget.invalidate(); },
-					dispose(): void { todoWidget.dispose(); },
+					invalidate(): void { zenMemo.clear(); todoWidget.invalidate(); },
+					dispose(): void { zenMemo.clear(); todoWidget.dispose(); },
 				};
 			},
 			{ placement: "aboveEditor" },
@@ -1636,8 +1638,9 @@ export default function (pi: ExtensionAPI): void {
 						utils: FOOTER_UTILS,
 					}));
 				},
-				invalidate(): void {},
+				invalidate(): void { footerMemo.clear(); },
 				dispose(): void {
+					footerMemo.clear();
 					clearInterval(widthTimer);
 					unsubscribeBranch();
 				},
@@ -2082,7 +2085,7 @@ export default function (pi: ExtensionAPI): void {
 		// are available before pi renders resumed history.  This session_start
 		// path is a fallback for the rare case where the early config load
 		// returned defaults but the persisted config enables quiet mode.
-		if (config.quietMode && !quietToolsRegistered) {
+		if (config.quietMode && !quietToolsRegistered && getPiHostMode(VERSION) === "legacy") {
 			registerQuietTools(pi, () => config);
 			quietToolsRegistered = true;
 		}
@@ -2713,7 +2716,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
-	// --- /theme: pi ships no command for this; themes live under /settings ---
+	// --- /theme: native settings navigation; the preview picker is legacy-only ---
 	const makeThemePicker = (
 		ctx: ExtensionContext,
 		tui: TUI,
@@ -2752,7 +2755,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	const openThemePicker = async (ctx: ExtensionContext): Promise<void> => {
-		if (!ctx.hasUI) return;
+		if (!ctx.hasUI || navigateHostThemeSettings(ctx)) return;
 		enterCapturingOverlay();
 		try {
 			await ctx.ui.custom<void>((tui, theme, _kb, done) =>
@@ -2766,11 +2769,12 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	// pi has no /theme command — the built-in picker is a submenu of /settings.
-	// This is the shortcut, not a replacement: /settings still owns the automatic
-	// light/dark pairing, which a flat list of names cannot express.
+	// Native /settings owns the theme and automatic light/dark pairing. The
+	// legacy shortcut retains its picker; it is never entered on unknown hosts.
 	pi.registerCommand("theme", {
-		description: "Switch theme — /theme picks with live preview, /theme <name> applies directly",
+		description: "Theme settings — native /settings navigation; legacy hosts support preview and /theme <name>",
 		getArgumentCompletions: (prefix) => {
+			if (getPiHostMode(VERSION) !== "legacy") return null;
 			const query = prefix.trim().toLowerCase();
 			const ctx = lastCtx;
 			if (!ctx || !ctx.hasUI) return null;
@@ -2781,6 +2785,7 @@ export default function (pi: ExtensionAPI): void {
 		},
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
+			if (navigateHostThemeSettings(ctx)) return;
 			const name = args.trim();
 			if (name === "") {
 				await openThemePicker(ctx);
@@ -3270,6 +3275,11 @@ export default function (pi: ExtensionAPI): void {
 			};
 			const apply = (key: string, textValue?: string): void => {
 				if (key === "theme") {
+					if (getPiHostMode(VERSION) !== "legacy") {
+						finalize();
+						navigateHostThemeSettings(ctx);
+						return;
+					}
 					// Delegate: the picker previews live and reverts on Esc, neither of
 					// which a blind one-key cycle through the name list can do.
 					sub = makeThemePicker(ctx, tui, theme, closeSub);

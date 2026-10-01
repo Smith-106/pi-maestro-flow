@@ -270,6 +270,43 @@ describe("provider fetchers", () => {
 		expect((await fetchCodexUsage("token", { fetchFn: async () => invalidJsonResponse() })).error).toBe("invalid JSON response");
 	});
 
+	it("fetches Codex usage for the account selected by its OAuth token", async () => {
+		const payload = Buffer.from(JSON.stringify({
+			"https://api.openai.com/auth": { chatgpt_account_id: "selected-account" },
+		})).toString("base64url");
+		const token = `header.${payload}.signature`;
+		let requests = 0;
+		const fetchFn: FetchLike = async (url, init) => {
+			requests += 1;
+			assert.equal(url, "https://chatgpt.com/backend-api/wham/usage");
+			const headers = new Headers(init?.headers);
+			assert.equal(headers.get("Authorization"), `Bearer ${token}`);
+			assert.equal(headers.get("ChatGPT-Account-Id"), "selected-account");
+			return jsonResponse(200, { rate_limit: {
+				primary_window: { used_percent: 76, limit_window_seconds: 604800 },
+				secondary_window: null,
+			} });
+		};
+		assert.equal((await fetchCodexUsage(token, { fetchFn })).weekly, 76);
+		assert.equal((await fetchAllUsages({ codex: token }, { fetchFn })).codex?.weekly, 76);
+		assert.equal(requests, 2);
+	});
+
+	it("keeps Codex requests compatible with tokens without an account claim", async () => {
+		const encode = (payload: unknown) => `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+		for (const token of ["opaque-token", "header.invalid.signature", encode({}), encode({
+			"https://api.openai.com/auth": { chatgpt_account_id: 123 },
+		})]) {
+			const usage = await fetchCodexUsage(token, { fetchFn: async (_url, init) => {
+				const headers = new Headers(init?.headers);
+				assert.equal(headers.get("Authorization"), `Bearer ${token}`);
+				assert.equal(headers.get("ChatGPT-Account-Id"), null);
+				return jsonResponse(401, {});
+			} });
+			assert.equal(usage.error, "HTTP 401");
+		}
+	});
+
 	it("fetches Claude OAuth usage with extra spend", async () => {
 		const usage = await fetchClaudeUsage("token", {
 			fetchFn: async () => jsonResponse(200, {

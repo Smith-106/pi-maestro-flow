@@ -3,7 +3,7 @@
  *
  * Callers never supply transcript paths. Each inventory candidate is opened
  * once, without following symlinks where the platform exposes O_NOFOLLOW,
- * then fstat, bounded-read, parse, active-chain selection, and projection all
+ * then fstat, snapshot read, parse, active-chain selection, and projection all
  * operate from that same handle snapshot. No transcript bytes are cached.
  */
 
@@ -14,7 +14,8 @@ import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 export const SESSION_HISTORY_VERSION = 1 as const;
 export const SESSION_HISTORY_URI_SCHEME = "session://" as const;
 export const MAX_SESSION_HISTORY_FILES = 100;
-export const MAX_SESSION_HISTORY_BYTES = 32 * 1024 * 1024;
+/** @deprecated History reads no longer have a byte budget. */
+export const MAX_SESSION_HISTORY_BYTES = Infinity;
 export const MAX_SESSION_HISTORY_MATCHES = 20;
 export const MAX_SESSION_HISTORY_SNIPPET_CHARS = 1_000;
 export const MAX_SESSION_HISTORY_QUERY_CHARS = 4_096;
@@ -412,11 +413,10 @@ export class SessionHistoryService {
         continue;
       }
       filesConsidered += 1;
-      const result = await loadCandidate(candidate, bytesRead, include, signal);
+      const result = await loadCandidate(candidate, include, signal);
       bytesRead += result.bytesRead;
       if (result.omission) {
         addOmission(result.omission);
-        if (result.omission.reason === "over-budget") truncated = true;
         continue;
       }
       if (!result.loaded) continue;
@@ -476,7 +476,6 @@ async function resolveInventory(source: SessionHistoryInventorySource, signal?: 
 
 async function loadCandidate(
   candidate: ValidInventoryEntry,
-  bytesAlreadyRead: number,
   include: ReadonlySet<SessionHistoryInclude>,
   signal?: AbortSignal,
 ): Promise<CandidateResult> {
@@ -499,14 +498,7 @@ async function loadCandidate(
       }
     }
     const size = Number(stat.size);
-    const declared = candidate.sizeBytes;
-    const remaining = MAX_SESSION_HISTORY_BYTES - bytesAlreadyRead;
-    if (!Number.isSafeInteger(size) || size < 0 || size > remaining
-      || declared !== undefined && (declared > MAX_SESSION_HISTORY_BYTES || declared > remaining)) {
-      return { bytesRead: 0, omission: labeled(candidate, "over-budget") };
-    }
-    const read = await readBounded(handle, remaining, signal);
-    if (read.overBudget) return { bytesRead: read.bytesRead, omission: labeled(candidate, "over-budget") };
+    const read = await readSnapshot(handle, size, signal);
     let content: string;
     try {
       content = new TextDecoder("utf-8", { fatal: true }).decode(read.bytes);
@@ -556,23 +548,21 @@ async function loadCandidate(
   }
 }
 
-async function readBounded(handle: FileHandle, limit: number, signal?: AbortSignal): Promise<{
-  bytes: Uint8Array; bytesRead: number; overBudget: boolean;
+async function readSnapshot(handle: FileHandle, size: number, signal?: AbortSignal): Promise<{
+  bytes: Uint8Array; bytesRead: number;
 }> {
   const chunks: Buffer[] = [];
   let total = 0;
-  while (total <= limit) {
+  while (total < size) {
     checkAbort(signal);
-    const requested = Math.min(64 * 1024, limit - total + 1);
-    if (requested <= 0) break;
+    const requested = Math.min(64 * 1024, size - total);
     const chunk = Buffer.allocUnsafe(requested);
     const { bytesRead } = await handle.read(chunk, 0, requested, null);
     if (bytesRead === 0) break;
     chunks.push(chunk.subarray(0, bytesRead));
     total += bytesRead;
-    if (total > limit) return { bytes: new Uint8Array(), bytesRead: limit, overBudget: true };
   }
-  return { bytes: Buffer.concat(chunks, total), bytesRead: total, overBudget: false };
+  return { bytes: Buffer.concat(chunks, total), bytesRead: total };
 }
 
 function activeChain(entries: RawEntry[]): RawEntry[] {

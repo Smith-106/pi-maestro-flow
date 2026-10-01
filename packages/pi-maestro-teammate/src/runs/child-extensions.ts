@@ -25,6 +25,8 @@ export function isManagedWorkerWindow(): boolean {
 export interface TeammateChildExtensionRegistration {
   path: string;
   tools: readonly string[];
+  /** Exact provider/model ids whose router factory this extension re-registers in children. */
+  virtualModels?: readonly string[];
 }
 
 interface ChildExtensionRegistry {
@@ -48,6 +50,7 @@ const DEFAULT_PROXY_CALLER_OWNER = "pi-maestro-teammate.child-proxy-caller";
 
 export interface RegisterTeammateChildExtensionOptions {
   tools?: readonly string[];
+  virtualModels?: readonly string[];
 }
 
 export interface RegisterTeammateAuthorityOptions {
@@ -145,23 +148,26 @@ export function registerTeammateChildExtension(
   registry.registrations.set(token, {
     path: normalizedPath,
     tools: [...new Set((options.tools ?? []).map((tool) => tool.trim()).filter(Boolean))],
+    virtualModels: [...new Set((options.virtualModels ?? []).map((model) => model.trim()).filter(Boolean))],
   });
   return () => registry.registrations.delete(token);
 }
 
 export function getTeammateChildExtensions(): TeammateChildExtensionRegistration[] {
-  const merged = new Map<string, { path: string; tools: Set<string> }>();
+  const merged = new Map<string, { path: string; tools: Set<string>; virtualModels: Set<string> }>();
   for (const registration of getRegistry().registrations.values()) {
     const key = process.platform === "win32"
       ? registration.path.toLowerCase()
       : registration.path;
-    const current = merged.get(key) ?? { path: registration.path, tools: new Set<string>() };
+    const current = merged.get(key) ?? { path: registration.path, tools: new Set<string>(), virtualModels: new Set<string>() };
     for (const tool of registration.tools) current.tools.add(tool);
+    for (const model of registration.virtualModels ?? []) current.virtualModels.add(model);
     merged.set(key, current);
   }
   return [...merged.values()].map((registration) => ({
     path: registration.path,
     tools: [...registration.tools],
+    ...(registration.virtualModels.size ? { virtualModels: [...registration.virtualModels] } : {}),
   }));
 }
 

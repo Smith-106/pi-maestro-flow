@@ -557,10 +557,27 @@ export function parseCodexRateLimit(data: any): UsageData {
   };
 }
 
+function readCodexAccountId(token: string): string | undefined {
+  const parts = token.split(".");
+  if (parts.length !== 3) return undefined;
+  try {
+    const payload = asObject(JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")));
+    const auth = asObject(payload?.["https://api.openai.com/auth"]);
+    const accountId = auth?.chatgpt_account_id;
+    return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function fetchCodexUsage(token: string, config: RequestConfig = {}): Promise<UsageData> {
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  // Without account routing, WHAM can return a different account's quota.
+  const accountId = readCodexAccountId(token);
+  if (accountId) headers["ChatGPT-Account-Id"] = accountId;
   const result = await requestJson(
     "https://chatgpt.com/backend-api/wham/usage",
-    { headers: { Authorization: `Bearer ${token}` } },
+    { headers },
     config,
   );
   if (!result.ok) return { session: 0, weekly: 0, error: result.error };

@@ -10,7 +10,7 @@
  *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
  *   - browser: Named-tab Chromium control and screenshots
  *   - computer_use: Serialized physical desktop observation and control
- *   - search_tool_bm25: Natural-language discovery across registered tools
+ *   - search_tool_bm25: Legacy 0.87–0.98 tool discovery; Pi 0.99+ owns native tool_search
  *
  * Also registers:
  *   - /goal command
@@ -34,7 +34,9 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { buildSessionContext, copyToClipboard, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, copyToClipboard, getAgentDir, parseArgs, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { getPiFeatureOwner, getPiHostMode } from "pi-maestro-settings-core/v1";
+import { isNativeDiscoverySelected, withNativeToolPolicy } from "../tools/native-tool-policy.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   COCKPIT_TODO_TOGGLE_EVENT,
@@ -73,6 +75,7 @@ import { registerExploreConfigManager } from "../providers/explore-config-manage
 import { registerModelFailover } from "../providers/model-failover.ts";
 import { showModelFailoverOverlay } from "../tui/model-failover-settings.ts";
 import registerMcpAdapter from "../mcp/index.ts";
+import { registerNativeMcpMigration } from "../mcp/native-migration.ts";
 import {
   initGoal,
   registerGoalCommand,
@@ -132,7 +135,7 @@ import {
   type TodoTaskSnapshot,
 } from "../tools/todo.ts";
 import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
-import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, bindGuiStartupIfCurrent, guiContextForGeneration, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
+import { guiEnabled, startGuiSubsystem, registerGuiTool, asGuiDirectTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, bindGuiStartupIfCurrent, guiContextForGeneration, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
 import { loadLatestTeamSwarmProjection, type TeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { publicWorkflowErrorMessage, WorkflowCoordinator } from "../session/coordinator.ts";
@@ -246,6 +249,7 @@ import {
   newContextFirstKeptEntryId,
 } from "../compaction/new-context.ts";
 import { createNewContextToolSurface } from "../compaction/new-context-tool-surface.ts";
+import { buildNewContextContinuation } from "../compaction/recovery-focus.ts";
 import {
   commitProjectedCompactionInput,
   createMidTurnAutoCompaction,
@@ -1260,7 +1264,32 @@ function renderTodoToolResult(
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
-  installReturnedToolErrorBridge(pi);
+  const hostMode = getPiHostMode(VERSION);
+  let nativeDiscoverySelected = false;
+  if (hostMode === "native") {
+    try {
+      const settings = SettingsManager.create(process.cwd(), getAgentDir());
+      nativeDiscoverySelected = isNativeDiscoverySelected({
+        defaultTools: settings.getDefaultTools(),
+        extensions: settings.getSettings().extensions,
+        cli: parseArgs(process.argv.slice(2)),
+      });
+    } catch (error) {
+      console.warn(`[maestro] Native discovery configuration unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  pi = withNativeToolPolicy(pi, VERSION, nativeDiscoverySelected);
+  let hostDiagnosed = false;
+  pi.on("session_start", (_event, ctx) => {
+    if (hostDiagnosed) return;
+    hostDiagnosed = true;
+    if (hostMode === "unknown") {
+      ctx.ui.notify(`Pi host ${VERSION} is unverified; Maestro does not replace native MCP or tool discovery.`, "warning");
+    } else if (hostMode === "native" && nativeDiscoverySelected && !pi.getAllTools().some((tool) => tool.name === "tool_search")) {
+      ctx.ui.notify("Native tool_search is not loaded. Enable builtin:tool-search and +tool_search, or remove the discovery opt-in; no legacy search was started.", "warning");
+    }
+  });
+  if (hostMode !== "native") installReturnedToolErrorBridge(pi);
   const completionDurabilityRegistry = getCompletionDurabilityRegistry();
   const completionDurabilityProvider = new FlowCompletionDurabilityProvider();
   const disposeCompletionDurabilityProvider = completionDurabilityRegistry.register(
@@ -1318,7 +1347,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       const owner = typeof candidate.label === "string" && candidate.label.startsWith("MCP:") ? "mcp" : "pi-maestro-flow";
       if (!isGuiToolAllowed(candidate.name, owner)) return originalRegisterTool(tool as ToolDefinition);
       try {
-        registerGuiTool(tool as ToolDefinition, owner);
+        registerGuiTool(asGuiDirectTool(tool as ToolDefinition), owner);
       } catch {
         // GUI capture must never break tool registration.
       }
@@ -1489,16 +1518,13 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const compactionArbiter = new CompactionArbiter();
   const newContextController = createNewContextController(compactionArbiter, {
     continueAfterReset(_ctx, request) {
-      const message = request.plan
-        ? [
-            "Continue from the recovery capsule.",
-            "A Plan recovery payload is present and is authoritative for the next action.",
-            request.plan.status === "approved"
-              ? "First reload and verify the approved Plan from its source path, then call plan-decompose or continue the active Todo."
-              : "First reload the draft Plan from its source path and continue in Plan mode; do not treat an unapproved draft as an execution authorization.",
-            "If a required current-session fact is absent, use session_history with scope=current_session.",
-          ].join("\n")
-        : "Continue from the recovery capsule and the active Todo's exact next action. If a required current-session fact is absent, use session_history with scope=current_session.";
+      const message = buildNewContextContinuation({
+        todo: getTodoCompactionSnapshot(),
+        goal: getGoalCompactionSnapshot(),
+        plan: getPlanCompactionSnapshot(),
+        workflow: workflowRecoveryIdentity(),
+        newContext: request,
+      });
       pi.sendUserMessage(message, { deliverAs: "followUp" });
     },
     getPlanRecoveryPayload: getPlanNewContextPayload,
@@ -1705,34 +1731,19 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   let mcpAdapterHandle: ReturnType<typeof registerMcpAdapter> | undefined;
-  // The vendored MCP adapter registers the tool "mcp" and the flag
-  // "--mcp-config" unconditionally. Both collide with the standalone
-  // `pi-mcp-adapter` package, and the host rejects the WHOLE extension on a
-  // name collision -- so `run-control` (registered further down) never
-  // registers, and the entire Session/Run lifecycle silently loses its
-  // transport while every /maestro-* skill still appears to work.
-  //
-  // The try/catch below cannot prevent this: the host rejects the extension
-  // before any throw reaches it. Detecting a peer-owned "mcp" tool is also
-  // not possible here -- `pi.getAllTools()` during extension loading fails
-  // with "Extension runtime not initialized. Action methods cannot be called
-  // during extension loading." So the escape hatch has to be declarative.
-  //
-  // Default behaviour is unchanged; set MAESTRO_DISABLE_VENDORED_MCP=1 on a
-  // host that gets its MCP surface from `pi-mcp-adapter` instead.
-  if (process.env.MAESTRO_DISABLE_VENDORED_MCP === "1") {
-    console.error(
-      "[maestro] Vendored MCP adapter not registered (MAESTRO_DISABLE_VENDORED_MCP=1); Maestro's own tools are unaffected.",
-    );
-  } else {
+  const mcpOwner = getPiFeatureOwner(VERSION, typeof pi.registerMcpServer === "function");
+  if (hostMode === "native") registerNativeMcpMigration(pi);
+  // Registering /mcp excludes the whole native extension, before session_start.
+  if (mcpOwner === "legacy" && process.env.MAESTRO_DISABLE_VENDORED_MCP !== "1") {
     try {
       mcpAdapterHandle = registerMcpAdapter(pi);
     } catch (error) {
-      // MCP 注册失败不得阻断 Maestro 现有工具与 Provider。
       console.error(
         `[maestro] MCP adapter registration warning: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  } else if (mcpOwner === "unavailable") {
+    console.warn(`[maestro] Native MCP is unavailable on Pi ${VERSION}; no legacy adapter was started.`);
   }
 
   registerMaestroPackageResources(pi);
@@ -3732,7 +3743,7 @@ When NOT to use:
             const result = await entry.execute(
               "gui-state-teammates",
               { view: "active" } as never,
-              undefined,
+              new AbortController().signal,
               undefined,
               ctx,
             );
@@ -4104,11 +4115,11 @@ When NOT to use:
     return goalInput(event);
   });
 
-  // A hard-threshold intent must settle before the next tool executes. The
-  // guard blocks (+ terminates) the tool batch here without abort(); agent_settled
-  // owns the actual compact() and CONTINUE resume. Returning block/terminate
-  // avoids the host "This operation was aborted" error that stranded recovery.
-  pi.on("tool_call", (_event, ctx) => midTurnAutoCompaction.onToolCall(ctx));
+  // A hard-threshold intent must settle before the next tool executes.
+  // Top-level batches use block+terminate; a nested call also aborts its outer
+  // operation because nested executors consume terminate locally. agent_settled
+  // remains the single owner of compact() and CONTINUE resume.
+  pi.on("tool_call", (event, ctx) => midTurnAutoCompaction.onToolCall(ctx, event.parentToolCallId));
 
   // Keep the tool panel stable for prompt-cache reuse; this hook enforces the hard
   // read-only boundary until Plan approval, before the interactive permission chain.
@@ -4359,6 +4370,15 @@ When NOT to use:
       }),
       "mcp.manage": () => withActionStatus(flowTuiText("mcp.opening"), async (ctx) => {
         if (mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
+        else if (hostMode === "native") {
+          const nativeMcpLoaded = pi.getCommands().some((command) => command.name === "mcp" && command.sourceInfo.path === "builtin:mcp");
+          if (!nativeMcpLoaded) {
+            ctx.ui.notify("Native MCP is supported but is disabled or replaced by another extension. Enable builtin:mcp to use the native manager; Maestro does not start a substitute.", "warning");
+          } else {
+            if (ctx.hasUI && ctx.ui.getEditorText() === "") ctx.ui.setEditorText("/mcp");
+            ctx.ui.notify("Run /mcp for Pi's native manager. Before upgrading legacy config, disable builtin:mcp and use /maestro-mcp-migrate to preview and approve migration; native startup reads mcp.json before this command can migrate it.", "info");
+          }
+        }
         else ctx.ui.notify(flowTuiText("mcp.unavailable"), "warning");
       }),
       "hooks.manage": () => withActionStatus(flowTuiText("hooks.opening"), async (ctx) => {
@@ -4421,7 +4441,7 @@ When NOT to use:
   const mcpSettingsProvider = createMcpSettingsProvider({});
   let mcpSettingsDisposer: (() => void) | undefined;
   const registerMcpSettings = (): void => {
-    if (mcpSettingsDisposer) return;
+    if (mcpSettingsDisposer || mcpOwner !== "legacy" || !mcpAdapterHandle) return;
     mcpSettingsDisposer = registerMcpSettingsProvider(pi.events, mcpSettingsProvider);
   };
   const disposeMcpSettings = (): void => {
@@ -4728,11 +4748,12 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   const childActorId = process.env.PI_TEAMMATE_CORRELATION_ID ?? "child";
   const compactionArbiter = new CompactionArbiter();
   const newContextController = createNewContextController(compactionArbiter, {
-    continueAfterReset() {
-      pi.sendUserMessage(
-        "Continue from the recovery capsule and the active Todo's exact next action. If a required current-session fact is absent, use session_history with scope=current_session.",
-        { deliverAs: "followUp" },
-      );
+    continueAfterReset(_ctx, request) {
+      // A child must use the root-authorized snapshot, never another actor's local queue.
+      const message = request.recoveryState
+        ? buildNewContextContinuation({ ...request.recoveryState, newContext: request })
+        : "Continue from the recovery capsule. Root-authorized recovery state is unavailable; retrieve your own live Todo and scope before acting. Do not infer authorization or restart a Plan from its presence.";
+      pi.sendUserMessage(message, { deliverAs: "followUp" });
     },
     async refreshRecoveryState(request, ctx) {
       const sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? "unknown-session";
@@ -4769,8 +4790,8 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   pi.on("agent_start", (_event, ctx) => {
     autoCompaction.onAgentStart(ctx);
   });
-  // Child sessions share the same hard-threshold gate: block+terminate, never abort.
-  pi.on("tool_call", (_event, ctx) => autoCompaction.onToolCall(ctx));
+  // Nested gates abort the outer child operation; top-level batches still settle through terminate.
+  pi.on("tool_call", (event, ctx) => autoCompaction.onToolCall(ctx, event.parentToolCallId));
   registerSearchScopeGuard(pi);
   pi.on("context", async (event, ctx) => {
     try {

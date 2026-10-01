@@ -8,14 +8,19 @@ import { constants } from "node:fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { TextDecoder } from "node:util";
+import { fileURLToPath } from "node:url";
 import { type Static, Type } from "typebox";
 import {
 	createEditTool,
+	VERSION,
 	type EditToolDetails,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
+import { homedir } from "node:os";
 
 const guardedReplacementSchema = Type.Object({
 	oldText: Type.String({
@@ -52,7 +57,16 @@ async function readValidatedUtf8File(
 ): Promise<{ bytes: Buffer; text: string } | undefined> {
 	let absolute: string;
 	try {
-		absolute = isAbsolute(path) ? path : resolve(cwd, path);
+		// Match the host's documented @ prefix, Unicode-space and ~ path forms.
+		let normalized = path.replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, " ").replace(/^@/, "");
+		if (process.platform === "win32" && !normalized.includes("\\")) {
+			const drive = /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i.exec(normalized);
+			if (drive) normalized = `${drive[1].toUpperCase()}:\\${(drive[2] ?? "").replaceAll("/", "\\")}`;
+		}
+		if (normalized === "~") normalized = homedir();
+		else if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) normalized = resolve(homedir(), normalized.slice(2));
+		if (normalized.startsWith("file://")) normalized = fileURLToPath(normalized);
+		absolute = isAbsolute(normalized) ? normalized : resolve(cwd, normalized);
 	} catch {
 		return undefined;
 	}
@@ -674,11 +688,31 @@ export async function executeGuardedEdit(
 	return tool.execute(toolCallId, { path: params.path, edits }, signal, onUpdate);
 }
 
-/**
- * Re-register the built-in "edit" tool under the same name. Execution delegates
- * to pi after UTF-8 validation and frozen-snapshot occurrence disambiguation.
- */
-export function registerGuardedEditTool(pi: ExtensionAPI): void {
+/** Native policy hook: applies equally to model calls and executeTool nested
+ * calls. Never replace the native schema, preparation or execution pipeline.
+ * Advanced occurrence/frozen behavior remains legacy-only; no production
+ * consumer requires a second native edit executor. */
+export function registerNativeEditPolicy(pi: ExtensionAPI, hostVersion: unknown = VERSION): void {
+	if (getPiHostMode(hostVersion) !== "native") return;
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "edit") return;
+		const input = event.input;
+		if (!isRecord(input)) return;
+		if (Array.isArray(input.edits) && input.edits.some((edit) => isRecord(edit) && ("occurrence" in edit || "occurence" in edit))) {
+			return { block: true, reason: "Native edit does not support occurrence. Re-read the target and provide unique surrounding oldText context; the Cockpit occurrence/frozen extension is legacy-only." };
+		}
+		if (typeof input.path !== "string") return;
+		try {
+			await assertUtf8File(input.path, ctx.cwd);
+		} catch (error) {
+			return { block: true, reason: error instanceof Error ? error.message : String(error) };
+		}
+	});
+}
+
+/** Legacy-only replacement: UTF-8 validation and frozen-snapshot selectors. */
+export function registerGuardedEditTool(pi: ExtensionAPI, hostVersion: unknown = VERSION): void {
+	if (getPiHostMode(hostVersion) !== "legacy") return;
 	pi.registerTool({
 		name: "edit",
 		label: "edit",

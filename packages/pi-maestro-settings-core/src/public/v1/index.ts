@@ -1,6 +1,7 @@
 export * from "./events.ts";
 export * from "./provider.ts";
 export * from "./schema.ts";
+export { getPiHostMode, getPiFeatureOwner } from "../../pi-host.ts";
 
 // The keyboard-shortcut helpers live in the shared UI primitives module so
 // Cockpit, Flow, and Teammate all import the same implementation. Keep the

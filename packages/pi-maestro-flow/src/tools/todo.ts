@@ -1790,7 +1790,7 @@ function syncTaskIdCounter(state: Map<string, TodoTask> = tasks): void {
 function syncTodoRevision(state: Map<string, TodoTask> = tasks): void {
   for (const task of state.values()) {
     if (!task.handoff) continue;
-    todoRevision = Math.max(todoRevision, task.handoff.nextStepsRevision ?? 0);
+    todoRevision = Math.max(todoRevision, task.handoff.nextStepsRevision ?? 0, task.handoff.filesClearedRevision ?? 0);
     for (const file of task.handoff.files) {
       todoRevision = Math.max(todoRevision, file.annotationRevision);
     }

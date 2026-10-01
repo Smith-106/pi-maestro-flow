@@ -490,8 +490,8 @@ export function commitProjectedCompactionInput(
 /**
  * Result returned to the host tool_call hook when hard-threshold pressure must
  * stop further tool execution. `block` prevents the current tool; `terminate`
- * ends the entire batch once every remaining call is likewise blocked, so the
- * agent loop reaches agent_end/agent_settled without aborting the run.
+ * ends a top-level batch. Nested executors consume that flag locally, so their
+ * outer operation is also aborted through the real host context.
  */
 export interface ToolBoundaryGateResult {
   block: true;
@@ -536,12 +536,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   ensureRecoveryWake(ctx: ExtensionContext): boolean;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   /**
-   * Gate tool execution at the first hard-threshold boundary. Returns a
-   * ToolCallEventResult that blocks (and terminates) the batch so the agent
-   * loop settles cleanly — never abort(), which surfaces as
-   * "This operation was aborted" and can strand the resume path.
+   * Gate tool execution at the first hard-threshold boundary. Top-level calls
+   * settle via block+terminate; nested calls additionally abort the outer host
+   * operation because their executor does not propagate terminate.
    */
-  onToolCall(ctx: ExtensionContext): ToolBoundaryGateResult | undefined;
+  onToolCall(ctx: ExtensionContext, parentToolCallId?: string): ToolBoundaryGateResult | undefined;
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): Promise<unknown | undefined>;
   /**
@@ -2363,13 +2362,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return transformed;
       });
     },
-    onToolCall(ctx) {
+    onToolCall(ctx, parentToolCallId) {
+      const abortNestedOuter = (): void => {
+        if (parentToolCallId) ctx.abort();
+      };
       // Once a tool-boundary gate is live, every subsequent tool in the same
-      // batch must also block+terminate so the host ends the batch cleanly
-      // (shouldTerminateToolBatch requires every finalized result.terminate).
-      // Do not abort(): that surfaces as "This operation was aborted" and can
-      // strand the resume path if the next provider turn inherits the signal.
+      // batch must also block+terminate. A nested executor consumes terminate
+      // locally, so abort its outer operation through the host lifecycle.
       if (state.loopCriticalBlocked && state.pendingIntent?.loopCritical) {
+        abortNestedOuter();
         return {
           block: true as const,
           terminate: true as const,
@@ -2442,9 +2443,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // Block at the tool boundary, then let agent_settled submit through the
       // existing arbiter-owned compaction path. Calling compact() directly from
       // this hook would race the active agent loop and bypass recovery state.
-      // Prefer block+terminate over abort() so the host records a clean tool
-      // error ("Tool execution deferred…") instead of a run-level abort that
-      // surfaces as "This operation was aborted" and can strand resume.
+      // Top-level calls prefer block+terminate so the host records a clean tool
+      // error. Nested calls additionally require a real outer abort because
+      // their executeTool boundary does not propagate terminate.
       if (state.zombieOwner !== undefined) return undefined;
       if (dependencies.arbiter?.currentOwner()) return undefined;
       if (dependencies.arbiter?.timeoutTombstone()) return undefined;
@@ -2458,6 +2459,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         `tool-call-hard-threshold:${intent.linkedThreshold.thresholdTokens}`,
         `Context crossed the hard compaction threshold at a tool boundary (${intent.estimate.tokens.toLocaleString("en-US")}/${intent.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Interrupting to compact before the tool runs; the task resumes automatically.`,
       );
+      abortNestedOuter();
       return {
         block: true as const,
         terminate: true as const,

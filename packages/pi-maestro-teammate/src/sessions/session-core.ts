@@ -922,6 +922,8 @@ export interface SessionMessageResult {
     traceId?: string;
     wasSleeping?: boolean;
     contextDeferred?: boolean;
+    /** Native input acceptance; it does not assert model consumption/completion. */
+    inputDisposition?: string;
     terminatedCount?: number;
   };
 }

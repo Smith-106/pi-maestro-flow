@@ -92,6 +92,39 @@ test("open-code-review inherits runtime-resolved API manager gateway auth", asyn
   });
 });
 
+test("open-code-review adapts inherited OpenAI Codex Responses auth", async () => {
+  const payload = Buffer.from(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: "account-123" },
+  })).toString("base64url");
+  const token = `header.${payload}.signature`;
+  const model = {
+    provider: "openai-codex",
+    id: "gpt-5.6-sol",
+    api: "openai-codex-responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    contextWindow: 200_000,
+    maxTokens: 16_384,
+  };
+  const ctx = {
+    cwd: process.cwd(),
+    model,
+    modelRegistry: {
+      async getApiKeyAndHeaders(received: unknown) {
+        assert.equal(received, model);
+        return { ok: true as const, apiKey: token, headers: { "X-Route": "review" } };
+      },
+    },
+  } as unknown as ExtensionContext;
+
+  assert.deepEqual(await resolveOpenCodeReviewLlmEnv(ctx, "session"), {
+    OCR_LLM_URL: "https://chatgpt.com/backend-api/codex",
+    OCR_LLM_TOKEN: token,
+    OCR_LLM_MODEL: "gpt-5.6-sol",
+    OCR_LLM_PROTOCOL: "openai-responses",
+    OCR_LLM_EXTRA_HEADERS: "X-Route=review,chatgpt-account-id=account-123,originator=pi,OpenAI-Beta=responses=experimental",
+  });
+});
+
 test("open-code-review preview returns JSON file selection (requires ocr)", { skip: !ocrOnPath(), timeout: 120_000 }, async () => {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
   const ctx = { cwd: repo, model: undefined } as unknown as ExtensionContext;

@@ -1,7 +1,6 @@
 import { FileFinder, type FileFinderApi, type GrepCursor, type GrepMatch, type InitOptions, type Result } from "@ff-labs/fff-node";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
-  MAX_SESSION_HISTORY_BYTES,
   MAX_SESSION_HISTORY_FILES,
   type SessionHistoryInventoryEntry,
 } from "pi-maestro-teammate/v1/session-history";
@@ -14,6 +13,8 @@ export const SESSION_HISTORY_FFF_SEARCH_TIME_BUDGET_MS = 500;
 export const SESSION_HISTORY_FFF_PAGE_SIZE = MAX_SESSION_HISTORY_FILES;
 /** Prevent a broken/native cursor from causing an unbounded loop. */
 export const SESSION_HISTORY_FFF_MAX_PAGES = 32;
+
+const NATIVE_GREP_DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 export type SessionHistoryFffDiagnostic =
   | "session-directory-unavailable"
@@ -182,7 +183,7 @@ function resultError(result: Result<unknown>): string {
   return result.ok ? "" : result.error;
 }
 
-function candidateFromMatch(basePath: string, match: GrepMatch): Candidate | undefined {
+function candidateFromMatch(basePath: string, match: Pick<GrepMatch, "relativePath" | "modified">): Candidate | undefined {
   if (!match || typeof match.relativePath !== "string") return undefined;
   // FFF paths are base-relative. Reject all separators (including the other
   // platform's separator) so only a direct child can be admitted.
@@ -349,8 +350,44 @@ export function createSessionHistoryFffAccelerator(
     let overflow = false;
     const encodedQuery = JSON.stringify(query).slice(1, -1);
     const queries = encodedQuery === query ? [query] : [query, encodedQuery];
+    const addCandidate = (match: Pick<GrepMatch, "relativePath" | "modified">): void => {
+      const candidate = candidateFromMatch(basePath, match);
+      if (!candidate) return;
+      const key = process.platform === "win32" ? candidate.path.toLowerCase() : candidate.path;
+      if (seen.has(key)) {
+        const existing = candidates.get(key);
+        if (existing && candidate.modified > existing.modified) candidates.set(key, candidate);
+        return;
+      }
+      seen.add(key);
+      if (candidates.size < MAX_SESSION_HISTORY_FILES) {
+        candidates.set(key, candidate);
+      } else {
+        overflow = true;
+        const worst = [...candidates.entries()].sort((left, right) =>
+          compareCandidates(right[1], left[1], activeFileName))[0];
+        if (worst && compareCandidates(candidate, worst[1], activeFileName) < 0) {
+          candidates.delete(worst[0]);
+          candidates.set(key, candidate);
+        }
+      }
+    };
 
     try {
+      // Native content filtering can omit large files despite maxFileSize.
+      // Discover them by metadata and let SessionHistoryService search them.
+      const deadline = now() + searchTimeBudgetMs;
+      for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+        checkAbort(signal);
+        if (now() >= deadline) { complete = false; break; }
+        const files = finder.glob("*.jsonl", { pageIndex, pageSize });
+        if (!files.ok) throw new Error(files.error);
+        for (const file of files.value.items) {
+          if (file.size > NATIVE_GREP_DEFAULT_MAX_FILE_BYTES) addCandidate(file);
+        }
+        if ((pageIndex + 1) * pageSize >= files.value.totalMatched) break;
+        if (pageIndex + 1 === maxPages) complete = false;
+      }
       for (const form of queries) {
         checkAbort(signal);
         const deadline = now() + searchTimeBudgetMs;
@@ -367,7 +404,8 @@ export function createSessionHistoryFffAccelerator(
           const result = finder.grep(form, {
             mode: "plain",
             smartCase: false,
-            maxFileSize: MAX_SESSION_HISTORY_BYTES,
+            // The native U64 parameter cannot represent Infinity.
+            maxFileSize: Number.MAX_SAFE_INTEGER,
             maxMatchesPerFile: 1,
             pageSize,
             timeBudgetMs: Math.max(1, Math.min(searchTimeBudgetMs, Math.floor(remaining))),
@@ -377,28 +415,7 @@ export function createSessionHistoryFffAccelerator(
             classifyDefinitions: false,
           });
           if (!result.ok) throw new Error(result.error);
-          for (const match of result.value.items) {
-            const candidate = candidateFromMatch(basePath, match);
-            if (!candidate) continue;
-            const key = process.platform === "win32" ? candidate.path.toLowerCase() : candidate.path;
-            if (seen.has(key)) {
-              const existing = candidates.get(key);
-              if (existing && candidate.modified > existing.modified) candidates.set(key, candidate);
-              continue;
-            }
-            seen.add(key);
-            if (candidates.size < MAX_SESSION_HISTORY_FILES) {
-              candidates.set(key, candidate);
-            } else {
-              overflow = true;
-              const worst = [...candidates.entries()].sort((left, right) =>
-                compareCandidates(right[1], left[1], activeFileName))[0];
-              if (worst && compareCandidates(candidate, worst[1], activeFileName) < 0) {
-                candidates.delete(worst[0]);
-                candidates.set(key, candidate);
-              }
-            }
-          }
+          for (const match of result.value.items) addCandidate(match);
           cursor = result.value.nextCursor;
           if (!cursor) break;
         }

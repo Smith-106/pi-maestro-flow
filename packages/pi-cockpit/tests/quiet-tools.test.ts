@@ -15,7 +15,7 @@ function install(getConfig: () => CockpitConfig): Map<string, any> {
 		registerTool(tool: any) {
 			tools.set(tool.name, tool);
 		},
-	} as never, getConfig);
+	} as never, getConfig, "0.98.0");
 	return tools;
 }
 

@@ -407,6 +407,59 @@ test("fully committed open manifest deterministically finalizes after restart", 
   });
 });
 
+test("parallel completion recovery keeps singleton child manifests independent", async () => {
+  await fixture(async ({ provider, outputRoot, cwd, seed, resource }) => {
+    const children = [
+      { seed: { ...seed, dispatchId: resource.correlationId, deliveryGroupId: "parallel-group", mode: "parallel" as const }, resource },
+      {
+        seed: { ...seed, dispatchId: "correlation-two", reservationId: "reservation-two", deliveryGroupId: "parallel-group", mode: "parallel" as const, expectedTasks: ["correlation-two"] },
+        resource: { ...resource, correlationId: "correlation-two", publicationId: "publication-two", uri: "agent://publication-two" as const, summary: "second" },
+      },
+    ];
+    for (const child of children) {
+      await provider.beginDispatch(child.seed);
+      await provider.requireNotification({
+        dispatchId: child.seed.dispatchId,
+        reservationId: child.seed.reservationId,
+        kind: "single",
+        requiredAt: 3_000,
+      });
+      await provider.stagePublication({
+        dispatchId: child.seed.dispatchId,
+        reservationId: child.seed.reservationId,
+        resource: child.resource,
+        stagedAt: 3_010,
+      });
+      await persistAgentOutputChecked(child.resource.correlationId, child.resource.name, child.resource.agent, "parallel result", cwd, child.resource.publicationId);
+      await provider.commitPublication({
+        dispatchId: child.seed.dispatchId,
+        reservationId: child.seed.reservationId,
+        publicationId: child.resource.publicationId,
+        committedAt: 3_020,
+      });
+    }
+    const restarted = new FlowCompletionDurabilityProvider(outputRoot);
+    const recovered = await restarted.listRecoverable(seed.target);
+    assert.equal(recovered.length, 2);
+    assert.deepEqual(recovered.map((intent) => intent.mode), ["parallel", "parallel"]);
+    assert.notEqual(recovered[0]?.deliveryId, recovered[1]?.deliveryId);
+    for (const intent of recovered) {
+      assert.equal(intent.resources.length, 1);
+      assert.match(intent.summary, /Recovered result; sibling status unavailable\.$/);
+      assert.doesNotMatch(intent.summary, /\d+\/2 results ready/);
+    }
+    assert.deepEqual(await restarted.listRecoverable(seed.target), recovered);
+    await restarted.acknowledgeApplied({
+      deliveryId: recovered[0]!.deliveryId,
+      dispatchId: recovered[0]!.dispatchId,
+      target: seed.target,
+      contentRevision: recovered[0]!.contentRevision,
+      appliedAt: 3_030,
+    });
+    assert.deepEqual(await restarted.listRecoverable(seed.target), [recovered[1]]);
+  });
+});
+
 test("ambiguous partially committed open manifest remains open", async () => {
   await fixture(async ({ provider, outputRoot, cwd, seed, resource }) => {
     const graphSeed = { ...seed, expectedTasks: [resource.correlationId, "missing-correlation"] };

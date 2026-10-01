@@ -14,13 +14,16 @@ import { basename, dirname, join } from "node:path";
 import { fsyncDirectory } from "../settings/durable-write.ts";
 import {
   getAgentDir,
+  VERSION,
   SettingsManager,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ProviderConfig,
   type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+type ProviderChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import {
@@ -1514,7 +1517,7 @@ export function canonicalizeLegacyThinkingLevelMap(value: unknown): {
 }
 
 export function materializeProviderCompat(providerCompat: unknown, modelCompat: unknown):
-  ProviderModelConfig["compat"] | undefined {
+  ProviderChatModelConfig["compat"] | undefined {
   const provider = isRecord(providerCompat) ? { ...providerCompat } : undefined;
   const model = isRecord(modelCompat) ? { ...modelCompat } : undefined;
   if (!provider && !model) return undefined;
@@ -1524,12 +1527,13 @@ export function materializeProviderCompat(providerCompat: unknown, modelCompat: 
     const modelRouting = isRecord(model?.[key]) ? model[key] : undefined;
     if (providerRouting || modelRouting) merged[key] = { ...providerRouting, ...modelRouting };
   }
-  return merged as ProviderModelConfig["compat"];
+  return merged as ProviderChatModelConfig["compat"];
 }
 
 export function configuredProviderRegistration(
   providerId: string,
   modelsPath: string,
+  hostVersion = VERSION,
 ): ProviderConfig {
   const fallbackName = findPreset(providerId)?.name ?? providerId;
   let config: Record<string, unknown> | undefined;
@@ -1560,6 +1564,8 @@ export function configuredProviderRegistration(
   if (typeof config.streamSimple === "function") registration.streamSimple = config.streamSimple as ProviderConfig["streamSimple"];
   if (isStringRecord(config.headers)) registration.headers = { ...config.headers };
   if (typeof config.authHeader === "boolean") registration.authHeader = config.authHeader;
+  // models.json upserts all operation types; extension.models replaces the entire catalog.
+  if (getPiHostMode(hostVersion) !== "legacy") return registration;
   if (isRecord(config.oauth)) registration.oauth = { ...config.oauth } as ProviderConfig["oauth"];
 
   const promptCachePolicy = loadPromptCachePolicySync(join(dirname(modelsPath), "settings.json"));
@@ -1580,7 +1586,7 @@ export function configuredProviderRegistration(
       // pricing for azure-openai-responses channels).
       : (lookupBuiltinPricing(model.id, typeof model.api === "string" ? model.api : registrationApi)?.cost
         ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-    const clone: ProviderModelConfig = {
+    const clone: ProviderChatModelConfig = {
       id: model.id,
       name: typeof model.name === "string" ? model.name : model.id,
       reasoning: typeof model.reasoning === "boolean" ? model.reasoning : false,

@@ -5,7 +5,8 @@
  */
 
 import * as fs from "node:fs";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { modelOnlyControlTool } from "./native-tool-policy.ts";
 import { Type } from "typebox";
 
 export const STRUCTURED_OUTPUT_FILE_MODE = 0o600;
@@ -140,5 +141,12 @@ export default function registerStructuredOutput(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool(structuredOutputTool);
+  // Native exposure rejects ctx.executeTool; the hook also fences malformed or
+  // older nested callers before they can overwrite the final-output file.
+  pi.on?.("tool_call", async (event) => {
+    if (event.toolName === "structured_output" && event.parentToolCallId !== undefined) {
+      return { block: true, reason: "structured_output is a model-only final submission, not a nested tool." };
+    }
+  });
+  pi.registerTool(modelOnlyControlTool(structuredOutputTool, VERSION));
 }

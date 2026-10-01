@@ -97,6 +97,15 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
   return result.content.find((item) => item.type === "text")?.text ?? "";
 }
 
+test("session_history prefers history reads without banning local JSON/JSONL files", () => {
+  const tool = createSessionHistoryTool();
+  assert.match(tool.description, /Prefer this tool/);
+  assert.match(tool.description, /Use read for local JSON\/JSONL source files when requested/);
+  assert.match(tool.description, /unavailable, over-budget, or incomplete/);
+  assert.match(tool.promptSnippet ?? "", /use read for local files/);
+  assert.doesNotMatch((tool.promptGuidelines ?? []).join("\n"), /never infer or provide a transcript filesystem path/);
+});
+
 test("session_history prioritizes current and recent workspace sessions beyond the scan cap", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-"));
   try {

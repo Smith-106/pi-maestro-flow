@@ -25,6 +25,14 @@ import {
   validateStructuredOutputValue,
 } from "../src/runs/execution-infra.ts";
 
+test("parallel completion schema distinguishes per-task and aggregate delivery", () => {
+  const background = TeammateParams.properties.background as { description?: string };
+  assert.match(background.description ?? "", /Foreground calls return one aggregate tool result/);
+  assert.match(background.description ?? "", /Independent parallel tasks .* once per task/);
+  assert.match(background.description ?? "", /chain and DAG graph calls send one aggregate completion/);
+  assert.match(background.description ?? "", /caller AgentSession consumes them only when it would otherwise stop/);
+});
+
 // ---------------------------------------------------------------------------
 // Gemini-compatible advertised contracts must not change runtime validation.
 // The registered execute wrapper guards before any tool implementation runs.

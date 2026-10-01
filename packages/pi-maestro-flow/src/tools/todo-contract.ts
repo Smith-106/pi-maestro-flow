@@ -44,6 +44,8 @@ export interface TodoHandoff {
   files: TodoHandoffFile[];
   /** Todo revision at which nextSteps was explicitly replaced. */
   nextStepsRevision?: number;
+  /** Todo revision at which files was explicitly cleared; later path merges preserve it. */
+  filesClearedRevision?: number;
 }
 
 /** Request-only context transition; update supports only new_context, while advance supports both values. */
@@ -249,6 +251,7 @@ export function cloneTodoHandoff(handoff: TodoHandoff | undefined): TodoHandoff 
     nextSteps: [...handoff.nextSteps],
     files: handoff.files.map((file) => ({ ...file })),
     ...(handoff.nextStepsRevision !== undefined ? { nextStepsRevision: handoff.nextStepsRevision } : {}),
+    ...(handoff.filesClearedRevision !== undefined ? { filesClearedRevision: handoff.filesClearedRevision } : {}),
   };
 }
 
@@ -277,13 +280,16 @@ export function normalizeTodoHandoff(
   }
 
   let files = previous.files;
+  let filesClearedRevision = previous.filesClearedRevision;
   if (value.files !== undefined) {
     if (!Array.isArray(value.files)) throw new Error("handoff.files must be an array");
     if (value.files.length > TODO_MAX_HANDOFF_FILES) {
       throw new Error(`handoff.files cannot contain more than ${TODO_MAX_HANDOFF_FILES} entries`);
     }
-    if (value.files.length === 0) files = [];
-    else {
+    if (value.files.length === 0) {
+      files = [];
+      filesClearedRevision = annotationRevision;
+    } else {
       const merged = new Map(files.map((file) => [todoHandoffPathKey(file.path), { ...file }]));
       for (const [index, raw] of value.files.entries()) {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -315,11 +321,13 @@ export function normalizeTodoHandoff(
     }
   }
 
-  if (nextSteps.length === 0 && files.length === 0) return undefined;
+  if (nextSteps.length === 0 && files.length === 0
+    && nextStepsRevision === undefined && filesClearedRevision === undefined) return undefined;
   const normalized: TodoHandoff = {
     nextSteps,
     files,
     ...(nextStepsRevision !== undefined ? { nextStepsRevision } : {}),
+    ...(filesClearedRevision !== undefined ? { filesClearedRevision } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > TODO_MAX_HANDOFF_BYTES) {
     throw new Error(`handoff exceeds ${TODO_MAX_HANDOFF_BYTES} UTF-8 bytes`);
@@ -375,7 +383,6 @@ export function readTodoHandoff(value: unknown): TodoHandoff | undefined {
       }
     }
   }
-  if (nextSteps.length === 0 && files.length === 0) return undefined;
   const handoff: TodoHandoff = {
     nextSteps,
     files,
@@ -384,6 +391,13 @@ export function readTodoHandoff(value: unknown): TodoHandoff | undefined {
       && record.nextStepsRevision >= 0
       ? { nextStepsRevision: record.nextStepsRevision }
       : {}),
+    ...(typeof record.filesClearedRevision === "number"
+      && Number.isSafeInteger(record.filesClearedRevision)
+      && record.filesClearedRevision >= 0
+      ? { filesClearedRevision: record.filesClearedRevision }
+      : {}),
   };
+  if (nextSteps.length === 0 && files.length === 0
+    && handoff.nextStepsRevision === undefined && handoff.filesClearedRevision === undefined) return undefined;
   return Buffer.byteLength(JSON.stringify(handoff), "utf8") <= TODO_MAX_HANDOFF_BYTES ? handoff : undefined;
 }

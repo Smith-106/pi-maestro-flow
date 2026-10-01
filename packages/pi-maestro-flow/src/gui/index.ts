@@ -91,7 +91,7 @@ export async function startGuiSubsystem(options: GuiSubsystemOptions): Promise<G
 
 export type { GuiServerHandle };
 export { createGuiServer, startGuiServer } from "./gui-server.ts";
-export { registerGuiTool, getGuiTool, listGuiTools, clearGuiTools, isGuiToolAllowed, type GuiToolEntry } from "./gui-registry.ts";
+export { registerGuiTool, asGuiDirectTool, getGuiTool, listGuiTools, clearGuiTools, isGuiToolAllowed, type GuiToolEntry, type GuiDirectToolDefinition } from "./gui-registry.ts";
 export { registerToolRoutes, type GuiToolView } from "./tool-routes.ts";
 export { registerStateRoutes, cloneSerializable, GUI_STATE_SUBSYSTEMS, type GuiStateProviders, type GuiStateProvider, type GuiStateRouteOptions, type GuiStateSubsystem } from "./gui-state.ts";
 export { createGuiEventForwarder, GUI_EVENTS, type GuiEventForwarder } from "./gui-events.ts";

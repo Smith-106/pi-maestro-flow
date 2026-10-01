@@ -10,6 +10,18 @@ import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/s
 export type { MessageProvenanceV1, SessionProjectionIdentity, StructuredResult, TeammateExecutionProvenance, TeammateResultPublishedEvent, } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_RESULT_PUBLISHED_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 export { SESSION_HOST_REGISTRY_EVENT, WINDOW_THREAD_EVENT, } from "../../sessions/session-core.ts";
+/** Live child execution hooks. Full results belong here, not the bounded nestedCalls transcript. */
+export declare const TEAMMATE_TOOL_EXECUTION_EVENT: "teammate:tool-execution";
+export interface TeammateToolExecutionEvent {
+    correlationId: string;
+    type: string;
+    toolCallId?: string;
+    parentToolCallId?: string;
+    toolName?: string;
+    result?: unknown;
+    complete?: boolean;
+    [key: string]: unknown;
+}
 /** Monitor tool exposure lifecycle emitted after the active variant changes. */
 export declare const MONITOR_TOOL_EXPOSURE_EVENT: "teammate:monitor-tool-exposure";
 export interface MonitorToolExposureEventV1 {
@@ -31,6 +43,8 @@ export interface TeammateModelSessionEventV1 extends TeammateModelSessionQueryEv
 }
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
+    toolCallId?: string;
+    parentToolCallId?: string;
     name: string;
     status: string;
 }

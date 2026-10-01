@@ -220,7 +220,32 @@ const API_TO_OCR_PROTOCOL: Record<string, string> = {
   "anthropic-messages": "anthropic",
   "openai-completions": "openai",
   "openai-responses": "openai-responses",
+  "openai-codex-responses": "openai-responses",
 };
+
+const OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
+
+function resolveCodexGatewayUrl(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, "");
+  if (normalized.endsWith("/codex/responses")) return normalized.slice(0, -"/responses".length);
+  if (normalized.endsWith("/codex")) return normalized;
+  return `${normalized}/codex`;
+}
+
+function extractCodexAccountId(token: string): string {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) throw new Error("invalid JWT");
+    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
+    const auth = payload[OPENAI_AUTH_CLAIM];
+    if (!auth || typeof auth !== "object") throw new Error("missing auth claim");
+    const accountId = (auth as Record<string, unknown>).chatgpt_account_id;
+    if (typeof accountId !== "string" || !accountId) throw new Error("missing account ID");
+    return accountId;
+  } catch {
+    throw new OcrError("OpenAI Codex review authentication does not contain a ChatGPT account ID.");
+  }
+}
 
 /** Exported for tests: encodes a header map into OCR_LLM_EXTRA_HEADERS format. */
 export function encodeExtraHeaders(headers: Record<string, string | null>): string {
@@ -274,7 +299,8 @@ export async function resolveOpenCodeReviewLlmEnv(
   const protocol = API_TO_OCR_PROTOCOL[model.api];
   if (!protocol) {
     throw new OcrError(
-      `Model api "${model.api}" is not supported by OpenCodeReview (needs anthropic|openai|openai-responses). ` +
+      `Model api "${model.api}" is not supported by OpenCodeReview ` +
+      `(needs anthropic|openai|openai-responses|openai-codex-responses). ` +
       `Use action=preview + action=rules and review with the host agent instead.`,
     );
   }
@@ -291,9 +317,17 @@ export async function resolveOpenCodeReviewLlmEnv(
       `Configure it via /api-manager, or use action=preview + action=rules (no LLM needed).`,
     );
   }
-  const baseUrl = auth.baseUrl || model.baseUrl;
+  let baseUrl = auth.baseUrl || model.baseUrl;
   if (!baseUrl) {
     throw new OcrError(`No gateway URL resolved for review model "${model.provider}/${model.id}".`);
+  }
+
+  const headers = { ...auth.headers };
+  if (model.api === "openai-codex-responses") {
+    baseUrl = resolveCodexGatewayUrl(baseUrl);
+    headers["chatgpt-account-id"] = extractCodexAccountId(auth.apiKey);
+    headers.originator = "pi";
+    headers["OpenAI-Beta"] = "responses=experimental";
   }
 
   const env: Record<string, string> = {
@@ -302,9 +336,8 @@ export async function resolveOpenCodeReviewLlmEnv(
     OCR_LLM_MODEL: model.id,
     OCR_LLM_PROTOCOL: protocol,
   };
-  if (auth.headers && Object.keys(auth.headers).length > 0) {
-    env.OCR_LLM_EXTRA_HEADERS = encodeExtraHeaders(auth.headers);
-  }
+  const encodedHeaders = encodeExtraHeaders(headers);
+  if (encodedHeaders) env.OCR_LLM_EXTRA_HEADERS = encodedHeaders;
   return env;
 }
 

@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   getAgentDir,
+  VERSION,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -49,6 +50,7 @@ import {
 import { readCompactionSettings } from "../compaction/compaction-settings.ts";
 import { deriveCompactionThreshold, type CompactionThresholdReason } from "../compaction/compaction-threshold.ts";
 import { supportsCustomOverlay } from "pi-maestro-settings-core/ui";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
 import {
   showApiModelEditor,
   type ApiModelFormChoice,
@@ -468,6 +470,7 @@ export interface RegisterApiProviderOptions {
   modelsPath?: string;
   defaultsPath?: string;
   settingsPath?: string;
+  hostVersion?: string;
 }
 
 export interface ApiRetrySettings {
@@ -532,6 +535,24 @@ export const PROVIDERS: readonly ProviderDefaults[] = [
 
 export const mutationQueues = new Map<string, Promise<void>>();
 
+/** Call only with the provider passed to the actual operation's onResponse. */
+export async function recordProviderResponse(pi: ExtensionAPI, providerId: string, status: number, ctx: ExtensionContext, modelsPath: string, hostVersion = VERSION): Promise<void> {
+  if (![401, 403, 429].includes(status) && status < 500) return;
+  const root = await readModelsRoot(modelsPath);
+  const providers = isRecord(root.providers) ? root.providers : {};
+  const config = isRecord(providers[providerId]) ? providers[providerId] : {};
+  if (!Array.isArray(config.apiKeys) || config.apiKeys.length === 0) return;
+  const resolved = resolveApiKey(config, isApiKeyPolicy(config.keyPolicy) ? config.keyPolicy : "sticky");
+  if (!resolved || resolved.id === "legacy") return;
+  const switched = await recordApiKeyFailureAndAdvance(providerId, resolved.id, status, modelsPath);
+  if (!switched) return;
+  if (hasEnabledProviderSync(providerId, modelsPath)) {
+    pi.registerProvider(providerId, configuredProviderRegistration(providerId, modelsPath, hostVersion));
+    await ctx.modelRegistry?.refresh?.();
+  }
+  ctx.ui?.notify?.(`${providerId} key ${resolved.id} failed (HTTP ${status}); switched to ${switched.activeKeyId}.`, "warning");
+}
+
 /**
  * Register API Providers through Pi's documented models.json contract. A Provider
  * owns provider-level connection config (URL, API key, format, headers, auth) and
@@ -539,6 +560,7 @@ export const mutationQueues = new Map<string, Promise<void>>();
  */
 export interface ApiProviderConfigHandle {
   openManager(ctx: ExtensionCommandContext, args?: string): Promise<void>;
+  recordResponse(providerId: string, status: number, ctx: ExtensionContext): Promise<void>;
 }
 
 export function registerApiProviderConfigs(
@@ -548,16 +570,17 @@ export function registerApiProviderConfigs(
   const modelsPath = options.modelsPath ?? join(getAgentDir(), "models.json");
   const defaultsPath = options.defaultsPath ?? join(dirname(modelsPath), "api-manager.json");
   const settingsPath = options.settingsPath ?? join(dirname(modelsPath), "settings.json");
+  const hostVersion = options.hostVersion ?? VERSION;
   const configured = configuredProviderIds(modelsPath);
   if (typeof pi.registerProvider === "function") {
     for (const provider of PROVIDERS) {
       if (configured.has(provider.id)) {
-        pi.registerProvider(provider.id, configuredProviderRegistration(provider.id, modelsPath));
+        pi.registerProvider(provider.id, configuredProviderRegistration(provider.id, modelsPath, hostVersion));
       }
     }
     for (const id of managedProviderIdsSync(defaultsPath, modelsPath)) {
       if (findPreset(id) || !hasEnabledProviderSync(id, modelsPath)) continue;
-      pi.registerProvider(id, configuredProviderRegistration(id, modelsPath));
+      pi.registerProvider(id, configuredProviderRegistration(id, modelsPath, hostVersion));
     }
     // Disabled providers stay in models.json, and pi recomposes that layer on
     // every refresh — unregistering alone would not hide their models. The
@@ -577,6 +600,7 @@ export function registerApiProviderConfigs(
   applyCacheRetentionEnv(settingsPath);
 
   const handle: ApiProviderConfigHandle = {
+    recordResponse: (providerId, status, ctx) => recordProviderResponse(pi, providerId, status, ctx, modelsPath, hostVersion),
     async openManager(ctx, args = "") {
       try {
         await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath, settingsPath);
@@ -610,29 +634,9 @@ export function registerApiProviderConfigs(
   });
   if (typeof pi.on === "function") {
     pi.on("after_provider_response", async (event, ctx) => {
-      if (event.status < 400) return;
-      // Only react to auth/quota/server errors that are likely tied to a key.
-      if (![401, 403, 429].includes(event.status) && !(event.status >= 500)) return;
-      const model = ctx.model;
-      if (!model) return;
-      const providerId = model.provider;
-      const root = await readModelsRoot(modelsPath);
-      const providers = isRecord(root.providers) ? root.providers : {};
-      const config = isRecord(providers[providerId]) ? providers[providerId] : {};
-      if (!Array.isArray(config.apiKeys) || config.apiKeys.length === 0) return;
-      const keyPolicy = isApiKeyPolicy(config.keyPolicy) ? config.keyPolicy : "sticky";
-      const resolved = resolveApiKey(config, keyPolicy);
-      if (!resolved || resolved.id === "legacy") return;
-      const switched = await recordApiKeyFailureAndAdvance(providerId, resolved.id, event.status, modelsPath);
-      if (!switched) return;
-      if (hasEnabledProviderSync(providerId, modelsPath)) {
-        pi.registerProvider(providerId, configuredProviderRegistration(providerId, modelsPath));
-        ctx.modelRegistry?.refresh?.();
-      }
-      ctx.ui?.notify?.(
-        `${providerId} key ${resolved.id} failed (HTTP ${event.status}); switched to ${switched.activeKeyId}.`,
-        "warning",
-      );
+      // Native events omit dispatch identity; ctx.model may be a virtual selection.
+      if (getPiHostMode(options.hostVersion ?? VERSION) !== "legacy" || !ctx.model) return;
+      await handle.recordResponse(ctx.model.provider, event.status, ctx);
     });
     pi.on("session_start", async (_event, ctx) => {
       let migratedLevel: ThinkingLevel | undefined;
@@ -3719,6 +3723,10 @@ export async function applyModelFilters(
   if (typeof pi.registerProvider !== "function") return;
   const filters = await loadModelFilters(defaultsPath);
   if (Object.keys(filters).length === 0) return;
+  if (getPiHostMode(VERSION) !== "legacy") {
+    ctx.ui.notify("Native model filtering is unavailable: replacing the chat catalog would remove image/classifier operations. Saved filters are retained but not applied.", "warning");
+    return;
+  }
   const available = ctx.modelRegistry?.getAvailable?.() ?? [];
   if (available.length === 0) return;
   const byProvider = new Map<string, typeof available>();
@@ -3738,7 +3746,7 @@ export async function applyModelFilters(
     if (survivorIds.size === 0) continue;
     const survivors = providerModels.filter((m) => survivorIds.has(m.id));
     const base = providerModels[0];
-    const models: ProviderModelConfig[] = survivors.map((m) => ({
+    const models: Extract<ProviderModelConfig, { reasoning: boolean }>[] = survivors.map((m) => ({
       id: m.id,
       name: m.name,
       reasoning: m.reasoning,
@@ -3750,7 +3758,7 @@ export async function applyModelFilters(
       baseUrl: m.baseUrl,
       ...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
       ...(m.headers ? { headers: m.headers } : {}),
-      ...(m.compat ? { compat: m.compat as ProviderModelConfig["compat"] } : {}),
+      ...(m.compat ? { compat: m.compat } : {}),
     }));
     try {
       pi.registerProvider(providerId, {

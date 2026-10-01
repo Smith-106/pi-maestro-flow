@@ -5,10 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	prepareGuardedEditArguments,
-	registerGuardedEditTool,
+	registerGuardedEditTool as registerLegacyGuardedEditTool,
 } from "../src/edit-guard.ts";
-import { registerQuietTools } from "../src/quiet-tools.ts";
+import { registerQuietTools as registerLegacyQuietTools } from "../src/quiet-tools.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
+
+// These fixtures exercise the preserved legacy extension, not native edit.
+const registerGuardedEditTool = (pi: any) => registerLegacyGuardedEditTool(pi, "0.98.0");
+const registerQuietTools = (pi: any, getConfig: () => typeof DEFAULT_CONFIG) => registerLegacyQuietTools(pi, getConfig, "0.98.0");
 
 function install(register: (pi: any) => void): Map<string, any> {
 	const tools = new Map<string, any>();

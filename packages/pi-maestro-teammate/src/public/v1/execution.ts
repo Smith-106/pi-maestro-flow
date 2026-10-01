@@ -8,11 +8,14 @@ export {
   runGraph,
   runTeammate,
   sendRpcMessage,
+  sendRpcMessageWithReceipt,
 } from "../../runs/execution.ts";
 export type {
   NormalizedTask,
   NormalizeTeammateResult,
   RpcMessageMode,
+  RpcInputDisposition,
+  RpcReceipt,
   RunTeammateOptions,
   RunTeammateParams,
 } from "../../runs/execution.ts";

@@ -185,6 +185,64 @@ test("queue acceptance remains queued until matching message_end receipt", async
   });
 });
 
+test("parallel completion child records preserve mode and replay independently", async () => {
+  await fixture(async ({ coordinator, store, registry, provider, sent, bind }) => {
+    await bind();
+    for (const index of [1, 2]) {
+      const dispatch = {
+        ...seed(),
+        dispatchId: `parallel-child-${index}`,
+        reservationId: `parallel-reservation-${index}`,
+        deliveryGroupId: "parallel-group",
+        mode: "parallel" as const,
+        expectedTasks: [`parallel-child-${index}`],
+      };
+      const childResource = {
+        ...resource,
+        correlationId: dispatch.dispatchId,
+        publicationId: `parallel-publication-${index}`,
+        uri: `agent://parallel-publication-${index}` as `agent://${string}`,
+      };
+      assert.equal((await coordinator.beginDispatch(dispatch)).durable, true);
+      await coordinator.requireNotification({
+        dispatchId: dispatch.dispatchId,
+        reservationId: dispatch.reservationId,
+        kind: "single",
+        requiredAt: 1_100,
+      });
+      assert.equal((await coordinator.publishCompletion({
+        dispatchId: dispatch.dispatchId,
+        reservationId: dispatch.reservationId,
+        kind: "single",
+        outcome: "completed",
+        summary: `${childResource.uri}\nParallel status: ${index}/2 results ready`,
+        resources: [childResource],
+        finalizedAt: 1_200 + index,
+      })).finalized, true);
+    }
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent.map((entry) => entry.details.mode), ["parallel", "parallel"]);
+    assert.deepEqual(sent.map((entry) => entry.details.resources.length), [1, 1]);
+    assert.equal(sent[0]!.content.split(sent[0]!.details.resources[0]!).length - 1, 1);
+    assert.equal(sent[1]!.content.split(sent[1]!.details.resources[0]!).length - 1, 1);
+    assert.notEqual(sent[0]?.details.deliveryId, sent[1]?.details.deliveryId);
+    assert.equal(await coordinator.receiveMessageEnd(sent[0], target), true);
+    await coordinator.drain();
+    coordinator.dispose();
+
+    const replayed: CompletionDeliveryEnvelope[] = [];
+    const restarted = new CompletionDeliveryCoordinator({ store, registry, now: () => 63_000, defer: (next) => queueMicrotask(next) });
+    try {
+      await restarted.bindSession({ target, entries: [sent[0]!], send(envelope) { replayed.push(envelope); return true; } });
+      await restarted.drain();
+      assert.equal(replayed.length, 1);
+      assert.equal(replayed[0]?.details.mode, "parallel");
+      assert.equal(replayed[0]?.details.deliveryId, sent[1]?.details.deliveryId);
+      assert.equal(provider.applied.length, 1);
+    } finally { restarted.dispose(); }
+  });
+});
+
 test("transcript rebuild applies a queued notice without reinjection", async () => {
   await fixture(async ({ coordinator, store, registry, provider, sent, bind }) => {
     await bind();

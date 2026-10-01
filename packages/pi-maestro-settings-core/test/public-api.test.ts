@@ -47,3 +47,10 @@ test("narrow public modules have no external runtime dependencies", () => {
     assert.deepEqual([...graph.externals], [], `${file} must stay runtime dependency-free`);
   }
 });
+
+test("host policy stays pure with no runtime dependencies", () => {
+  const entry = resolve(packageRoot, "src/pi-host.ts");
+  const graph = runtimeGraph(entry);
+  assert.deepEqual([...graph.externals], []);
+  assert.deepEqual([...graph.modules], [entry]);
+});

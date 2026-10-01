@@ -5,6 +5,7 @@ import type { RemoteWorkerStartRequest, RemoteWorkerWaitOptions } from "../remot
 import type { ObservationReadOptions, ObservationSnapshot, ObservationWaitOptions } from "../public/v1/observation.ts";
 import { type RemoteHistoryEntry, type RemoteHistoryMode } from "../sessions/remote-history.ts";
 import type { SessionMessageKind } from "../sessions/session-core.ts";
+export declare const REMOTE_MONITOR_SETTLED_RUN_LIMIT = 128;
 /** Raw remote error messages may contain stderr, argv, hosts, paths, or credentials. */
 export declare function sanitizeRemoteMonitorError(error: unknown, operation?: string): string;
 export interface RemoteWorkerManagerLike {

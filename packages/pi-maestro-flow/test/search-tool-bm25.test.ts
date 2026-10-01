@@ -113,7 +113,7 @@ test("registered search preserves consumed and pending eligibility across extens
       getActiveTools: () => active,
       setActiveTools: (names: string[]) => { active = names; },
     };
-    registerSearchToolBm25(api as never);
+    registerSearchToolBm25(api as never, "0.87.0");
     return { get tool() { return registered!; }, handlers };
   };
   const ctx = { sessionManager };

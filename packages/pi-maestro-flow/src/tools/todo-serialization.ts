@@ -26,7 +26,7 @@ export { isSkillRole };
 
 export const TODO_STATE_ENTRY_TYPE = "todo-state";
 export const TODO_CONTENT_ENTRY_TYPE = "todo-content";
-export const TODO_STATE_VERSION = 8;
+export const TODO_STATE_VERSION = 9;
 const TODO_CONTENT_VERSION = 1;
 
 export interface TodoSerializationContext {

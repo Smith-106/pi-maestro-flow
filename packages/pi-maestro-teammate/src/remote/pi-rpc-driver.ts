@@ -27,6 +27,7 @@ import {
   type RemoteRunStartParams,
 } from "./protocol.ts";
 import { applyRemoteRunEvent, createRemoteRunSnapshot } from "./state.ts";
+import { nativeChildBuiltinArgs, probePiChildVersion } from "../runs/native-child.ts";
 import {
   ensurePrivateRemoteDirectory,
   REMOTE_PRIVATE_FILE_MODE,
@@ -249,6 +250,9 @@ class PiRpcRunHandle implements RemoteRunHandle {
   #pendingInputCount = 0;
   #pendingInputBytes = 0;
   #terminationPromise?: Promise<void>;
+  readonly #responses = new Map<string, { command: string; resolve: (value: "handled" | "queued" | "started" | "legacy-accepted") => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  readonly #structuredCalls = new Map<string, unknown>();
+  #structuredSubmissionConfirmed = false;
 
   constructor(
     capture: RemoteRunCapture,
@@ -269,7 +273,14 @@ class PiRpcRunHandle implements RemoteRunHandle {
     this.#closePromise = new Promise((resolve) => { this.#resolveClosed = resolve; });
     this.#bindChild();
     this.#emitState("running", "pi-rpc-started");
-    void this.#writeCommand({ id: `start-${capture.runId}`, type: "prompt", message: objective }).catch((error) => {
+    void this.#acceptedCommand({ id: `start-${capture.runId}`, type: "prompt", message: objective }).then((disposition) => {
+      if (disposition !== "handled" || this.#terminal) return;
+      // An input hook handled the initial prompt: there is no agent run whose
+      // agent_settled we could wait for. This is not a model-result publication.
+      this.#finish("failed", undefined, "Pi handled the initial input without starting an agent run; acceptance is not task completion.", "prompt-handled");
+      this.#child.stdin.end();
+      this.#scheduleTreeTermination();
+    }).catch((error) => {
       if (this.#cancelRequested || this.#terminal) return;
       this.#finish("failed", undefined, `Pi RPC prompt write failed: ${redactRemoteError(error)}`);
       this.#scheduleTreeTermination();
@@ -296,8 +307,8 @@ class PiRpcRunHandle implements RemoteRunHandle {
       throw new Error("Remote input exceeds the protocol limit");
     }
     const type = request.mode === "steer" ? "steer" : "follow_up";
-    await this.#writeCommand({ id: request.commandId, type, message: request.message });
-    return { accepted: true, effectiveMode: request.mode, receipt: "queued" };
+    const disposition = await this.#acceptedCommand({ id: request.commandId, type, message: request.message });
+    return { accepted: true, effectiveMode: request.mode, receipt: disposition === "queued" ? "queued" : "accepted", disposition };
   }
 
   async cancel(request: RemoteRunCancelParams): Promise<RemoteRunCancelResult> {
@@ -394,6 +405,22 @@ class PiRpcRunHandle implements RemoteRunHandle {
   #processRpcEvent(value: unknown): void {
     if (!plainObject(value) || typeof value.type !== "string" || this.#terminal) return;
     switch (value.type) {
+      case "response": {
+        if (typeof value.id !== "string") break;
+        const pending = this.#responses.get(value.id);
+        if (!pending || value.command !== pending.command) break;
+        this.#responses.delete(value.id);
+        clearTimeout(pending.timer);
+        if (value.success !== true) {
+          pending.reject(new Error(`Pi RPC ${pending.command} rejected: ${redactRemoteError(value.error ?? "unknown error")}`));
+          break;
+        }
+        const disposition = plainObject(value.data) ? value.data.disposition : undefined;
+        if (disposition === undefined) pending.resolve("legacy-accepted");
+        else if (disposition === "handled" || disposition === "queued" || disposition === "started") pending.resolve(disposition);
+        else pending.reject(new Error(`Invalid Pi RPC input disposition: ${String(disposition)}`));
+        break;
+      }
       case "message_update": {
         const update = plainObject(value.assistantMessageEvent) ? value.assistantMessageEvent : undefined;
         if (update?.type === "text_delta" && typeof update.delta === "string") {
@@ -414,17 +441,33 @@ class PiRpcRunHandle implements RemoteRunHandle {
         if (usage) this.#emitProgress({ type: "usage", usage });
         break;
       }
+      case "tool_execution_update":
+        this.#emitProgress({ type: "native", name: value.type, data: value });
+        break;
       case "tool_execution_start":
       case "tool_execution_end": {
         const toolName = appendUtf8Head("", typeof value.toolName === "string" ? value.toolName : "unknown", 4096);
-        const toolCallId = appendUtf8Head("", typeof value.toolCallId === "string" ? value.toolCallId : "unknown", 4096);
-        if (value.type === "tool_execution_start" && toolName === "structured_output" && plainObject(value.args)) {
-          this.#structuredOutput = boundedStructuredOutput(value.args);
+        // The JSONL/event byte bounds reject oversized records; truncating an
+        // identity here would merge distinct native calls.
+        const toolCallId = typeof value.toolCallId === "string" ? value.toolCallId : "unknown";
+        if (toolName === "structured_output" && value.parentToolCallId === undefined) {
+          if (value.type === "tool_execution_start" && plainObject(value.args)) {
+            this.#structuredCalls.set(toolCallId, boundedStructuredOutput(value.args));
+          } else if (value.type === "tool_execution_end") {
+            if (value.isError !== true && this.#structuredCalls.has(toolCallId)) {
+              this.#structuredOutput = this.#structuredCalls.get(toolCallId);
+              this.#structuredSubmissionConfirmed = true;
+            }
+            this.#structuredCalls.delete(toolCallId);
+          }
         }
         this.#emitProgress({
           type: "tool",
           tool: {
             toolCallId,
+            ...(typeof value.parentToolCallId === "string" ? { parentToolCallId: value.parentToolCallId } : {}),
+            ...(value.result === undefined ? {} : { result: value.result }),
+            ...(typeof value.complete === "boolean" ? { complete: value.complete } : {}),
             toolName,
             phase: value.type === "tool_execution_start" ? "start" : "end",
             ...(value.isError === true ? { isError: true } : {}),
@@ -458,6 +501,26 @@ class PiRpcRunHandle implements RemoteRunHandle {
         break;
       }
     }
+  }
+
+  async #acceptedCommand(command: { id: string; type: string; message: string }): Promise<"handled" | "queued" | "started" | "legacy-accepted"> {
+    if (this.#responses.size >= PI_RPC_PENDING_INPUT_LIMIT) throw new Error("Pi RPC pending response limit reached");
+    if (this.#responses.has(command.id)) throw new Error("Pi RPC command id is already pending");
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#responses.delete(command.id);
+        reject(new Error(`Pi RPC ${command.type} acceptance timed out`));
+      }, 10_000);
+      timer.unref?.();
+      this.#responses.set(command.id, { command: command.type, resolve, reject, timer });
+      void this.#writeCommand(command).catch((error) => {
+        const pending = this.#responses.get(command.id);
+        if (!pending) return;
+        this.#responses.delete(command.id);
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
   }
 
   async #writeCommand(command: Record<string, unknown>): Promise<void> {
@@ -556,6 +619,11 @@ class PiRpcRunHandle implements RemoteRunHandle {
   ): void {
     if (this.#terminal) return;
     this.#terminal = true;
+    for (const pending of this.#responses.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Pi RPC run settled before input acceptance"));
+    }
+    this.#responses.clear();
     this.#loadStructuredOutputFile();
     const redactedError = error === undefined
       ? undefined
@@ -621,6 +689,7 @@ class PiRpcRunHandle implements RemoteRunHandle {
   }
 
   #loadStructuredOutputFile(): void {
+    if (!this.#structuredSubmissionConfirmed) return;
     const outputPath = path.join(this.#scratchDirectory, "output.json");
     try {
       const stat = fs.lstatSync(outputPath);
@@ -676,6 +745,18 @@ export class PiRpcDriver implements RemoteDriver {
       writePrivateFile(schemaPath, `${JSON.stringify(request.outputSchema)}\n`);
     }
     const command = buildRpcArgv(context.target.command, request.name, request.outputSchema !== undefined);
+    // This code executes on the remote bridge itself. Only its actual target
+    // executable/configuration can authorize native builtins, never the caller.
+    if (command.args.includes("--no-extensions")) {
+      const env = targetChildEnvironment(context.target.env);
+      const version = await probePiChildVersion(context.target.command[0], context.target.command.slice(1), context.target.cwd, env);
+      const toolsIndex = command.args.indexOf("--tools");
+      const modelIndex = command.args.indexOf("--model");
+      command.args.push(...nativeChildBuiltinArgs({ version, cwd: context.target.cwd, env,
+        ...(toolsIndex < 0 ? {} : { tools: command.args[toolsIndex + 1]?.split(",") }),
+        ...(modelIndex < 0 ? {} : { model: command.args[modelIndex + 1] }),
+      }));
+    }
     let child: ChildProcessWithoutNullStreams;
     try {
       child = this.#spawnChild(command.executable, command.args, {

@@ -104,7 +104,7 @@ export const INSTALL_ITEMS: readonly InstallItem[] = [
     docFile: "MCP-SETUP.md",
     category: "external",
     promptIntro:
-      "配置 MCP 服务器。按文档交互式询问要注册的 server，写入配置后用 /mcp auth 完成 OAuth。",
+      "配置 MCP 服务器。Pi 0.99+ 使用原生 `pi mcp add/list/login` 与 `/mcp`；0.87–0.98 才使用 Maestro legacy manager。已有 legacy 配置必须先按文档预览迁移，不复制 OAuth token。",
   },
   {
     id: "openai-tunnel",

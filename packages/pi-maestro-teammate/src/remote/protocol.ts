@@ -172,6 +172,8 @@ export interface RemoteRunInputResult {
   accepted: boolean;
   effectiveMode: RemoteInputMode;
   receipt: "queued" | "accepted" | "injected";
+  /** Actual Pi acceptance, not completion. Absent-disposition responses are explicit legacy acceptance. */
+  disposition?: "handled" | "queued" | "started" | "legacy-accepted";
 }
 
 export interface RemoteRunCancelParams {

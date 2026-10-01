@@ -121,7 +121,7 @@ test("agent-area widget stays hidden when there are no teammates", () => {
 	assert.deepEqual(lines, []);
 });
 
-test("active-agent tree keeps required ancestors, dependency arrows, and a fixed height", () => {
+test("active-agent tree keeps required ancestors and dependency arrows without blank padding", () => {
 	const row = (overrides: Partial<AgentRow>): AgentRow => ({
 		correlationId: "parent",
 		agent: "executor",
@@ -157,14 +157,48 @@ test("active-agent tree keeps required ancestors, dependency arrows, and a fixed
 	})(tui, theme);
 
 	const lines = component.render(120);
-	assert.equal(lines.length, 4, "active panels keep their allocated height");
+	assert.equal(lines.length, 2, "the widget uses only rows with content");
 	assert.ok(lines.some((line) => line.includes("parent task")), "inactive parent is retained for hierarchy");
 	const childLine = lines.find((line) => line.includes("active child"));
 	assert.ok(childLine);
 	assert.match(childLine, /^  └─/, "active descendant remains nested under its parent");
 	assert.match(childLine, /← @parent/, "dependency flow remains a separate labelled segment");
 	assert.ok(!lines.some((line) => line.includes("inactive sibling")), "unrelated inactive rows are omitted");
-	assert.deepEqual(lines.slice(2), ["", ""], "unused budget is padded rather than collapsed");
+	assert.ok(lines.every((line) => line.length > 0), "unused budget never becomes blank rows");
+});
+
+test("active graph keeps all three parallel agents when the budget fits exactly", () => {
+	const row = (overrides: Partial<AgentRow>): AgentRow => ({
+		correlationId: "graph",
+		agent: "graph(3)",
+		name: "parallel",
+		role: "agent",
+		task: "",
+		status: "running",
+		tail: "",
+		startedAt: 1,
+		lastActivityAt: ACTIVE_AT,
+		...overrides,
+	});
+	const rows = [
+		row({}),
+		row({ correlationId: "one", parentCorrelationId: "graph", agent: "explorer", role: "explorer", task: "first", status: "done" }),
+		row({ correlationId: "two", parentCorrelationId: "graph", agent: "analyst", role: "analyst", task: "second" }),
+		row({ correlationId: "three", parentCorrelationId: "graph", agent: "reviewer", role: "reviewer", task: "third", status: "pending" }),
+	];
+	const component = makeActiveAgentWidget({
+		getAgents: () => rows,
+		getConfig: () => ({ ...DEFAULT_CONFIG, icons: { mode: "nerd" } }),
+		getRowBudget: () => 3,
+	})(tui, theme);
+
+	const lines = component.render(120);
+	assert.equal(lines.length, 3);
+	assert.ok(lines.some((line) => line.includes("first")));
+	assert.ok(lines.some((line) => line.includes("second")));
+	assert.ok(lines.some((line) => line.includes("third")));
+	assert.ok(lines.every((line) => line.length > 0));
+	assert.ok(!lines.some((line) => line.includes("more")), "an exact fit needs no overflow marker");
 });
 
 test("active-agent tree collapses only when the active set becomes empty", () => {
@@ -188,7 +222,7 @@ test("active-agent tree collapses only when the active set becomes empty", () =>
 
 	assert.deepEqual(component.render(80), []);
 	status = "running";
-	assert.equal(component.render(80).length, 3);
+	assert.equal(component.render(80).length, 1);
 	status = "done";
 	assert.deepEqual(component.render(80), []);
 });
@@ -475,4 +509,31 @@ test("agent-area widget bridges nested graph descendants to the nearest visible 
 	const lines = component.render(120);
 	assert.match(lines[1], /^└─ .*outer worker/);
 	assert.match(lines[2], /^  └─ .*nested worker/);
+});
+
+test("Todo and both Agent widgets invalidate cached ANSI with a stable theme identity", () => {
+	let color = "31";
+	const stableTheme = {
+		fg: (_role: string, text: string) => `\x1b[${color}m${text}\x1b[0m`,
+		bold: (text: string) => text,
+	} as Theme;
+	const config = { ...DEFAULT_CONFIG, staticMode: true, todoExpanded: true };
+	const rows: AgentRow[] = [{ correlationId: "worker", agent: "explorer", name: undefined, role: "explorer", task: "stable task", status: "running", tail: "", startedAt: 1, lastActivityAt: ACTIVE_AT }];
+	const widgets = [
+		makeTodoWidget({ getTodos: () => todos, getConfig: () => config })(tui, stableTheme),
+		makeAgentWidget({ getAgents: () => rows, getConfig: () => config, isRunning: () => true })(tui, stableTheme),
+		makeActiveAgentWidget({ getAgents: () => rows, getConfig: () => config })(tui, stableTheme),
+	];
+	const previous = widgets.map((widget) => widget.render(100));
+	for (const [i, widget] of widgets.entries()) {
+		assert.match(previous[i].join("\n"), /\x1b\[31m/);
+		assert.strictEqual(widget.render(100), previous[i], "unchanged host frames keep memo hits");
+	}
+	color = "32";
+	for (const widget of widgets) {
+		widget.invalidate();
+		const next = widget.render(100).join("\n");
+		assert.match(next, /\x1b\[32m/);
+		assert.doesNotMatch(next, /\x1b\[31m/);
+	}
 });

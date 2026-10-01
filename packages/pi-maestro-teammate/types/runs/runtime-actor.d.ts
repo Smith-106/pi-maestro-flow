@@ -7,6 +7,7 @@ export declare class AgentRunRuntimeActor {
         cwd?: string;
     }, options: RunTeammateOptions): Promise<AgentRunRuntimeActor>;
     wrap(options: RunTeammateOptions): RunTeammateOptions;
+    private liveToolEventAfterV1;
     progressAfterV1(progress: AgentProgress): void;
     resultPublishedAfterV1(result: SingleResult): Promise<void>;
     settledAfterV1(result: SingleResult, status?: AgentTerminalStatus, afterPersist?: () => void): void;

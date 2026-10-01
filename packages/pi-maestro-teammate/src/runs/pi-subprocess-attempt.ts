@@ -33,6 +33,8 @@ import {
   StringDecoder,
 } from "node:string_decoder";
 import crossSpawn from "cross-spawn";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
+import { assertVirtualChildRouter, nativeChildBuiltinArgs, probePiChildVersion } from "./native-child.ts";
 import {
   type AgentConfig,
 } from "../agents/agents.ts";
@@ -234,6 +236,7 @@ interface AttemptState {
   structuredOutputValidationFailure?: string;
   /** Set when the child's structured_output tool execution itself failed. */
   structuredOutputAttemptFailed: boolean;
+  structuredOutputSubmissionConfirmed: boolean;
   reportedRuntimeErrors: Set<string>;
   runtimeFailure?: string;
   /**
@@ -354,6 +357,7 @@ interface PendingInterrupt {
 }
 
 interface PendingModelInput {
+  requestId: string;
   /** Exact leased string written on the Pi transport. */
   transportMessage: string;
   /** Exact user text after the child input hook validates and unwraps the lease. */
@@ -586,7 +590,9 @@ export async function runSingleAttempt(
     sessionDir,
     forkSessionFile,
     schemaFile,
-    options.modelCapabilities,
+    options.virtualModelIds?.length
+      ? [...(options.modelCapabilities ?? []), ...options.virtualModelIds.map((id) => ({ id }))]
+      : options.modelCapabilities,
     resumeSessionFile,
   );
 
@@ -612,6 +618,7 @@ export async function runSingleAttempt(
     compactionWakeProtocolCapable: false,
     compactionRecovery: undefined,
     structuredOutputAttemptFailed: false,
+    structuredOutputSubmissionConfirmed: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
     completedInputTokens: 0,
     completedOutputTokens: 0,
@@ -709,6 +716,7 @@ export async function runSingleAttempt(
     acceptedMessage: string,
     mode: "prompt" | "steer" | "follow_up",
     provenance?: MessageProvenanceV1,
+    requestId = randomUUID(),
   ): TransportSidecarLease => {
     const initial = !initialModelInputRegistered;
     initialModelInputRegistered = true;
@@ -726,6 +734,7 @@ export async function runSingleAttempt(
           }),
         };
     const pending: PendingModelInput = {
+      requestId,
       transportMessage,
       acceptedMessage,
       context,
@@ -853,6 +862,19 @@ export async function runSingleAttempt(
     progress.tokens = progress.inputTokens + progress.outputTokens;
   };
 
+  const spawnEnv = buildChildSpawnEnv(
+    correlationId,
+    replyTo,
+    options,
+    schemaFile,
+    outputFile,
+    forkSessionFile,
+  );
+  const spawnSpec = getPiSpawnCommand(piArgs);
+  const probedChildVersion = options.spawnChildProcess
+    ? options.childPiVersion
+    : await probePiChildVersion(spawnSpec.command, spawnSpec.argsPrefix, cwd, spawnEnv);
+
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
     let releaseRetryPersistenceGuard = () => {};
@@ -892,18 +914,14 @@ export async function runSingleAttempt(
     const interruptingSteerTimeoutMs = options.interruptingSteerTimeoutMs ?? INTERRUPTING_STEER_TIMEOUT_MS;
     const modelSwitchAckTimeoutMs = options.modelSwitchAckTimeoutMs ?? MODEL_SWITCH_ACK_TIMEOUT_MS;
 
-    const spawnEnv = buildChildSpawnEnv(
-      correlationId,
-      replyTo,
-      options,
-      schemaFile,
-      outputFile,
-      forkSessionFile,
-    );
-
     let useIpc = false;
-    const spawnSpec = getPiSpawnCommand(piArgs);
+    let confirmedChildVersion: string | undefined;
     try {
+      const childVersion = confirmedChildVersion = probedChildVersion;
+      const selection = modelOverride ?? params.model ?? agentConfig.model;
+      assertVirtualChildRouter(selection, options.virtualModelIds, childVersion);
+      const builtinArgs = nativeChildBuiltinArgs({ version: childVersion, cwd, env: spawnEnv, tools: agentConfig.tools, model: selection });
+      spawnSpec.args.push(...builtinArgs);
       useIpc = !spawnSpec.shell;
       const spawnOpts: Parameters<typeof crossSpawn>[2] = {
         cwd,
@@ -913,12 +931,15 @@ export async function runSingleAttempt(
         windowsHide: true,
       };
       child = (options.spawnChildProcess ?? crossSpawn)(spawnSpec.command, spawnSpec.args, spawnOpts);
+
     } catch (error) {
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
       if (outputFile) cleanupFile(outputFile);
 
-      const spawnDiagnostic = piLaunchDiagnostic(spawnSpec, "spawn", null, null, "");
+      const spawnDiagnostic = { ...piLaunchDiagnostic(spawnSpec, "spawn", null, null, ""),
+        childVersion: confirmedChildVersion, hostMode: getPiHostMode(confirmedChildVersion),
+      };
       options.onChildEvent?.({ ...spawnDiagnostic, correlationId });
       const result: SingleResult = {
         agent: params.agent,
@@ -949,9 +970,17 @@ export async function runSingleAttempt(
       return;
     }
 
+    try {
+      options.onChildEvent?.({ ...piLaunchDiagnostic(spawnSpec, "spawn", null, null, ""),
+        correlationId, childVersion: confirmedChildVersion, hostMode: getPiHostMode(confirmedChildVersion),
+      });
+    } catch (error) {
+      logDiagnosticWarn("[pi-maestro-teammate] child capability diagnostic observer failed:", error);
+    }
     if (child.stdin) {
       guardChildStdin(child.stdin);
       transportSidecars.set(child.stdin, { enqueue: enqueueTransportInput });
+      if (getPiHostMode(confirmedChildVersion) === "native") nativeRpcStreams.add(child.stdin);
     }
 
     // Pi core keeps its in-process provider retry enabled. It handles
@@ -1260,6 +1289,12 @@ export async function runSingleAttempt(
     }
 
     function readStructuredOutput(cleanup: boolean): unknown | undefined {
+      // A native output file is not an authority by itself: a nested/rejected
+      // submission must never become the parent's final result.
+      if (state.structuredOutputAttemptFailed || (getPiHostMode(confirmedChildVersion) === "native" && !state.structuredOutputSubmissionConfirmed)) {
+        if (cleanup && outputFile) cleanupFile(outputFile);
+        return undefined;
+      }
       let structuredOutput: unknown;
       let oversized = false;
       if (outputFile) {
@@ -1377,6 +1412,7 @@ export async function runSingleAttempt(
         state.capturedStructuredOutput = undefined;
         state.structuredOutputValidationFailure = undefined;
         state.structuredOutputAttemptFailed = false;
+        state.structuredOutputSubmissionConfirmed = false;
         state.reportedRuntimeErrors.clear();
         state.runtimeFailure = undefined;
         state.lastAssistantStopReason = undefined;
@@ -1986,10 +2022,13 @@ export async function runSingleAttempt(
       // A new turn means the previous turn's tools all completed; drop any
       // stale counter so the in-flight heartbeat cannot leak across turns.
       state.inFlightToolCount = 0;
+      inFlightCallIds.clear();
+      completedCallIds.clear();
       state.pendingStructuredOutput = undefined;
       state.capturedStructuredOutput = undefined;
       state.structuredOutputValidationFailure = undefined;
       state.structuredOutputAttemptFailed = false;
+      state.structuredOutputSubmissionConfirmed = false;
       if (event.type === "agent_start" && currentModelInput?.eventsEmitted) {
         currentModelInput.loopSeq += 1;
         currentModelInput.eventsEmitted = false;
@@ -2165,15 +2204,24 @@ export async function runSingleAttempt(
       if (progressChanged) options.onProgress?.(progress);
     }
 
+    const inFlightCallIds = new Set<string>();
+    const completedCallIds = new Set<string>();
+
     function onToolStart(event: JsonLineEvent): void {
+      if (typeof event.toolCallId === "string") {
+        if (inFlightCallIds.has(event.toolCallId)) return;
+        inFlightCallIds.add(event.toolCallId);
+      }
       const toolName = truncateUtf8Tail(
         (event.toolName as string) ?? (event.name as string) ?? "unknown",
         EXECUTION_BUFFER_LIMITS.toolNameBytes,
       );
       const argsPreview = previewToolCallArgs(event.args, toolName);
-      progress.recentTools.push(argsPreview === undefined
-        ? { name: toolName, status: "running" }
-        : { name: toolName, status: "running", argsPreview });
+      const identity = {
+        ...(typeof event.toolCallId === "string" ? { toolCallId: event.toolCallId } : {}),
+        ...(typeof event.parentToolCallId === "string" ? { parentToolCallId: event.parentToolCallId } : {}),
+      };
+      progress.recentTools.push({ ...identity, name: toolName, status: "running", ...(argsPreview === undefined ? {} : { argsPreview }) });
       state.inFlightToolCount += 1;
       progress.phase = "tool-execution";
       if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
@@ -2187,26 +2235,38 @@ export async function runSingleAttempt(
     }
 
     /**
-     * A finished tool call. A successful `structured_output` call is itself a
-     * terminal result — settle the turn without waiting for agent_end.
+     * Track a finished execution by its exact identity. A model-issued final
+     * submission is captured here; only the outer lifecycle can settle it.
      */
     function onToolCompleted(event: JsonLineEvent): void {
+      if (typeof event.toolCallId === "string") {
+        if (completedCallIds.has(event.toolCallId)) return;
+        completedCallIds.add(event.toolCallId);
+        // Bound duplicate telemetry retention independently of active calls.
+        if (completedCallIds.size > EXECUTION_BUFFER_LIMITS.toolItems * 4) completedCallIds.delete(completedCallIds.values().next().value!);
+      }
       if (event.content) {
         appendBoundedTranscriptMessage(messages, { role: "tool", content: event.content });
       }
+      // Public/replay completion counts include nested executions (their
+      // effects fence replay too). The per-turn diagnostic counts model calls.
       progress.toolCount += 1;
-      state.turnToolCount += 1;
       state.completedToolCount += 1;
-      state.inFlightToolCount = Math.max(0, state.inFlightToolCount - 1);
+      if (event.parentToolCallId === undefined) state.turnToolCount += 1;
+      if (typeof event.toolCallId !== "string" || inFlightCallIds.delete(event.toolCallId)) {
+        state.inFlightToolCount = Math.max(0, state.inFlightToolCount - 1);
+      }
       if (state.inFlightToolCount === 0 && progress.phase === "tool-execution") {
         // The next silent interval belongs to model continuation, not to the
         // completed tool. This selects the model-phase stall window while the
         // child waits for its next provider event.
         progress.phase = "continuing";
       }
-      const lastTool = progress.recentTools[progress.recentTools.length - 1];
+      const lastTool = typeof event.toolCallId === "string"
+        ? progress.recentTools.find((tool) => tool.toolCallId === event.toolCallId)
+        : [...progress.recentTools].reverse().find((tool) => tool.status === "running" && tool.name === (event.toolName ?? event.name));
       if (lastTool && lastTool.status === "running") {
-        lastTool.status = "completed";
+        lastTool.status = event.isError === true ? "failed" : "completed";
       }
       syncToolHeartbeat();
       if (pendingInterrupt) {
@@ -2222,6 +2282,7 @@ export async function runSingleAttempt(
         ?? lastTool?.name;
       if (
         event.type === "tool_execution_end"
+        && event.parentToolCallId === undefined
         && completedTool === "structured_output"
       ) {
         const pending = state.pendingStructuredOutput;
@@ -2230,18 +2291,22 @@ export async function runSingleAttempt(
           : typeof event.id === "string"
             ? event.id
             : undefined;
-        const idsMatch = !pending?.toolCallId
-          || !completedToolCallId
-          || pending.toolCallId === completedToolCallId;
+        const idsMatch = pending?.toolCallId === undefined
+          ? completedToolCallId === undefined
+          : pending.toolCallId === completedToolCallId;
         if (event.isError !== true && pending && idsMatch) {
           state.capturedStructuredOutput = pending.value;
+          state.structuredOutputSubmissionConfirmed = true;
         } else if (event.isError === true && idsMatch) {
           state.pendingStructuredOutput = undefined;
           state.structuredOutputAttemptFailed = true;
+          state.structuredOutputSubmissionConfirmed = false;
         }
         const structuredOutput = readStructuredOutput(false);
-        if (event.isError !== true && structuredOutput !== undefined && !state.runtimeFailure) {
-          completeTurn(structuredOutput, true);
+        if (event.isError !== true && idsMatch && structuredOutput !== undefined && !state.runtimeFailure) {
+          // A final tool submission is not the outer AgentSession settlement.
+          // In particular a sibling/nested call may still be executing.
+          armLifecycleConfirmationDeadline();
         }
       }
     }
@@ -2546,7 +2611,7 @@ export async function runSingleAttempt(
       }
       progress.phase = "settling";
       options.onProgress?.(progress);
-      if (typeof event.willRetry !== "boolean") {
+      if (getPiHostMode(confirmedChildVersion) !== "native" && typeof event.willRetry !== "boolean") {
         state.settlementCapability = "legacy";
         settleAgentSession();
       }
@@ -2640,8 +2705,22 @@ export async function runSingleAttempt(
     }
 
     function onResponse(event: JsonLineEvent): void {
+      if (child.stdin) acceptRpcResponse(child.stdin, event);
+      const inputIndex = pendingModelInputs.findIndex((input) => input.requestId === event.id);
+      const responseData = event.data as Record<string, unknown> | undefined;
+      if (inputIndex >= 0 && (event.success !== true || responseData?.disposition === "handled")) {
+        const input = pendingModelInputs.splice(inputIndex, 1)[0]!;
+        options.onChildEvent?.({ type: "teammate_rpc_input_disposition", correlationId, requestId: input.requestId, disposition: event.success === true ? "handled" : "rejected" });
+        if (input.initial) {
+          appendBoundedTranscriptMessage(messages, { role: "system", content: event.success === true ? "Pi handled the input without starting an agent run." : "Pi rejected the initial prompt." });
+          // Acceptance/handling alone does not satisfy a teammate task. There
+          // is no AgentSession run to await and no model result to publish.
+          completeTurn(undefined, true, 1);
+          return;
+        }
+      }
       if (structuredOutputRecoveryActive && typeof event.id === "string" && event.id === structuredOutputRecoveryRequestId) {
-        if (event.success !== true) failStructuredOutputRecovery();
+        if (event.success !== true || responseData?.disposition === "handled") failStructuredOutputRecovery();
         return;
       }
       const modelSwitch = state.modelSwitch;
@@ -2682,6 +2761,7 @@ export async function runSingleAttempt(
         state.streamingText = "";
         state.outputLimitRecoveryPending = false;
         state.structuredOutputAttemptFailed = false;
+        state.structuredOutputSubmissionConfirmed = false;
         progress.status = "running";
         progress.phase = "continuing";
         progress.resultReadyAt = undefined;
@@ -2725,7 +2805,7 @@ export async function runSingleAttempt(
         state.modelSwitchResumeRequestId !== undefined
         && typeof event.id === "string"
         && event.id === state.modelSwitchResumeRequestId
-        && event.success !== true
+        && (event.success !== true || responseData?.disposition === "handled")
       ) {
         state.modelSwitchResumeRequestId = undefined;
         if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
@@ -2733,7 +2813,7 @@ export async function runSingleAttempt(
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content:
-            "Pi rejected the resume prompt after the in-process model switch; "
+            "Pi rejected or handled the resume prompt without starting a run after the in-process model switch; "
             + "settling the failed turn.",
         });
         settleAsFailed();
@@ -2767,8 +2847,8 @@ export async function runSingleAttempt(
         }
         return;
       }
-      if (pending.phase === "prompting" && event.id === pending.promptRequestId && event.success !== true) {
-        failInterrupt("Pi rejected the correction prompt");
+      if (pending.phase === "prompting" && event.id === pending.promptRequestId && (event.success !== true || responseData?.disposition === "handled")) {
+        failInterrupt("Pi rejected or handled the correction prompt without starting a run");
       }
     }
 
@@ -2813,8 +2893,11 @@ export async function runSingleAttempt(
       // termination begins; treating the terminal state as absorbing prevents
       // those buffered lines from reawakening the published agent loop.
       if (state.terminal) return;
-      if (state.capturedStructuredOutput === undefined && params.outputSchema) {
-        const candidate = extractStructuredOutputCandidate(event, params.outputSchema);
+      if (state.capturedStructuredOutput === undefined && params.outputSchema && event.parentToolCallId === undefined) {
+        const candidate = extractStructuredOutputCandidate(event, params.outputSchema)
+          ?? (event.type === "tool_execution_start" && event.toolName === "structured_output"
+            ? extractStructuredOutputCandidate({ message: { content: [{ name: "structured_output", toolCallId: event.toolCallId, arguments: event.args }] } }, params.outputSchema)
+            : undefined);
         if (candidate) state.pendingStructuredOutput = candidate;
         state.structuredOutputValidationFailure = describeStructuredOutputValidationFailure(event, params.outputSchema)
           ?? state.structuredOutputValidationFailure;
@@ -2823,6 +2906,11 @@ export async function runSingleAttempt(
       progress.lastActivityAt = Date.now();
       progress.durationMs = Date.now() - startTime;
 
+      // Full live execution events, including nested results and complete:false,
+      // go to observers. nestedCalls is only bounded transcript telemetry.
+      if (event.type.startsWith("tool_execution_")) {
+        options.onChildEvent?.({ ...event, correlationId });
+      }
       eventHandlers.get(event.type)?.(event);
     }
 
@@ -2838,6 +2926,7 @@ export async function runSingleAttempt(
     });
 
     const notifyChildClosed = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (child.stdin) rejectRpcResponses(child.stdin);
       options.onChildClosed?.(correlationId, options.runtimeGeneration, {
         code,
         signal,
@@ -3128,12 +3217,56 @@ interface TransportSidecar {
     acceptedMessage: string,
     mode: "prompt" | "steer" | "follow_up",
     provenance?: MessageProvenanceV1,
+    requestId?: string,
   ): TransportSidecarLease;
 }
 
 const guardedChildStdinStreams = new WeakSet<Writable>();
 const interruptHandlers = new WeakMap<Writable, InterruptHandler>();
 const transportSidecars = new WeakMap<Writable, TransportSidecar>();
+const nativeRpcStreams = new WeakSet<Writable>();
+export type RpcInputDisposition = "handled" | "queued" | "started" | "legacy-accepted" | "transport-written" | "interrupt-requested";
+export type RpcReceipt = { accepted: boolean; disposition?: RpcInputDisposition; error?: string };
+const rpcResponses = new WeakMap<Writable, Map<string, { command: string; finish: (receipt: RpcReceipt) => void }>>();
+
+function acceptRpcResponse(stdin: Writable, event: JsonLineEvent): void {
+  if (typeof event.id !== "string") return;
+  const pending = rpcResponses.get(stdin)?.get(event.id);
+  if (!pending || pending.command !== event.command) return;
+  const disposition = (event.data as Record<string, unknown> | undefined)?.disposition;
+  if (event.success !== true) pending.finish({ accepted: false, error: String(event.error ?? "Pi rejected input") });
+  else if (disposition === undefined) pending.finish({ accepted: true, disposition: "legacy-accepted" });
+  else if (disposition === "handled" || disposition === "queued" || disposition === "started") pending.finish({ accepted: true, disposition });
+  else pending.finish({ accepted: false, error: "Invalid Pi input disposition" });
+}
+
+function rejectRpcResponses(stdin: Writable): void {
+  for (const pending of rpcResponses.get(stdin)?.values() ?? []) pending.finish({ accepted: false, error: "Pi transport closed before input acceptance" });
+  rpcResponses.delete(stdin);
+  nativeRpcStreams.delete(stdin);
+}
+
+/** Model-input acceptance is independent of its eventual AgentSession settlement. */
+export async function sendRpcMessageWithReceipt(stdin: Writable, message: string, mode: RpcMessageMode = "follow_up", token?: LeaseToken, provenance?: MessageProvenanceV1): Promise<RpcReceipt> {
+  if (!nativeRpcStreams.has(stdin) || mode === "interrupt" || mode === "abort") {
+    return { accepted: sendRpcMessage(stdin, message, mode, token, provenance), disposition: mode === "interrupt" ? "interrupt-requested" : "transport-written" };
+  }
+  const pending = rpcResponses.get(stdin) ?? new Map();
+  rpcResponses.set(stdin, pending);
+  if (pending.size >= 64) return { accepted: false, error: "Pi pending input response limit reached" };
+  const id = `teammate-input-${randomUUID()}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finish({ accepted: false, error: "Pi input acceptance timed out" }), 10_000);
+    timer.unref?.();
+    const finish = (receipt: RpcReceipt): void => {
+      if (!pending.delete(id)) return;
+      clearTimeout(timer);
+      resolve(receipt);
+    };
+    pending.set(id, { command: mode, finish });
+    if (!sendRpcMessage(stdin, message, mode, token, provenance, id)) finish({ accepted: false, error: "Pi input write failed" });
+  });
+}
 
 function guardChildStdin(stdin: Writable): void {
   if (guardedChildStdinStreams.has(stdin)) return;
@@ -3162,11 +3295,14 @@ function writeTransportModelInput(
   mode: "prompt" | "steer" | "follow_up",
   provenance?: MessageProvenanceV1,
 ): boolean {
+  const requestId = typeof envelope.id === "string" ? envelope.id : randomUUID();
+  if (nativeRpcStreams.has(stdin) || typeof envelope.id === "string") envelope = { ...envelope, id: requestId };
   const lease = transportSidecars.get(stdin)?.enqueue(
     transportMessage,
     acceptedMessage,
     mode,
     provenance,
+    requestId,
   );
   const sent = writeChildStdinLine(stdin, JSON.stringify(envelope));
   if (sent) lease?.commit();
@@ -3184,6 +3320,7 @@ export function sendRpcMessage(
   mode: RpcMessageMode = "follow_up",
   token?: LeaseToken,
   provenance?: MessageProvenanceV1,
+  requestId?: string,
 ): boolean {
   if (mode === "abort") {
     return writeChildStdinLine(stdin, JSON.stringify({ type: "abort" }));
@@ -3192,7 +3329,7 @@ export function sendRpcMessage(
   if (mode === "prompt") {
     return writeTransportModelInput(
       stdin,
-      { type: "prompt", message: leasedMessage },
+      { id: requestId, type: "prompt", message: leasedMessage },
       leasedMessage,
       message,
       "prompt",
@@ -3206,7 +3343,7 @@ export function sendRpcMessage(
   if (mode === "steer") {
     return writeTransportModelInput(
       stdin,
-      { type: "steer", message: leasedMessage },
+      { id: requestId, type: "steer", message: leasedMessage },
       leasedMessage,
       message,
       "steer",
@@ -3233,7 +3370,7 @@ export function sendRpcMessage(
   }
   return writeTransportModelInput(
     stdin,
-    { type: mode, message: leasedMessage },
+    { id: requestId, type: mode, message: leasedMessage },
     leasedMessage,
     message,
     mode,

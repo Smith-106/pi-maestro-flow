@@ -14,7 +14,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 | 组件 | 版本要求 | 说明 |
 |------|---------|------|
 | Node.js | ≥ 22.19.0 | 插件运行时 |
-| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.84.4 | 验证基线 0.84.4；核心包由 Pi 提供 |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.87.0 | legacy 兼容基线 0.87.0；0.99+ 使用原生能力；核心包由 Pi 提供 |
 
 > [Maestro Flow](https://github.com/catlog22/maestro-flow)（知识系统 CLI）作为依赖随插件自动安装，无需单独前置安装。
 

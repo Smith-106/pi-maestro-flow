@@ -1,7 +1,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   browserManager,
@@ -103,7 +103,13 @@ export interface BrowserToolDetails {
   pick?: BrowserPickResult;
 }
 
-export function createBrowserTool(manager: BrowserManagerLike = browserManager): ToolDefinition<typeof BrowserParams, BrowserToolDetails> {
+export type BrowserToolDefinition = ToolDefinition<typeof BrowserParams, BrowserToolDetails> & {
+  execute: ToolDefinition<typeof BrowserParams, BrowserToolDetails>["execute"] & (
+    (id: string, params: never, signal: AbortSignal, onUpdate: undefined, ctx: ExtensionContext) => Promise<AgentToolResult<BrowserToolDetails>>
+  );
+};
+
+export function createBrowserTool(manager: BrowserManagerLike = browserManager): BrowserToolDefinition {
   // Session-scoped flag: nudged on the first open/run before the agent reads the SOP registry.
   let sopRead = false;
   return {

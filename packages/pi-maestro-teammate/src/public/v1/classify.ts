@@ -5,6 +5,8 @@ export {
   classifierStatus,
   classifySync,
   configureClassifier,
+  bindClassifierRuntime,
+  unbindClassifierRuntime,
   classifyDomain,
   listClassifyDomains,
   registerClassifyDomain,
@@ -29,6 +31,7 @@ export type {
 
 export {
   createJevClient,
+  createNativeJevClient,
   JEV_API_KEY_ENVS,
   JEV_DEFAULT_MODELS,
   JEV_DEFAULT_TIMEOUT_MS,
@@ -38,6 +41,7 @@ export {
 } from "../../classify/client.ts";
 export type {
   JevClient,
+  ClassifierRuntime,
   JevClientOptions,
   JevEndpoint,
 } from "../../classify/client.ts";

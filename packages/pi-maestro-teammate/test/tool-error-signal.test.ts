@@ -3,7 +3,7 @@ import test from "node:test";
 import { Type } from "typebox";
 import type {
   ExtensionAPI,
-  ExtensionContext,
+  ExtensionToolContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import registerTeammateExtension from "../src/extension/index.ts";
@@ -57,7 +57,7 @@ test("teammate returned errors become canonical errors without changing result d
     {},
     undefined,
     undefined,
-    {} as ExtensionContext,
+    {} as ExtensionToolContext,
   );
   assert.strictEqual(actual, result);
   assert.strictEqual(actual.details, details);

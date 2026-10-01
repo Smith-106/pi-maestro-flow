@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
+import { getPiHostMode } from "pi-maestro-settings-core/v1";
 import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import registerMaestroExtension, {
   CHINESE_RESPONSE_PROMPT,
@@ -417,7 +419,7 @@ test("session_compact_failed settles only the extension compaction that owns the
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
-test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway command", async () => {
+test("extension registers Board, LSP, browser, host-owned discovery, and the Gateway command", async () => {
   const tools: ToolDefinition[] = [];
   const active: string[] = [];
   const commands: string[] = [];
@@ -464,14 +466,17 @@ test("extension registers Board, LSP, browser, BM25 discovery, and the Gateway c
   assert.ok(names.includes("lsp"));
   assert.ok(names.includes("browser"));
   assert.ok(names.includes("computer_use"));
-  assert.ok(names.includes("search_tool_bm25"));
+  const legacyHost = getPiHostMode(VERSION) === "legacy";
+  assert.equal(names.includes("search_tool_bm25"), legacyHost, "native discovery has no competing legacy search");
+  assert.equal(names.includes("mcp"), legacyHost, "native MCP has no competing legacy gateway");
+  assert.equal(commands.includes("mcp"), legacyHost, "native /mcp command remains host-owned");
   assert.ok(names.includes("open-code-review"));
   assert.equal(names.includes("ocr-review"), false, "ambiguous optical-character-recognition tool name stays hidden");
   assert.equal(names.filter((name) => name === "board").length, 1);
   assert.equal(names.filter((name) => name === "lsp").length, 1);
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "computer_use").length, 1);
-  assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
+  assert.equal(names.filter((name) => name === "search_tool_bm25").length, legacyHost ? 1 : 0);
   assert.ok(names.includes("run-control"));
   assert.ok(names.includes("session_history"), "unified session history remains available independently of new-context compaction");
   assert.equal(names.includes("compact_history"), false, "the legacy compact history tool name stays hidden");

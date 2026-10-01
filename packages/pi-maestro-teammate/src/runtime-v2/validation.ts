@@ -83,10 +83,10 @@ export function parseRuntimeEventV2(value: unknown): RuntimeEventV2 {
   } as const;
   switch (input.kind) {
     case "tool.started":
-      return { ...base, kind: input.kind, toolCallId: text(input.toolCallId, "toolCallId"), toolName: text(input.toolName, "toolName") };
+      return { ...base, kind: input.kind, toolCallId: text(input.toolCallId, "toolCallId"), ...(input.parentToolCallId === undefined ? {} : { parentToolCallId: text(input.parentToolCallId, "parentToolCallId") }), toolName: text(input.toolName, "toolName") };
     case "tool.finished":
       if (input.outcome !== "succeeded" && input.outcome !== "failed") throw new Error("Invalid tool outcome");
-      return { ...base, kind: input.kind, toolCallId: text(input.toolCallId, "toolCallId"), toolName: text(input.toolName, "toolName"), outcome: input.outcome };
+      return { ...base, kind: input.kind, toolCallId: text(input.toolCallId, "toolCallId"), ...(input.parentToolCallId === undefined ? {} : { parentToolCallId: text(input.parentToolCallId, "parentToolCallId") }), toolName: text(input.toolName, "toolName"), outcome: input.outcome };
     case "result.published":
       if (typeof input.hasStructuredOutput !== "boolean") throw new Error("Invalid result structured-output marker");
       return { ...base, kind: input.kind, publicationId: text(input.publicationId, "publicationId"), hasStructuredOutput: input.hasStructuredOutput };

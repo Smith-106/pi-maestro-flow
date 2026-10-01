@@ -75,7 +75,7 @@ export interface SingleResult {
     /** Resolved task cwd used for durable result projection. */
     originCwd?: string;
     durationMs: number;
-    /** Number of child tool completions observed before this result settled. */
+    /** All observed execution ends, including nested calls and failed executions; not nestedCalls summary counts. */
     toolCount?: number;
     /** Whether the child process remains available for teammate-send after this turn. */
     wakeable?: boolean;
@@ -128,6 +128,9 @@ export type AgentActivity = "running" | "sleeping";
 export type AgentRunPhase = "waiting-dependency" | "waiting-capacity" | "starting" | "restoring" | "prompting" | "tool-execution" | "result-ready" | "retrying" | "compacting" | "continuing" | "settling";
 /** One recent tool call entry in progress telemetry; `argsPreview` is optional. */
 export interface RecentToolInfo {
+    /** Exact runtime call identity; absent only for legacy producers. */
+    toolCallId?: string;
+    parentToolCallId?: string;
     name: string;
     status: string;
     /** Redacted one-line argument summary emitted by the child; absent when nothing informative survived. */
@@ -146,6 +149,7 @@ export interface AgentProgress {
     /** Current turn state; absent until the runtime emits turn identity. */
     turn?: AgentTurnSnapshot;
     recentTools: RecentToolInfo[];
+    /** All execution ends (including nested/failed); per-turn model-call diagnostics use a separate count. */
     toolCount: number;
     tokens: number;
     inputTokens?: number;
@@ -179,6 +183,7 @@ export interface AgentProgressSnapshot {
     startedAt?: string;
     completedAt?: string;
     recentTools?: RecentToolInfo[];
+    /** All execution ends, including nested calls; absent on legacy producers. */
     toolCount?: number;
     tokens?: number;
     inputTokens?: number;

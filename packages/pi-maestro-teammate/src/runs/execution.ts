@@ -191,6 +191,7 @@ import {
   REMOTE_WORKERS,
 } from "../backends/registry-host.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
+import { assertVirtualChildExtensionRegistered } from "./native-child.ts";
 import type {
   AttemptOutcome,
   BackendCapabilities,
@@ -211,10 +212,11 @@ export {
   resolveAgentCacheRetention,
   hasRpcTurnSidecar,
   sendRpcMessage,
+  sendRpcMessageWithReceipt,
   sendChildIpcMessage,
   dispatchChildIpcMessage,
 } from "./pi-subprocess-attempt.ts";
-export type { RpcMessageMode } from "./pi-subprocess-attempt.ts";
+export type { RpcMessageMode, RpcInputDisposition, RpcReceipt } from "./pi-subprocess-attempt.ts";
 
 /** Provider identity of a `provider/model` selector, or undefined when unparsable. */
 function providerOf(model: string): string | undefined {
@@ -594,9 +596,12 @@ function progressTools(value: unknown): RecentToolInfo[] {
   const tools: RecentToolInfo[] = [];
   for (const entry of value) {
     if (typeof entry !== "object" || entry === null) continue;
-    const { name, status, argsPreview } = entry as Record<string, unknown>;
+    const { name, status, argsPreview, toolCallId, parentToolCallId } = entry as Record<string, unknown>;
     if (typeof name !== "string" || typeof status !== "string") continue;
-    tools.push({ name, status, ...(typeof argsPreview === "string" ? { argsPreview } : {}) });
+    tools.push({ name, status, ...(typeof argsPreview === "string" ? { argsPreview } : {}),
+      ...(typeof toolCallId === "string" ? { toolCallId } : {}),
+      ...(typeof parentToolCallId === "string" ? { parentToolCallId } : {}),
+    });
   }
   return tools;
 }
@@ -1333,6 +1338,10 @@ async function runSingleTeammateV1(
           validateBackendModelSpecifier(candidate);
           continue;
         }
+        // Native virtual selections require explicit router inheritance, not a
+        // physical-model catalog fallback. Actual child-version proof follows
+        // at the subprocess launch boundary.
+        if (assertVirtualChildExtensionRegistered(candidate, options.virtualModelIds)) continue;
         candidates[index] = resolveModelSpecifier(candidate, options.modelCapabilities);
       }
       candidates.splice(0, candidates.length, ...new Set(candidates));

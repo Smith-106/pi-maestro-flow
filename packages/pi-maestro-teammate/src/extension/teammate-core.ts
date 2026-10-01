@@ -695,7 +695,7 @@ export function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): v
 
 export type TeammateRuntimeOptions = Pick<
   RunTeammateOptions,
-  "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"
+  "spawnChildProcess" | "childPiVersion" | "virtualModelIds" | "resultReadyGraceMs" | "foregroundMaxRunMs"
 > & {
   /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
   onRunOptionsCreated?: (options: RunTeammateOptions) => void;

@@ -38,6 +38,19 @@ export {
   WINDOW_THREAD_EVENT,
 } from "../../sessions/session-core.ts";
 
+/** Live child execution hooks. Full results belong here, not the bounded nestedCalls transcript. */
+export const TEAMMATE_TOOL_EXECUTION_EVENT = "teammate:tool-execution" as const;
+export interface TeammateToolExecutionEvent {
+  correlationId: string;
+  type: string;
+  toolCallId?: string;
+  parentToolCallId?: string;
+  toolName?: string;
+  result?: unknown;
+  complete?: boolean;
+  [key: string]: unknown;
+}
+
 /** Monitor tool exposure lifecycle emitted after the active variant changes. */
 export const MONITOR_TOOL_EXPOSURE_EVENT = "teammate:monitor-tool-exposure" as const;
 export interface MonitorToolExposureEventV1 {
@@ -63,6 +76,8 @@ export interface TeammateModelSessionEventV1 extends TeammateModelSessionQueryEv
 
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
+  toolCallId?: string;
+  parentToolCallId?: string;
   name: string;
   status: string;
 }

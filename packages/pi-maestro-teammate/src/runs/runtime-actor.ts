@@ -41,7 +41,7 @@ export class AgentRunRuntimeActor {
   #activeProcesses = 0;
   #reclamationIndex = 0;
   #lastChildClose: ChildCloseDetails | undefined;
-  readonly #toolStates = new Map<number, string>();
+  readonly #toolStates = new Map<string, string>();
   readonly #published = new Set<string>();
   readonly #settled = new Set<string>();
   readonly #pendingReclamationEvents: RuntimeEventDraftV2[] = [];
@@ -118,6 +118,13 @@ export class AgentRunRuntimeActor {
           this.progressAfterV1(progress);
         }
       },
+      onChildEvent: (event) => {
+        try {
+          v1.onChildEvent?.(event);
+        } finally {
+          this.liveToolEventAfterV1(event);
+        }
+      },
       onChildSpawned: (stdin, sendControl, sessionDir, correlationId, generation) => {
         try {
           v1.onChildSpawned?.(stdin, sendControl, sessionDir, correlationId, generation);
@@ -145,30 +152,48 @@ export class AgentRunRuntimeActor {
     };
   }
 
+  private liveToolEventAfterV1(event: Record<string, unknown>): void {
+    if ((event.type !== "tool_execution_start" && event.type !== "tool_execution_end")
+      || typeof event.toolCallId !== "string" || typeof event.toolName !== "string") return;
+    const status = event.type === "tool_execution_start" ? "running" : event.isError === true ? "failed" : "completed";
+    if (this.#toolStates.get(event.toolCallId) === status) return;
+    this.#toolStates.set(event.toolCallId, status);
+    this.#appendAdvisory(adaptPiRuntimeSignalV2({
+      type: event.type,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      ...(typeof event.parentToolCallId === "string" ? { parentToolCallId: event.parentToolCallId } : {}),
+      ...(event.isError === undefined ? {} : { isError: event.isError === true }),
+    }, this.#context()), "live tool commit");
+  }
+
   progressAfterV1(progress: AgentProgress): void {
     const events: RuntimeEventDraftV2[] = [];
     const baseIndex = Math.max(0, progress.toolCount - progress.recentTools.length);
     for (const [offset, tool] of progress.recentTools.entries()) {
       const index = baseIndex + offset;
-      const previous = this.#toolStates.get(index);
+      const toolCallId = tool.toolCallId ?? `${this.#correlationId}:tool:${index + 1}`;
+      const previous = this.#toolStates.get(toolCallId);
       if (previous === tool.status) continue;
       const context = this.#context(progress.lastActivityAt);
       if (previous === undefined) {
         events.push(...adaptPiRuntimeSignalV2({
           type: "tool_execution_start",
-          toolCallId: `${this.#correlationId}:tool:${index + 1}`,
+          toolCallId,
+          ...(tool.parentToolCallId === undefined ? {} : { parentToolCallId: tool.parentToolCallId }),
           toolName: tool.name,
         }, context));
       }
       if (isFinishedToolStatus(tool.status)) {
         events.push(...adaptPiRuntimeSignalV2({
           type: "tool_execution_end",
-          toolCallId: `${this.#correlationId}:tool:${index + 1}`,
+          toolCallId,
+          ...(tool.parentToolCallId === undefined ? {} : { parentToolCallId: tool.parentToolCallId }),
           toolName: tool.name,
           isError: isFailedToolStatus(tool.status),
         }, context));
       }
-      this.#toolStates.set(index, tool.status);
+      this.#toolStates.set(toolCallId, tool.status);
     }
     this.#appendAdvisory(events, "progress commit");
   }

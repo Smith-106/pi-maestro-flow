@@ -11,6 +11,7 @@
  * types — a malformed answer fails the call so the engine can fall back.
  */
 
+import type { AuthOperationOptions, ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult, ModelsClassifierOptions } from "@earendil-works/pi-ai";
 import type {
   JevAnswer,
   JevAnswers,
@@ -112,6 +113,47 @@ export function parseJevResponse(payload: unknown, questions: JevQuestions): Jev
   return {
     ...(typeof body.model === "string" && body.model ? { model: body.model } : {}),
     answers,
+  };
+}
+
+export interface ClassifierRuntime {
+  getAvailableOfType(type: "classifier", provider?: string, options?: AuthOperationOptions): Promise<readonly ClassifierModel<ClassifierApi>[]>;
+  getModelOfType(type: "classifier", provider: string, id: string): ClassifierModel<ClassifierApi> | undefined;
+  classify(model: ClassifierModel<ClassifierApi>, context: ClassifierContext, options?: ModelsClassifierOptions): Promise<ClassifierResult>;
+}
+
+export function createNativeJevClient(runtime: ClassifierRuntime, options: Pick<JevClientOptions, "endpoint" | "model" | "timeoutMs">): JevClient {
+  return {
+    async decide(request) {
+      const signal = AbortSignal.timeout(Math.max(1, options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS));
+      const provider = options.endpoint;
+      const available = await runtime.getAvailableOfType("classifier", options.model?.includes("/") ? undefined : provider, { signal });
+      const reference = options.model;
+      const slash = reference?.indexOf("/") ?? -1;
+      const model = reference
+        ? (slash > 0
+          ? runtime.getModelOfType("classifier", reference.slice(0, slash), reference.slice(slash + 1))
+          : available.find((entry) => entry.id === reference))
+        : available[0];
+      if (!model) throw new Error("Native classifier unavailable (no matching authenticated classifier model)");
+      const questions: ClassifierContext["questions"] = {};
+      for (const [id, question] of Object.entries(request.questions)) {
+        questions[id] = question.type === "noul"
+          ? { type: "bool", instructions: question.instructions, criteria: { true: question.criteria?.true ?? "Yes", false: question.criteria?.false ?? "No" } }
+          : question.type === "score"
+            ? { ...question, criteria: [...question.criteria] }
+            : question;
+      }
+      const result = await runtime.classify(model, { state: { text: request.state }, questions }, { signal });
+      if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Native classifier ${result.stopReason}`);
+      const answers: Record<string, unknown> = {};
+      for (const [id, answer] of Object.entries(result.answers)) {
+        answers[id] = answer.type === "bool" ? { type: "noul", noul: answer.probability } : answer;
+      }
+      const parsed = parseJevResponse({ model: `${result.provider}/${result.model}`, answers }, request.questions);
+      if (!parsed) throw new Error("Native classifier response did not match the requested question schema");
+      return parsed;
+    },
   };
 }
 

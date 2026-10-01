@@ -13,8 +13,8 @@ export interface RuntimeAdapterContextV2 {
 }
 
 export type PiRuntimeSignalV2 =
-  | { type: "tool_execution_start"; toolCallId: string; toolName: string }
-  | { type: "tool_execution_end" | "tool_end"; toolCallId: string; toolName: string; isError?: boolean }
+  | { type: "tool_execution_start"; toolCallId: string; parentToolCallId?: string; toolName: string }
+  | { type: "tool_execution_end" | "tool_end"; toolCallId: string; parentToolCallId?: string; toolName: string; isError?: boolean }
   | { type: "result_published"; publicationId: string; hasStructuredOutput?: boolean }
   | { type: "agent_settled"; outcome: "completed" | "failed" | "cancelled" | "lost"; error?: string }
   | { type: "process_reclaimed"; processId: string; exitCode: number | null; signal: string | null }
@@ -45,13 +45,14 @@ export function adaptPiRuntimeSignalV2(
   const event = base(context);
   switch (signal.type) {
     case "tool_execution_start":
-      return [{ ...event, kind: "tool.started", toolCallId: signal.toolCallId, toolName: signal.toolName }];
+      return [{ ...event, kind: "tool.started", toolCallId: signal.toolCallId, ...(signal.parentToolCallId === undefined ? {} : { parentToolCallId: signal.parentToolCallId }), toolName: signal.toolName }];
     case "tool_execution_end":
     case "tool_end":
       return [{
         ...event,
         kind: "tool.finished",
         toolCallId: signal.toolCallId,
+        ...(signal.parentToolCallId === undefined ? {} : { parentToolCallId: signal.parentToolCallId }),
         toolName: signal.toolName,
         outcome: signal.isError ? "failed" : "succeeded",
       }];

@@ -24,8 +24,11 @@
  */
 
 import { createHash } from "node:crypto";
+import { getPiFeatureOwner } from "pi-maestro-settings-core/v1";
 import {
   createJevClient,
+  createNativeJevClient,
+  type ClassifierRuntime,
   resolveJevEndpoint,
   type JevClient,
   type JevClientOptions,
@@ -44,6 +47,8 @@ import type {
 export interface ClassifierConfig {
   /** Master switch. When false, every call is L0-only regardless of domain modes. */
   enabled: boolean;
+  /** Explicit host version for host-free callers; unknown hosts cannot use HTTP. */
+  hostVersion?: string;
   /** Preferred endpoint; when absent, inferred from which API key env exists. */
   endpoint?: JevEndpoint;
   /** Explicit API key; when absent, read from the endpoint's env var. */
@@ -87,14 +92,42 @@ const DEFAULT_MAX_CALLS = 30;
 
 let config: ClassifierConfig = { enabled: false };
 let client: JevClient | undefined;
+let hostBinding: { hostVersion: string; runtime: ClassifierRuntime } | undefined;
+let unavailableReason = "Classifier host runtime unavailable";
 let callsUsed = 0;
 const registry = new Map<string, ClassifyDomain<string, unknown>>();
 const cache = new Map<string, { response: JevResponse; at: number }>();
+
+/** Bind only the current process's host facade, never a child/remote runtime. */
+export function bindClassifierRuntime(binding: { hostVersion: string; runtime: ClassifierRuntime }): void {
+  hostBinding = binding;
+  configureClassifier(config);
+}
+
+export function unbindClassifierRuntime(runtime: ClassifierRuntime): void {
+  if (hostBinding?.runtime !== runtime) return;
+  hostBinding = undefined;
+  client = undefined;
+  cache.clear();
+  unavailableReason = "Classifier host runtime unavailable";
+}
 
 /** Inject classifier configuration (host loads `.pi/classifier.json` / env). */
 export function configureClassifier(next: ClassifierConfig): void {
   config = { ...next };
   callsUsed = 0;
+  cache.clear();
+  const runtime = hostBinding?.runtime;
+  const owner = getPiFeatureOwner(hostBinding?.hostVersion ?? next.hostVersion, !!runtime && typeof runtime.classify === "function" && typeof runtime.getAvailableOfType === "function" && typeof runtime.getModelOfType === "function");
+  client = undefined;
+  unavailableReason = "Classifier host runtime unavailable";
+  if (!config.enabled) return;
+  if (owner === "native" && runtime) {
+    client = createNativeJevClient(runtime, { endpoint: next.endpoint ?? "typesafe", model: next.model, timeoutMs: next.timeoutMs });
+    return;
+  }
+  if (owner !== "legacy") return;
+  unavailableReason = "Legacy JEV client unavailable (missing API key)";
   const resolved = next.apiKey?.trim()
     ? { endpoint: next.endpoint ?? "typesafe", apiKey: next.apiKey.trim() }
     : resolveJevEndpoint(next.endpoint);
@@ -118,6 +151,8 @@ export function classifierConfig(): ClassifierConfig {
 export function resetClassifierForTest(): void {
   config = { enabled: false };
   client = undefined;
+  hostBinding = undefined;
+  unavailableReason = "Classifier host runtime unavailable";
   callsUsed = 0;
   registry.clear();
   cache.clear();
@@ -185,7 +220,7 @@ function degraded<D extends string, I>(
 }
 
 function cacheKey(domain: ClassifyDomain<string, unknown>, state: string): string {
-  const questions = Object.keys(domain.questions()).sort().join(",");
+  const questions = JSON.stringify(domain.questions());
   return createHash("sha256")
     .update(`${domain.name}${config.model ?? ""}${questions}\0${state}`)
     .digest("hex");
@@ -205,7 +240,7 @@ async function jevDecide<D extends string, I>(
   domain: ClassifyDomain<D, I>,
   state: string,
 ): Promise<JevResponse> {
-  if (!client) throw new Error("JEV client unavailable (disabled or missing API key)");
+  if (!client) throw new Error(unavailableReason);
   if (callsUsed >= (config.maxCallsPerSession ?? DEFAULT_MAX_CALLS)) {
     throw new Error("JEV session call budget exhausted");
   }
