@@ -868,27 +868,50 @@ export function appendBoundedTranscriptMessage(
 
 export function createUtf8LineDecoder(
   maxBufferedBytes = EXECUTION_BUFFER_LIMITS.lineBytes,
+  onOverflow?: (info: { receivedBytes: number; maxBytes: number; prefix: string }) => void,
+  onLine?: (line: string) => void,
 ): Utf8LineDecoder {
   const decoder = new StringDecoder("utf8");
   let buffered = "";
+  let receivedBytes = 0;
+  let prefix = "";
+  let overflowReported = false;
+  const append = (text: string): void => {
+    receivedBytes += Buffer.byteLength(text);
+    if (Buffer.byteLength(prefix) < 256) prefix = truncateUtf8Head(prefix + text.slice(0, 256), 256);
+    buffered = appendUtf8Tail(buffered, text, maxBufferedBytes);
+    if (!overflowReported && receivedBytes > maxBufferedBytes) {
+      overflowReported = true;
+      onOverflow?.({ receivedBytes, maxBytes: maxBufferedBytes, prefix });
+    }
+  };
+  const emit = (lines: string[]): void => {
+    const line = buffered.endsWith("\r") ? buffered.slice(0, -1) : buffered;
+    if (onLine) onLine(line);
+    else lines.push(line);
+    buffered = "";
+    receivedBytes = 0;
+    prefix = "";
+    overflowReported = false;
+  };
   return {
     write(chunk: Buffer): string[] {
       const text = decoder.write(chunk);
       const lines: string[] = [];
       let start = 0;
       for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
-        const line = appendUtf8Tail(buffered, text.slice(start, newline), maxBufferedBytes);
-        lines.push(line.endsWith("\r") ? line.slice(0, -1) : line);
-        buffered = "";
+        append(text.slice(start, newline));
+        emit(lines);
         start = newline + 1;
       }
-      buffered = appendUtf8Tail(buffered, text.slice(start), maxBufferedBytes);
+      append(text.slice(start));
       return lines;
     },
     end(): string[] {
-      const tail = appendUtf8Tail(buffered, decoder.end(), maxBufferedBytes);
-      buffered = "";
-      return tail ? [tail.endsWith("\r") ? tail.slice(0, -1) : tail] : [];
+      append(decoder.end());
+      const lines: string[] = [];
+      if (buffered) emit(lines);
+      return lines;
     },
   };
 }

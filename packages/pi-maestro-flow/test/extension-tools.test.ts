@@ -424,6 +424,47 @@ test("session_compact_failed settles only the extension compaction that owns the
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
+test("root and teammate Todo tools explain URI constraints and return actionable schema errors", async () => {
+  for (const child of [false, true]) {
+    const tools: ToolDefinition[] = [];
+    const api = new Proxy({} as ExtensionAPI, {
+      get(_target, property) {
+        if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+        if (property === "getAllTools") return () => tools.map((tool) => ({ name: tool.name, description: tool.description }));
+        if (property === "getActiveTools") return () => tools.map((tool) => tool.name);
+        if (property === "events") return { on: () => () => undefined, emit: () => undefined };
+        return () => undefined;
+      },
+    });
+    const previous = process.env.PI_TEAMMATE_CHILD;
+    try {
+      if (child) process.env.PI_TEAMMATE_CHILD = "1";
+      else delete process.env.PI_TEAMMATE_CHILD;
+      registerMaestroExtension(api);
+    } finally {
+      if (previous === undefined) delete process.env.PI_TEAMMATE_CHILD;
+      else process.env.PI_TEAMMATE_CHILD = previous;
+    }
+    const todo = tools.find((tool) => tool.name === "todo");
+    assert.ok(todo);
+    assert.match(todo.description, /agent:\/\/<id>/);
+    assert.match(todo.description, /session:\/\/<sessionId>\/entry\/<entryId>/);
+    assert.match(todo.description, /handoff\.files\[\]\.path/);
+    assert.match(todo.description, /not a shell command/);
+    assert.match(JSON.stringify(todo.parameters), /"pattern"/);
+    const result = await todo.execute("invalid-resource", {
+      action: "update", id: "4",
+      resourceUris: ["agent://p1", "agent://p2", "agent://p3", "src/tools/todo.ts"],
+    }, undefined, undefined, { cwd: "" } as ExtensionContext);
+    assert.equal(result.isError, true);
+    const text = result.content.find((content) => content.type === "text");
+    assert.ok(text?.type === "text");
+    assert.match(text.text, /\/resourceUris\/3/);
+    assert.match(text.text, /received "src\/tools\/todo.ts"/);
+    assert.match(text.text, /handoff\.files\[\]\.path/);
+  }
+});
+
 test("extension registers Board, LSP, browser, host-owned discovery, and the Gateway command", async () => {
   const tools: ToolDefinition[] = [];
   const active: string[] = [];
@@ -579,6 +620,15 @@ test("extension registers Board, LSP, browser, host-owned discovery, and the Gat
     "  ✓ ask 2 questions · 2 answers",
     "1. First question? → Alpha",
     "2. Second question? → Beta — with detail",
+  ]);
+
+  const timedAskResult = { content: [{ type: "text", text: "machine" }], details: {
+    answers: [], recommendations: [{ questionIndex: 1, question: "Second question?", selected: ["Beta"], source: "timeout", timeoutMs: 60_000 }],
+  } };
+  const timedLines = renderAskResult(timedAskResult, { expanded: true, isPartial: false }, theme, { args: askArgs }).render(120).map((line) => line.trimEnd());
+  assert.deepEqual(timedLines, [
+    "  ✓ ask 2 questions · 0 answers · 1 machine recommendation(s)",
+    "2. Second question? → [timeout recommendation] Beta",
   ]);
 
   const goalTool = tools.find((tool) => tool.name === "goal");
@@ -1238,16 +1288,39 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.match(settledFailureNotifications[0] ?? "", /Child settled context compaction failed/);
 });
 
-test("intelligence shutdown closes browser entries before the process-owned bridge and contains cleanup failures", async () => {
+test("intelligence shutdown closes browser entries before an exclusively owned bridge", async () => {
   const calls: string[] = [];
   await shutdownIntelligenceTools({
     lsp: { async shutdown() { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push("lsp"); } },
-    browser: { async closeAll() { calls.push("browser"); throw new Error("close failed"); } },
+    browser: { async closeAll() { calls.push("browser"); return 1; } },
     bridge: { async shutdown() { calls.push("bridge"); } },
     computerUse: { async shutdown() { calls.push("computer_use"); } },
   }, 100);
   assert.deepEqual([...calls].sort(), ["bridge", "browser", "computer_use", "lsp"]);
   assert.ok(calls.indexOf("bridge") > calls.indexOf("browser"), "owned extension tabs must close before bridge shutdown");
+});
+
+test("intelligence shutdown contains cleanup failure without terminating a bridge that still owns resources", async () => {
+  const calls: string[] = [];
+  await shutdownIntelligenceTools({
+    lsp: { async shutdown() { calls.push("lsp"); } },
+    browser: { async closeAll() { calls.push("browser"); throw new Error("close failed"); } },
+    bridge: { async shutdown() { calls.push("bridge"); } },
+  }, 100);
+  assert.deepEqual(calls.sort(), ["browser", "lsp"]);
+});
+
+test("browser shutdown captures outgoing host identity before awaits for SDK quit/reload/new/resume/fork reasons", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const start = source.indexOf('pi.on("session_shutdown", async (event, ctx) => {');
+  const shutdown = source.slice(start, source.indexOf('pi.on("session_before_compact"', start));
+  assert.match(shutdown, /shutdownIntelligenceTools\(undefined, 5_000, browserHostSessionId\(ctx\)\)/);
+  assert.ok(shutdown.indexOf("const intelligenceCleanup") < shutdown.indexOf("await disposeTeammateSessionRegistrations"));
+  assert.match(shutdown, /await intelligenceCleanup/);
+  assert.doesNotMatch(shutdown, /await shutdownIntelligenceTools\(\)/);
+  const types = readFileSync(new URL("./core/extensions/types.d.ts", import.meta.resolve("@earendil-works/pi-coding-agent")), "utf8");
+  const event = types.slice(types.indexOf("export interface SessionShutdownEvent"), types.indexOf("export interface SessionShutdownEvent") + 350);
+  assert.match(event, /reason: "quit" \| "reload" \| "new" \| "resume" \| "fork"/);
 });
 
 function statuslessWorkflowAttachSnapshot(

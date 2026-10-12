@@ -26,11 +26,12 @@ import {
   type TodoActorRef,
   type TodoContext,
 } from "../src/tools/todo.ts";
-import { TodoModelParams, TodoToolParams } from "../src/extension/schemas.ts";
+import { formatTodoArgumentError, TodoModelParams, TodoToolParams } from "../src/extension/schemas.ts";
 import {
   TODO_GET_FIELDS,
   TODO_GET_MAX_LIMIT,
   cloneTodoHandoff,
+  normalizeTodoResourceUris,
   normalizeTodoHandoff,
   readTodoHandoff,
   type TodoHandoffInput,
@@ -1922,6 +1923,71 @@ test("todo handoff migrates to undefined for legacy and malformed persisted stat
   }
 });
 
+test("todo resource URI schemas match runtime formats across single and batch actions", () => {
+  const valid = [
+    "agent://publication-1", "agent://publication-1/findings/0/path", "AGENT://publication-1",
+    "session://s1/entry/e1", "SESSION://s1/entry/e1", "pr://42", "pr://owner/repo/42",
+    "pr://owner/repo/42/diff", "pr://owner/repo/42/files", "issue://42", "issue://owner/repo/42",
+    "skill://maestro", "skill://nested/name", "rule://agents", "rule://nested/name",
+    " \t agent://publication-1 \r\n", "\u00a0session://s1/entry/e1\u00a0", "rule://规则",
+    "agent://publication-1/", "agent://publication-1/../legacy", "skill://name with spaces",
+  ];
+  const invalid = [
+    "src/tools/todo.ts", "D:/evidence.txt", "file:///D:/evidence.txt", "https://example.com",
+    "artifact://id", "session://s1", "session://s1/entry/", "session://s1/entry/e1/extra",
+    "session://s1/Entry/e1", "agent://", "agent://..", "agent://.. \n", "agent://   ",
+    "agent://p%2Fid", "agent://p%5cid", "agent://p\\id", "agent://p\nid", "agent://p\u2028id",
+    "pr://owner/repo/not-a-number", "pr://42/files", "issue://owner/repo/42/files",
+    "skill://../secret", "skill://name/.. \t", "skill://name/", "skill://name/   ",
+    "rule://", "rule://name//other", "rule://name/\u0000other", " ",
+  ];
+  for (const [uris, expected] of [[valid, true], [invalid, false]] as const) {
+    for (const uri of uris) {
+      if (expected) assert.deepEqual(normalizeTodoResourceUris([uri]), [uri.trim()]);
+      else assert.throws(() => normalizeTodoResourceUris([uri]), /resourceUris\[0\]/);
+      const requests = [
+        { action: "create", subject: "Test", resourceUris: [uri] },
+        { action: "update", id: "4", resourceUris: [uri] },
+        { action: "advance", id: "4", summary: "Done", resourceUris: [uri] },
+        { action: "create", tasks: [{ subject: "Test", resourceUris: [uri] }] },
+        { action: "update", updates: [{ id: "4", resourceUris: [uri] }] },
+      ];
+      for (const request of requests) {
+        for (const schema of [TodoModelParams, TodoToolParams]) {
+          assert.equal(Check(schema, request), expected, JSON.stringify(request));
+        }
+      }
+    }
+  }
+});
+
+test("todo resource URI argument errors identify single and batch fields with repair guidance", () => {
+  const resourceUris = ["agent://p1", "agent://p2", "agent://p3", "src/tools/todo.ts"];
+  const requests = [
+    [{ action: "update", id: "4", resourceUris }, "/resourceUris/3"],
+    [{ action: "create", tasks: [{ subject: "Test", resourceUris }] }, "/tasks/0/resourceUris/3"],
+    [{ action: "update", updates: [{ id: "4", resourceUris }] }, "/updates/0/resourceUris/3"],
+  ] as const;
+  for (const [request, path] of requests) {
+    const message = formatTodoArgumentError(request);
+    assert.ok(message.includes(path), message);
+    assert.ok(message.includes('"src/tools/todo.ts"'), message);
+    assert.match(message, /must be a structurally valid resource URI/);
+    assert.doesNotMatch(message, /must match pattern/);
+    assert.ok(message.length < 1000, "repair guidance must not dump the full schema pattern");
+    assert.match(message, /handoff\.files\[\]\.path/);
+    assert.match(message, /session:\/\/<sessionId>\/entry\/<entryId>/);
+    assert.match(message, /summary\/context/);
+  }
+  assert.match(formatTodoArgumentError({ action: "invalid" }), /Invalid todo arguments at \/action/);
+  assert.throws(() => normalizeTodoResourceUris(resourceUris), (error: Error) => {
+    assert.match(error.message, /resourceUris\[3\]/);
+    assert.match(error.message, /received "src\/tools\/todo.ts"/);
+    assert.match(error.message, /handoff\.files\[\]\.path/);
+    return true;
+  });
+});
+
 test("todo resourceUris normalize across create, update, advance, and reload", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-resources-"));
   await mkdir(join(root, ".pi"), { recursive: true });
@@ -1959,6 +2025,17 @@ test("todo resourceUris normalize across create, update, advance, and reload", a
     assert.deepEqual(getVisibleTasks()[0]!.resourceUris, ["pr://owner/repo/1"]);
     await executeTodo({ action: "update", id, resourceUris: [] }, ctx);
     assert.deepEqual(getVisibleTasks()[0]!.resourceUris, []);
+
+    const beforeInvalid = getVisibleTasks()[0]!;
+    const entriesBeforeInvalid = persisted.length;
+    const invalidFourth = await executeTodo({
+      action: "update", id, status: "completed", summary: "Must not commit",
+      resourceUris: ["agent://p1", "agent://p2", "agent://p3", "src/tools/todo.ts"],
+    }, ctx);
+    assert.equal(invalidFourth.isError, true);
+    assert.match(todoText(invalidFourth), /resourceUris\[3\].*received "src\/tools\/todo.ts"/);
+    assert.deepEqual(getVisibleTasks()[0], beforeInvalid);
+    assert.equal(persisted.length, entriesBeforeInvalid);
 
     const rejected = await executeTodo({ action: "update", id, resourceUris: ["http://not-allowed"] }, ctx);
     assert.equal(rejected.isError, true);

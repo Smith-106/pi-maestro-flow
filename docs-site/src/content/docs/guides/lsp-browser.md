@@ -51,14 +51,22 @@ browser 支持命名标签页、截图和页面内 JavaScript。操作前先 `br
 
 默认没有变化：省略 channel/CDP/profile 选择器时使用 `managed` headless。扩展永远不会自动接管；断连也不会 silent fallback。
 
+**v0.33.0 会话归属**：命名 tab 按可信 host session 隔离，在同一会话的多个 turn 间稳定；`status.namedTabs` 与 `close all` 只处理本 scope，不影响其他会话。Bridge discovery 仍为进程共享；操作归属不隔离 cookies/登录态。SOP loading 支持已发布/晋升知识的 hint，但 hint/摘要不代替相关完整 topic 的读取。
+
 | Action | 说明 |
 |--------|------|
 | `open` | 打开或附加命名标签页 |
-| `close` | 关闭/释放标签页（`all:true` 处理全部命名 entry） |
+| `close` | 关闭/释放标签页（`all:true` 仅处理当前 host-session scope 的全部命名 entry） |
 | `run` | 在命名 tab 上执行 host JavaScript |
 | `guide` | 返回 browser SOP registry/index 或指定 topic |
 | `status` | 显式启动/探测 bridge，返回 live 连接和命名 tab 元数据 |
 | `pair` | 仅 paired 模式批准 requestId/code |
+
+### run deadline 与失败诊断（v0.33.0）
+
+managed/profile/CDP 的 `run.timeout` 以秒计（默认 30，最大 300），setup、脚本执行和 postprocessing 共用一个 deadline，不是每个 step 都重置。Puppeteer/tab 等待通常以毫秒计，需留出预算余量；cleanup 可能增加返回延迟。Extension 的 command/execution 等待有界，但 setup/postprocessing 可另加延迟。
+
+失败提供有界 passive 诊断，不自动交互或重放脚本；异常前的动作可能已经发生。Managed timeout 关闭 owned 资源；borrowed profile/CDP 仅断开，页面代码可能继续。不要把调用失败当成应用验收通过或动作停止的证明。
 
 ### Canonical channel
 
@@ -151,6 +159,14 @@ extension run 只支持：
 
 它不是 Puppeteer Page：ElementHandle、request interception、frame event、`tab.observe/click/fill/extract`、upload、OCR/detect 等未实现 API 会确定性报错并列出支持清单。断连不会改用 managed 浏览器或另一个 tab。caller timeout 也不代表已经运行的页面 JavaScript 被强制停止：命令会保持 draining，直到真实 result/error/disconnect terminal；owned tab 只在 terminal 之后关闭。
 
+**中断后的 drain/reopen（v0.33.0）**：`run` 在中断后保持阻断，直到该 entry 所有 command terminal 与 host operation 都 drain。仅 bridge 总计 `drainingCommands: 0` 不足以证明 entry 可复用。随后显式 `open` 同名、不传 url，重新验证现有 fixed tab/generation；draining 时 open 也拒绝，重开保留 tab，绝不重放中断动作。close 是 cleanup，不是取消成功的证明。
+
+```javascript
+browser({ action: "status" }) // 先确认 named entry 和 bridge 的 drain 状态
+// 全部 drain 后重验证原 tab；不是重试此前动作
+browser({ action: "open", name: "daily-extension", app: { channel: "extension" } })
+```
+
 > ⚠️ 扩展可执行页面 JS/raw CDP。paired 的 token 是凭证授权边界；NONE 明确**没有凭证授权**，nonce/loopback/Origin 只是连续性/卫生检查，不防恶意本地进程。安装时还默认启用动态 DNR 规则剥离所有站点的 CSP 响应头。不能接受该风险时不要安装或禁用扩展。详见包内 `optional/BROWSER-BRIDGE-SETUP.md`。
 
 ### live status 与静态安装状态
@@ -167,7 +183,7 @@ status 会显式启动 bridge server，并返回：
 - `bridge.serverInstanceId` / `connectionGeneration`
 - `bridge.drainingCommands`（非零不是空闲/停止证据）
 - ready transport 最新报告的 `bridge.tabCount`
-- `namedTabs[]` 的 `name/channel/ownership/capabilities`
+- 当前可信 host-session scope 的 `namedTabs[]`：`name/channel/ownership/capabilities` 及 entry drain 状态
 
 只有 status 是 live 证据。`/install list` 按当前 authMode 检查历史状态：paired 是 verified marker + 合法 token 配置，NONE 是 `browser-bridge.none/<instance>.ready.json`，明确 authenticated=false；都不代表此刻在线。pairing 本身或单独 port 文件不算 paired installed。
 
@@ -176,7 +192,7 @@ status 会显式启动 bridge server，并返回：
 - 未发现服务：先 status 启动 server；确认扩展已启用/更新后已重载，自定义端口加到 Advanced（填写实际 listeningPort）。
 - NONE authenticated=false：transportReady=true 即正常，不要添加 token/pair。
 - paired 认证失败：比对正确 listener 的未过期 requestId/code，批准后等待独立重连再 status。
-- tab_busy / draining：换未租用的 tab 或等原 owner close/真实 terminal；timeout 不证明页面 JS 停止，不能绕过租约。
+- tab_busy / draining：不能绕过租约，也不能把 timeout 当成页面 JS 停止。中断 entry 等所有 command terminal 与 host operation drain 后，显式 open 同名且不传 url 重验证；open 在 draining 时仍拒绝。
 - unsupported API：按 capability 清单操作，完整 Puppeteer 需求明确改选 managed/profile/cdp。
 - profile 无 DevToolsActivePort：检查目录占用、stderr/企业策略与 Chrome136 限制；关闭默认浏览器不能绕过非默认目录要求。
 
@@ -212,6 +228,7 @@ status 会显式启动 bridge server，并返回：
 | `visible` | Pi 启动进程的可见性；默认 false |
 | `wait_until` | managed/profile/cdp 导航等待策略 |
 | `dialogs` | managed/profile/cdp 对话框策略 |
+| `timeout` | run 的统一执行预算（秒，默认 30，最大 300），不是每步独立预算 |
 
 ## 下一步
 

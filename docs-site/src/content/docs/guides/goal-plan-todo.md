@@ -70,17 +70,25 @@ Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WA
 - `plan-confirm`（或 `/plan approve`）提交计划并恢复 Act 工具；
 - `plan-exit` 放弃计划返回 Act 模式。
 
-### 真人范围化 Plan-auto（v0.32.0）
+### 真人范围化 Plan-auto（v0.33.0）
 
-默认关闭。进入 Plan 后，在**父会话 TUI**手动输入 `/plan-auto on` 或按 `Alt+Shift+A`；`off` 关闭，`status` 查看，无参数切换。只有物理 TUI 提交/快捷键可开启，RPC、模型注入、子代理或历史审计记录不能授予权限。
+默认关闭。在 Act 或 Plan 模式的**父会话 TUI**手动输入 `/plan-auto on` 或按 `Alt+Shift+A`；`off` 关闭，`status` 查看，无参数切换。只有物理 TUI 提交/快捷键可开启，RPC、模型注入、子代理或历史审计记录不能授予权限。
 
-下一次 `plan-confirm` 通过正常 archive/manifest 事务批准精确草稿，并立即执行 **standalone/current**：不继承 Workflow/New Context/decision-document 权限。启用不是立即批准，`plan-update` 仍仅保存，`plan-review` 仍人工。grant 限 session/cwd/Plan cycle/generation；普通压缩和同会话 reset 不重授予，off、新周期、exit/clear、切换/fork/reload/restart/shutdown 会撤销。关闭不终止已开始执行；若批准已提交但 handoff 尚未开始，保留批准并停止自动执行、不静默重试。
+每个 Plan cycle 的 `plan-confirm` 都通过正常 archive/manifest 事务批准精确草稿，并立即执行 **standalone/current**：不继承 Workflow/New Context/decision-document 权限。启用不是立即批准，`plan-update` 仍仅保存，`plan-review` 仍人工。
+
+会话级开关跨 Plan cycle、exit/clear、修订、普通压缩和同会话 `new_context` 保留，但**任务授权不沿用**：新 cycle 绑定新的有界任务材料，手动 exit/clear 使旧任务授权失效。Footer 分别显示 `PLAN-AUTO on`（等待 Plan）、`confirm+ask`（规划）或 `ask`（授权执行）。off、session/cwd 切换、fork、历史导航、reload/restart/shutdown 撤销 grant，绝不从磁盘恢复。关闭不终止已开始执行；若批准已提交但 handoff 尚未开始，保留批准并停止自动执行、不静默重试。
 
 ### 建议性 decision policy（v0.32.0）
 
 人工调用 `/skill:decision-policy` 配置 `.pi/decision-policy.json`，用 host UI 确认精确 staged draft 并 CAS 保存；不能自动调用 Skill 或直接写 policy 代替确认。Ask 与 self-evolve 域支持 `off`、`shadow`（诊断，不抑制人工）、`enforce`（仅已确认规则内的内部建议）。
 
 `backend:auto` 可从可用且 jev 模式的 classifier 回退到预算内 LLM；`classifier` 严格模式没有 classification LLM fallback，`llm` 绕过 classifier。Advice 是另一个有界 LLM 阶段。Plan-auto 不启用 classifier、不改项目 policy；已有项目规则只增加限制。可逆、code/spec 有依据且在授权任务内的内部选择可返回 `decisions`，与真正人工 `answers` 分开并保留 questionIndex；**不是用户答案或批准**。不确定/外部/低置信/模型不可用/预算耗尽、敏感操作、权限、配置、发布、支付、凭证与知识晋升仍交人工。
+
+### Ask-auto 超时建议（v0.33.0）
+
+真人可用 `/auto ask on [seconds]` 开启会话 grant（默认 60 秒）。超时后，尚未回答的安全选项题可采用明确标记 `recommended: true` 的选项：单选须恰好一个，多选采用所有标记项。结果进入 `recommendations`，标记 `source: timeout`，**不是人工 `answers`，也不是批准**；混合批次保留原 `questionIndex`。
+
+Policy classification 优先；外部/不确定/降级决策、human-only 问题、缺失或歧义推荐以及敏感审批不自动确认。开放题无可采用选项，不用此路径代替人工。该建议不授予 Plan、权限、支付、发布或知识晋升授权。
 
 ### 可选远程 Ask / Plan transport（v0.31.3）
 

@@ -40,7 +40,7 @@
 - 🌐 **DSH 直连 SSH 部署** — `mode: ssh` 通过 OpenSSH 在远端主机启动 DeepSeek Harness 运行时：BatchMode 免提示认证、主机密钥指纹预检固定、按请求超时调优告警
 - 🌉 **原生 Gateway 与持久公网入口** — 独立 CLI/TUI 可在无 Pi 环境配置和托管 Gateway；统一 tunnel profile 支持 Cloudflare Quick/Named、实验性 OpenAI Secure 与 Managed OpenSSH Reverse
 - 🎯 **Goal 自主长时目标** — 设定目标与 Token 预算，跨多轮自主循环，完成后由独立验证器审计
-- 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划；支持独立 Plan 模型及默认关闭、真人 TUI 开启的当轮 Plan-auto 预授权（`/plan-auto`）
+- 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划；支持独立 Plan 模型及默认关闭、真人 TUI 开启的会话级 Plan-auto 预授权（`/plan-auto`；跨周期保留开关、每周期更新任务授权）
 - 🛰️ **Pi Cockpit 可视化** — 实时呈现运行中的 teammate 与 todo 计划，内置 9 套主题；Quiet 模式压缩工具输出与思考折叠
 - 🏷️ **终端标题** — Claude Code 风格 Tab 标题 + 可选 LLM 生成会话摘要
 - 🖼️ **Vision 多模态委托** — 纯文本主模型自动激活 `describe_image`，委托多模态模型分析图片（首选/回退/缓存/重试可配）
@@ -75,13 +75,13 @@ teammate({
 
 pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。只需一条命令即可获得全套件：Flow 会作为安装入口自动拉取并注册其余扩展与依赖。
 
-> **v0.32.1：** 依赖修补、SSH PowerShell/UTF-8 加固与子代理压缩恢复；套件为 Flow 0.32.1、Backends 0.1.7、Teammate 2.8.1、Cockpit 0.24.3，引擎要求 `maestro-flow >=0.5.91`。四个 `@dyw1234` fork 的身份、许可及验证范围见 [RELEASE.md](RELEASE.md)。原生验证限 Windows x64 / Node 22.22；最低 Node 与 macOS/Linux 未验证，不代表全平台兼容或整个依赖图无漏洞。
+> **v0.33.0：** 浏览器会话稳定性、范围化自动决策与历史检索分页；套件为 Flow 0.33.0、Backends 0.1.7、Teammate 2.9.0、Cockpit 0.24.3，引擎要求 `maestro-flow >=0.5.91`。四个 `@dyw1234` fork 的身份、许可及验证范围见 [RELEASE.md](RELEASE.md)。原生验证限 Windows x64 / Node 22.22；最低 Node 与 macOS/Linux 未验证，不代表全平台兼容或整个依赖图无漏洞。
 
 **前置条件：** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) 0.99.0（验证基线；0.87–0.98 仅走版本门控的 legacy 兼容路径）
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
-pi install npm:pi-maestro-flow@0.32.1                              # 安装或升级插件（单入口）
+pi install npm:pi-maestro-flow@0.33.0                              # 安装或升级插件（单入口）
 pi list                                                            # 确认 Flow、Teammate 与 Cockpit 均已列出
 ```
 
@@ -129,7 +129,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 | **[OpenAI Secure MCP Tunnel 安装指南](packages/pi-maestro-flow/optional/OPENAI-TUNNEL-SETUP.md)** | 实验性外部 `tunnel-client`、环境变量引用、managed-forward MCP access、验证与回滚 |
 | **[Gateway 命令与 MCP 工具边界](docs/gateway-command-mcp-tool-design.md)** | `/gateway` 管理面、Gateway MCP 控制面与模型侧 `mcp` 工具的职责划分 |
 | **[多设备 Fabric 架构](docs/fabric/README.md)** | Endpoint-first、connection-first 的目标架构及 `pi-maestro-fabric-core` Phase 1 契约基线 |
-| **[发布说明](RELEASE.md)** | v0.32.1：依赖修补与运行时加固 |
+| **[发布说明](RELEASE.md)** | v0.33.0：浏览器会话稳定性与范围化自动决策 |
 | **[浏览器桥接安装指南](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)** | 多监听器、NONE/paired、显式通道、共享登录态与排障 |
 | **[更新说明](docs/UPDATES.md)** | 历史提交变更记录 |
 | **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch · self-evolve 快速上手 |

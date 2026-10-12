@@ -43,6 +43,26 @@ maestro load --type spec --category coding
 - 概念查询与代码符号查询分离；
 - 进入新子系统、连续两次修复失败、或架构决策前，重新搜索。
 
+## 有界会话历史检索（v0.33.0）
+
+历史发现仍先完成 Maestro 知识搜索；无相关命中时才用 `session_history` 的 `workspace_sessions` 查询类似旧工作。转录是证据而非治理知识，必须与当前规范、源码和 live 状态核对。
+
+```javascript
+session_history({ action: "search", scope: "workspace_sessions",
+  query: "browser timeout", mode: "terms", sort: "relevance", limit: 10 })
+// 如 hasMore 为 true，用返回的 nextOffset 作为 offset，保留 query/scope/mode/sort。
+```
+
+- 默认 `mode: "literal"` 为大小写不敏感的连续短语；`terms` 做 NFKC、小写与空白归一化，同一可见 projected entry 必须包含全部去重后的空白分隔词，顺序不限；不做中文分词、正则、模糊、同义词或语义搜索。
+- 默认 `sort: "source"`；`relevance` 优先精确文本/连续短语，再按词跨度更紧的条目排序，同分保留来源顺序。
+- `offset` 为 0-based，`limit <= 20`；`matchCount` 是本次扫描命中总数，`hasMore` / `nextOffset` 表示该扫描的剩余页。末页不因到达页尾而标为截断，除非扫描本身不完整。
+- **每页 fresh-scan live transcripts，不是快照**；历史新增或变化可导致 offset 结果移动。锁定证据时读取返回的精确 `session://<id>/entry/<id>`，不要靠反复搜索恢复同一条。
+- 只返回 active-chain 可见文本；隐藏行、thinking、工具调用参数等仍排除，tool results 需显式 include。
+
+## Classifier 双语与 published SOP hint
+
+Classifier 设置与诊断跟随共享 `zh-CN` / `en` TUI locale，domain/mode 等协议键保留 canonical 拼写；语言切换不改变分类、预算或授权边界。SOP loader 支持已发布知识的 hint，包括晋升条目的 SOP 元数据；浏览器操作前仍须先调用 `browser({ action: "guide" })` 读索引，再按 topic 加载相关完整 SOP，hint/摘要不能替代消费。
+
 ## 知识类型
 
 | 类型 | 分类 | 用途 |

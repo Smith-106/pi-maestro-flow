@@ -1,3 +1,131 @@
+# v0.33.0 — Session-Scoped Browser & Human Auto Controls
+
+## Overview
+
+Flow **0.33.0** and Teammate **2.9.0** add session-scoped browser ownership,
+human-controlled Ask timeout recommendations, persistent session Plan-auto
+preauthorization, and paginated session-history search. Cockpit **0.24.3** and
+all other workspace packages remain unchanged.
+
+## Highlights
+
+- **Browser ownership follows the trusted host session**, not the tool instance
+  or turn. Named tabs persist across turns; status and close-all target only the
+  caller's session. Missing host identity permits guide only. This isolates
+  operation ownership, not shared cookies or login state.
+- **One managed/profile/CDP run deadline** covers setup, execution and
+  postprocessing. Passive failures retain bounded output, operation names,
+  screenshot metadata and unresolved-dialog hints without probing a stalled
+  renderer. Cleanup can add latency; borrowed profile/CDP pages may continue
+  executing after disconnect. Extension interruptions retain draining ownership
+  until terminals settle and explicit open revalidates the same tab/generation.
+  Interrupted actions are never replayed automatically.
+- **Human `/auto ask on [seconds]`** can adopt explicitly recommended safe
+  choices after a timeout (default 60 seconds). Results are machine
+  `recommendations`, never user answers or approval. Human answers/cancellation
+  win; ambiguous choices, policy refusals, sensitive approvals and financial
+  decisions remain human. Teammate relay preserves timeout provenance.
+- **Plan-auto persists across Plan cycles and same-session context resets**,
+  while each cycle receives fresh task authorization. Manual exit invalidates
+  task authority without disabling the human session grant. Session/cwd changes,
+  history navigation, reload and shutdown revoke the grant; no disk or child
+  message can restore it. Automatic execution remains standalone/current.
+- **Session history search** adds `mode:terms`, `sort:relevance` and `offset`.
+  Terms require every normalized whitespace-separated query term in one visible
+  entry; exact phrases and tighter spans rank first. Pagination rescans live
+  transcripts, not a snapshot. FFF candidates do not exclude fresh inventory.
+- **Classifier settings and diagnostics** gain Chinese/English catalogs,
+  themed narrow-terminal rendering and clearer configured/effective values.
+  Published SOP hints can be loaded from canonical content while outer lifecycle
+  and title stay authoritative.
+- **Teammate RPC telemetry** omits repeated image bytes from wire-only event
+  projections while preserving original model/session data, text, errors and
+  structured output. Malformed or oversized JSONL fails immediately and retires
+  the child; a previously published answer is not rewritten by a later corrupt
+  stream. The preload is included in the package and does not intercept ordinary
+  tool subprocess stdout.
+- **SDK maintenance** adds a grouped dependency-update configuration and a
+  read-only compatibility CI workflow. The included HTML example and existing
+  knowledge/SOP snapshots are repository-only changes, not new runtime features.
+
+## Package versions
+
+| Package | Version | Scope |
+|---|---|---|
+| pi-maestro-flow | 0.33.0 | publish |
+| pi-maestro-teammate | 2.9.0 | publish before Flow |
+| pi-cockpit | 0.24.3 | unchanged |
+| pi-maestro-settings-core | 0.2.3 | unchanged |
+| pi-maestro-backend-core | 0.1.5 | unchanged |
+| pi-maestro-backends | 0.1.7 | unchanged |
+| pi-maestro-fabric / pi-maestro-fabric-core | 0.1.0 | unchanged |
+| pi-fluent-tui | 0.1.2 | unchanged |
+| @dyw1234/active-win | 9.0.1 | unchanged |
+| @dyw1234/nut-js / nut-shared / nut-provider-interfaces | 4.2.7 | unchanged |
+
+The engine requirement remains **`maestro-flow >=0.5.91`**; registry latest and
+local upstream both reported **0.5.91** at preflight. Pi validation baseline is
+**0.99.0**, with optional host SDK peers; Node minimum is **22.19.0**.
+
+## Source scope
+
+Relative to **v0.32.1**, this release is prepared as **one release commit**,
+covering **82 files**, approximately **5.8k inserted / 0.9k removed lines**.
+The scope includes the user-approved working-tree changes and release metadata.
+
+## Verification
+
+- **469 selected tests passed**, with no selected skips: Flow changed-boundary
+  tests **343**, Teammate history/relay **42**, browser compiler/deadline/SDK
+  contracts **18**, extension drain/revalidation **13**, Plan lifecycle **53**.
+- Flow and Teammate typechecks, Teammate declaration consistency, and
+  workspace manifest/lock dependency equality passed.
+- All **11 unchanged publishable workspace tarballs** match their registry
+  SHA-1s. Flow and Teammate are bumped rather than republishing changed content
+  under an existing version.
+- The first extension test invocation lacked the TypeScript transform flag;
+  it passed with the correct runner. Two stale browser-message assertions were
+  updated to the new ownership/deadline contract and only those cases reran.
+- Verification is scoped to Windows x64 / Node **22.22.0**. The broad root
+  `test:release` was not run; focused changed-boundary evidence is used instead.
+  Minimum Node, macOS/Linux, credential-dependent integration and model
+  inference are not claimed verified by this release.
+- Documentation `tsc && vite build` passed; Vite reported its existing >500 kB
+  chunk-size advisory. No browser visual check was performed for this copy-only
+  documentation update.
+- RPC/stdout work was explicitly added after the original checks. All **174**
+  targeted projection, decoder, spawning and structured-output cases passed
+  (**643 selected tests total**). Two legacy stdout-diagnostic expectations were
+  updated for immediate protocol failure and rerun individually; the other 172
+  passing cases were reused. Teammate typecheck and declaration consistency
+  passed again after the RPC changes. No selected tests were skipped.
+- Immutable package tarballs passed `npm publish --dry-run`; neither bundles
+  private Pi host SDK/typebox copies. The Teammate preload is present in its
+  tarball. Registry SHA equality and a fresh-home Pi startup smoke are required
+  before tagging.
+
+### Locked artifacts
+
+| Package | Files | Packed / unpacked bytes | SHA-1 |
+|---|---:|---:|---|
+| pi-maestro-teammate@2.9.0 | 488 | 1,244,176 / 5,571,343 | `11f316509f2f9495dfeb3ed6aed35a23677b82bf` |
+| pi-maestro-flow@0.33.0 | 1,167 | 3,835,500 / 14,766,288 | `5cbb2c59fe0beadeb75d955cd2e6dc4d4468fef7` |
+
+## Install / upgrade
+
+```bash
+pi install npm:pi-maestro-flow@0.33.0
+pi list
+```
+
+Close Pi before upgrading and restart afterward. Update preserved local
+Teammate overrides to **2.9.0** explicitly; ordinary managed companion
+registrations migrate automatically.
+
+---
+
+## Historical v0.32.1 notes (not v0.33.0 acceptance)
+
 # v0.32.1 — Dependency Repairs & Runtime Hardening
 
 > Scoped release validation: 268 focused tests passed, with one existing

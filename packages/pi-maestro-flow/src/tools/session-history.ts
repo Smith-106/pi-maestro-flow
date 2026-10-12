@@ -18,7 +18,6 @@ import { Text } from "@earendil-works/pi-tui";
 import {
   MAX_SESSION_HISTORY_FILES,
   MAX_SESSION_HISTORY_MATCHES,
-  MAX_SESSION_HISTORY_OMISSIONS,
   MAX_SESSION_HISTORY_QUERY_CHARS,
   SESSION_HISTORY_INCLUDES,
   SessionHistoryService,
@@ -27,6 +26,7 @@ import {
   type SessionHistoryInventoryEntry,
   type SessionHistoryInventorySource,
   type SessionHistoryOmission,
+  type SessionHistorySearchOptions,
 } from "pi-maestro-teammate/v1/session-history";
 import { toolCallLine, toolResultLine, resultSummary } from "pi-cockpit/src/quiet-tools.ts";
 import {
@@ -74,8 +74,11 @@ export const SessionHistoryParams = Type.Object({
     ),
   ),
   query: Type.Optional(
-    Type.String({ minLength: 1, maxLength: MAX_SESSION_HISTORY_QUERY_CHARS, description: "Literal, case-insensitive search text (required for search)." }),
+    Type.String({ minLength: 1, maxLength: MAX_SESSION_HISTORY_QUERY_CHARS, description: "Search text (required for search); literal phrase by default, or all whitespace-separated terms with mode=terms." }),
   ),
+  mode: Type.Optional(StringEnum(["literal", "terms"] as const, "Search only. Literal is the default; terms uses NFKC, case and whitespace normalization and requires every unique term in one projected entry.")),
+  sort: Type.Optional(StringEnum(["source", "relevance"] as const, "Search only. Source order is the default; relevance ranks exact/continuous phrase, then tightest term span, with source-order ties.")),
+  offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "Search only. Zero-based match offset in a fresh scan; use nextOffset for subsequent pages." })),
   sessionId: Type.Optional(
     Type.String({ minLength: 1, maxLength: 512, description: "Exact session id for read_turn; omitted only for current_session, where the host selects it." }),
   ),
@@ -173,16 +176,7 @@ async function directoryInventory(
   prioritySessionId?: string,
 ): Promise<SessionHistoryInventoryEntry[]> {
   const result: SessionHistoryInventoryEntry[] = [];
-  let entries: Array<{ name: string; isDirectory(): boolean; isSymbolicLink(): boolean }>;
-  try {
-    entries = await readdir(directory, { withFileTypes: true }) as unknown as Array<{
-      name: string;
-      isDirectory(): boolean;
-      isSymbolicLink(): boolean;
-    }>;
-  } catch {
-    return result;
-  }
+  const entries = await readdir(directory, { withFileTypes: true });
   entries.sort((left, right) => {
     if (left.name === priorityFileName) return -1;
     if (right.name === priorityFileName) return 1;
@@ -213,8 +207,10 @@ async function teammateInventory(
       isDirectory(): boolean;
       isSymbolicLink(): boolean;
     }>;
-  } catch {
-    return result;
+  } catch (error) {
+    // No teammate directory exists until the first dispatch.
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return result;
+    throw error;
   }
   let directories = 0;
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name, "en"))) {
@@ -265,6 +261,29 @@ export function createSessionHistoryInventoryProvider(
     }
     return { entries };
   };
+}
+
+/** FFF only prioritizes authorized direct children; its raw-positive subset
+ * never excludes the fresh host inventory. Deduplicate before the one service
+ * scan, preserving current-first and giving older candidates a budget slot. */
+async function prioritizedWorkspaceInventory(
+  ctx: SessionHistoryHostContext,
+  candidates: readonly SessionHistoryInventoryEntry[],
+  signal?: AbortSignal,
+): Promise<{ entries: SessionHistoryInventoryEntry[] }> {
+  const current = currentSessionFile(ctx);
+  if (!current) return { entries: [] };
+  const fresh = await directoryInventory(sessionDirectory(current), signal, basename(current));
+  const key = (path: string): string => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+  const seen = new Set<string>();
+  const entries: SessionHistoryInventoryEntry[] = [];
+  for (const entry of [...fresh.filter((entry) => key(entry.path) === key(current)), ...candidates, ...fresh]) {
+    const pathKey = key(entry.path);
+    if (seen.has(pathKey)) continue;
+    seen.add(pathKey);
+    entries.push(entry);
+  }
+  return { entries };
 }
 
 /** Friendly alias for hosts/tests that prefer an inventory-named function. */
@@ -345,6 +364,26 @@ function boundedOptions(params: Record<string, unknown>): {
   return {
     ...(include === undefined ? {} : { include }),
     ...(limit === undefined ? {} : { limit: limit as number }),
+  };
+}
+
+function searchOptions(params: Record<string, unknown>, action: SessionHistoryAction): Pick<SessionHistorySearchOptions, "mode" | "sort" | "offset"> {
+  if (action !== "search") {
+    for (const key of ["mode", "sort", "offset"]) {
+      if (key in params) throw new TypeError(`${key} is available only for search.`);
+    }
+    return {};
+  }
+  const { mode, sort, offset } = params;
+  if (mode !== undefined && mode !== "literal" && mode !== "terms") throw new TypeError("mode must be literal or terms.");
+  if (sort !== undefined && sort !== "source" && sort !== "relevance") throw new TypeError("sort must be source or relevance.");
+  if (offset !== undefined && (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0)) {
+    throw new TypeError("offset must be a non-negative safe integer.");
+  }
+  return {
+    ...(mode === undefined ? {} : { mode }),
+    ...(sort === undefined ? {} : { sort }),
+    ...(offset === undefined ? {} : { offset }),
   };
 }
 
@@ -467,6 +506,7 @@ export async function executeSessionHistory(
     if (options.inventory === undefined && options.inventoryFactory === undefined && !currentSessionFile(ctx)) {
       throw new Error("The current session transcript is unavailable. Session history cannot be searched or read.");
     }
+    const searchSettings = searchOptions(params, action);
     const compactRecovery = action === "timeline" || action === "read_checkpoint";
     if (compactRecovery && scope !== "current_session") {
       throw new TypeError(`${action} is available only with scope=current_session.`);
@@ -561,21 +601,24 @@ export async function executeSessionHistory(
       ?? createSessionHistoryInventoryProvider(ctx, scope, requestedSessionId);
     let source = fallbackSource;
     let discovery: Record<string, unknown> | undefined;
-    let candidateSearchIncomplete = false;
     let query: string | undefined;
 
-    // FFF is strictly a candidate prefilter. Custom inventories remain the
+    // FFF is strictly a candidate prioritizer. Custom inventories remain the
     // source of truth for tests/hosts that provide their own authorization.
     if (action === "search") {
       query = safeQuery(params.query);
+      if (searchSettings.mode === "terms" && query.normalize("NFKC").trim().length === 0) {
+        throw new TypeError("terms query must contain non-whitespace text.");
+      }
+      discovery = { source: "bounded-inventory" };
       const useAccelerator = scope === "workspace_sessions"
         && options.candidateAccelerator !== undefined
         && options.inventory === undefined
         && options.inventoryFactory === undefined;
       // Projection joins text blocks with newlines that never exist as a
       // contiguous literal in the raw JSONL searched by FFF.
-      if (useAccelerator && query.includes("\n")) {
-        discovery = { accelerator: "fff", source: "bounded-inventory", reason: "projection-sensitive-query" };
+      if (useAccelerator && (searchSettings.mode === "terms" || query.includes("\n"))) {
+        discovery = { accelerator: "fff", source: "bounded-inventory", reason: searchSettings.mode === "terms" ? "terms-query" : "projection-sensitive-query" };
       } else if (useAccelerator) {
         let candidate: Awaited<ReturnType<SessionHistoryFffCandidateAccelerator["search"]>> | undefined;
         try {
@@ -590,15 +633,12 @@ export async function executeSessionHistory(
           && Array.isArray(candidate.entries);
         if (candidate && valid && candidate.available) {
           const authorizedEntries = authorizeSessionHistoryFffCandidates(ctx, candidate.entries);
-          source = { entries: authorizedEntries.slice(0, MAX_SESSION_HISTORY_FILES) };
-          candidateSearchIncomplete = !candidate.complete || authorizedEntries.length > MAX_SESSION_HISTORY_FILES;
-          if (candidateSearchIncomplete) {
-            discovery = {
-              accelerator: "fff",
-              source: "candidates",
-              complete: false,
-            };
-          }
+          source = (inventorySignal) => prioritizedWorkspaceInventory(ctx, authorizedEntries, inventorySignal);
+          discovery = {
+            accelerator: "fff",
+            source: "candidates-and-bounded-inventory",
+            candidateComplete: candidate.complete,
+          };
         } else {
           const diagnostic = candidate?.diagnostic;
           const reason = valid && typeof diagnostic === "string"
@@ -619,21 +659,7 @@ export async function executeSessionHistory(
     if (action === "list_sessions") {
       result = sanitizeResult(await service.list({ ...scanOptions, signal })) as unknown as Record<string, unknown>;
     } else if (action === "search") {
-      const searched = sanitizeResult(await service.search(query!, { ...scanOptions, signal }));
-      result = searched as unknown as Record<string, unknown>;
-      // A raw index can lag appends or miss JSON-encoded text. Verify a
-      // negative candidate result against the fresh authorized inventory.
-      if (searched.matchCount === 0 && source !== fallbackSource) {
-        const verified = sanitizeResult(await new SessionHistoryService(fallbackSource).search(query!, { ...scanOptions, signal }));
-        result = {
-          ...verified,
-          filesRead: searched.filesRead + verified.filesRead,
-          bytesRead: searched.bytesRead + verified.bytesRead,
-          omissions: [...searched.omissions, ...verified.omissions].slice(0, MAX_SESSION_HISTORY_OMISSIONS),
-        };
-        discovery = { accelerator: "fff", source: "bounded-inventory", reason: "no-visible-matches" };
-      }
-      if (candidateSearchIncomplete) result.truncated = true;
+      result = sanitizeResult(await service.search(query!, { ...scanOptions, ...searchSettings, signal })) as unknown as Record<string, unknown>;
       if (discovery) result.discovery = discovery;
     } else {
       const turn = safeTurn(params.turn);
@@ -675,7 +701,7 @@ export function createSessionHistoryTool(
 
 Actions:
 - list_sessions: list validated sessions and exact session:// URIs.
-- search: literal case-insensitive search over visible active-chain text; use one phrase per call, not a keyword list, regex, or quoted search syntax. Each match includes an exact session://<sessionId>/entry/<entryId> URI.
+- search: literal case-insensitive phrase search over visible active-chain text by default. Optional mode=terms applies NFKC, lowercase and whitespace folding, requiring all unique whitespace-separated terms in the same projected entry, in any order (no Chinese word segmentation, regex, embeddings, typos or synonyms). Optional sort=relevance ranks exact text/continuous query phrase, then tighter term spans; ties retain source order. Each match includes an exact session://<sessionId>/entry/<entryId> URI. offset pages the current scan (limit <=20); matchCount is its total, hasMore/nextOffset describe remaining scanned matches. The last page is not truncated unless the scan itself is incomplete. Pages re-scan live transcripts, not a frozen snapshot.
 - read_turn: read one session turn by 1-based turn number (0 is the preamble); current_session uses the host-selected session when sessionId is omitted.
 - timeline: list newest compaction checkpoints for current_session only.
 - read_checkpoint: read one compaction entry by checkpoint id or timeline entry id for current_session only.
@@ -692,7 +718,7 @@ The include categories are user, assistant, visible_custom, compaction, and tool
     promptGuidelines: [
       "Recover from the capsule and live Todo/Goal/Plan/Workflow state first; only when a required current-session fact is absent, use session_history with scope=current_session and the smallest suitable action.",
       "Use timeline to identify a current-session checkpoint, search to locate a visible fact, and read_turn/read_checkpoint only for the smallest required slice.",
-      "Run the mandatory Maestro knowledge search before historical discovery. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions and one literal subject phrase per call.",
+      "Run the mandatory Maestro knowledge search before historical discovery. Only when it completes with no relevant hits, use session_history search with scope=workspace_sessions; default to a literal subject phrase, or explicitly select mode=terms for all-term matching.",
       "To investigate tool errors, include tool_result explicitly; defaults exclude tool output. A zero match count with omissions or truncated=true is not proof the text is absent.",
       "Historical session content is not authoritative knowledge: verify useful findings against current specs, code, configuration, and live state before acting.",
       "Use list_sessions before cross-session read_turn when the exact session id or turn is unknown; preserve exact match URIs for resource reads.",

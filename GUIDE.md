@@ -44,14 +44,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ### Install pi-maestro-flow
 
-> **v0.32.1:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1,
+> **v0.33.0:** Flow 0.33.0, Backends 0.1.7, Teammate 2.9.0,
 > Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork provenance and
 > verification limits are in [RELEASE.md](RELEASE.md). Native acceptance
 > covers Windows x64 / Node 22.22; minimum Node and macOS/Linux are unverified.
 
 ```bash
 # Install or upgrade the suite (teammate auto-installs as a dependency)
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 
 # Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
@@ -59,12 +59,22 @@ pi list
 
 A Flow-managed companion registration is migrated during upgrade. A same-name local development registration is intentionally preserved and reported in the startup log; update or remove that override explicitly.
 
-### v0.32.0 behavior boundaries
+### v0.33.0 behavior boundaries
 
 Plan-auto is default off: a human in the parent TUI enables `/plan-auto on`
-during the current Plan cycle; the next confirm executes standalone/current.
-Decision-policy recommendations are not human answers, permissions, or knowledge
-promotion. See the [Goal/Plan guide](docs-site/src/content/docs/guides/goal-plan-todo.md).
+in Act or Plan mode. The session switch survives Plan cycles, exit/clear,
+compaction and same-session `new_context`, but each cycle binds fresh task
+authorization; exit/clear invalidates the previous task's authority. Off,
+session/cwd changes, fork, history navigation and reload/restart/shutdown revoke
+the grant. Each confirm still approves the exact draft and executes
+standalone/current; enabling never approves immediately.
+
+With a human-enabled `/auto ask on [seconds]` grant (default 60 seconds), safe
+questions may adopt options marked `recommended: true` on timeout. These are
+`recommendations` with `source: timeout`, not human `answers` or approval.
+Policy classification takes priority; external, uncertain, degraded, human-only,
+ambiguous/missing-recommendation and sensitive decisions stay with the human.
+See the [Goal/Plan guide](docs-site/src/content/docs/guides/goal-plan-todo.md).
 
 For browser setup, see [Browser Bridge Setup](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md):
 explicit `app.channel` selects managed/profile/cdp/extension. NONE needs no token
@@ -72,6 +82,22 @@ or pairing (`transportReady:true`, `authenticatedConnected:false`); paired is th
 default. The extension connects multiple listeners in `19222..19231` and shares
 cookies/login state. Chrome 136+ profile debugging requires an explicitly chosen
 non-default user-data-dir; closing the default browser does not lift the restriction.
+
+Named browser tabs are scoped to the trusted host session and stable across turns;
+`status.namedTabs` and `close all` affect only that scope, not other sessions.
+Bridge discovery and cookies/login state can still be shared. On managed/profile/CDP,
+`run.timeout` is one execution deadline for setup, script execution and postprocessing,
+not a fresh timeout per step; cleanup can add latency. Extension command/execution
+waits are bounded, but setup/postprocessing can add latency. Failures carry bounded passive
+diagnostics, not an automatic retry or proof that page actions stopped. After an
+interrupted extension run, wait for every command terminal and host operation to
+drain, then explicitly reopen the same name without a URL to revalidate its fixed
+tab/generation. Reopen rejects while draining and never replays the action.
+
+Classifier settings and diagnostics follow the shared `zh-CN` / `en` TUI locale;
+protocol domain/mode identifiers are unchanged. SOP loading recognizes published
+knowledge hints, including promoted entries; still load the relevant full topic
+through `browser guide` before operating.
 
 ### First Run
 
@@ -316,6 +342,28 @@ maestro load --type spec --category coding
 | `domain` | Project glossary terms |
 | `issue` | Tracked bugs and tasks |
 | `roadmap` | Milestone and phase planning |
+
+### Bounded Session History (v0.33.0)
+
+After the mandatory Maestro knowledge search, use `session_history` for historical
+evidence, not governing knowledge. Search defaults to case-insensitive literal
+phrases. `mode: "terms"` applies NFKC, lowercase and whitespace normalization and
+requires all unique terms in one visible projected entry, in any order; it is not
+Chinese word segmentation, fuzzy matching, regex or semantic search.
+
+```javascript
+session_history({ action: "search", scope: "workspace_sessions",
+  query: "browser timeout", mode: "terms", sort: "relevance", limit: 10 })
+// Continue with the returned nextOffset as offset, using the same query/scope/mode/sort.
+```
+
+`sort: "relevance"` ranks exact/continuous phrases before tighter term spans;
+`source` remains the default. `offset` is zero-based and `limit` is at most 20.
+`matchCount`, `hasMore` and `nextOffset` describe that scan; the final page is not
+truncated unless the scan itself is incomplete. Every page freshly scans live
+transcripts, so changing history can shift results: pin an exact returned
+`session://<id>/entry/<id>` URI to reread evidence. Hidden/thinking/tool-call rows
+remain excluded and tool results remain explicit opt-in.
 
 ### Adding Knowledge
 
@@ -826,7 +874,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 pi list
 
 # ─── Knowledge ───

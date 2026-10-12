@@ -4,25 +4,77 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parse } from "yaml";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(packageRoot, "..", "..");
 const npmCliPath = process.env.npm_execpath
   ?? resolve(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
 const npmCommand = [process.execPath, npmCliPath];
-const piCorePackageVersions = {
-  "@earendil-works/pi-agent-core": "0.99.0",
-  "@earendil-works/pi-ai": "0.99.0",
-  "@earendil-works/pi-coding-agent": "0.99.0",
-  "@earendil-works/pi-tui": "0.99.0",
-  typebox: "1.3.27",
-};
-const piCorePackageNames = Object.keys(piCorePackageVersions);
+const piSdkPackageNames = [
+  "@earendil-works/pi-agent-core",
+  "@earendil-works/pi-ai",
+  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-tui",
+];
+const piCorePackageNames = [...piSdkPackageNames, "typebox"];
 const extensionRoots = [
   packageRoot,
   resolve(packageRoot, "..", "pi-maestro-teammate"),
   resolve(packageRoot, "..", "pi-cockpit"),
 ];
+const extensionManifests = extensionRoots.map((root) =>
+  JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
+);
+const piCorePackageVersions = Object.fromEntries(piCorePackageNames.map((name) =>
+  [name, extensionManifests[0].devDependencies[name]]
+));
+
+test("Pi development baselines stay pinned and aligned while runtime packages remain host-provided", () => {
+  assert.equal(new Set(piSdkPackageNames.map((name) => piCorePackageVersions[name])).size, 1,
+    "Pi SDK packages must be upgraded together");
+  for (const pkg of extensionManifests) {
+    for (const name of piCorePackageNames) {
+      assert.match(pkg.devDependencies[name], /^\d+\.\d+\.\d+$/, `${pkg.name}: ${name} must have an exact stable development pin`);
+      assert.equal(pkg.devDependencies[name], piCorePackageVersions[name], `${pkg.name}: ${name} development baseline differs`);
+      assert.equal(pkg.peerDependencies[name], "*", `${pkg.name}: ${name} must be supplied by the Pi host`);
+      assert.equal(pkg.peerDependenciesMeta[name].optional, true, `${pkg.name}: ${name} must not be auto-installed as a peer`);
+      assert.equal(pkg.dependencies?.[name], undefined, `${pkg.name}: ${name} must not be a runtime dependency`);
+    }
+  }
+});
+
+test("SDK update automation groups only host SDK dependencies and keeps validation read-only", () => {
+  const config = parse(readFileSync(join(repoRoot, ".github", "dependabot.yml"), "utf8"));
+  assert.equal(config.version, 2);
+  assert.equal(config.updates.length, 1);
+  const update = config.updates[0];
+  assert.equal(update["package-ecosystem"], "npm");
+  assert.equal(update.directory, "/", "npm workspaces share the root lockfile");
+  assert.equal(update.schedule.interval, "weekly");
+  assert.equal(update["open-pull-requests-limit"], 1);
+  assert.equal(update["versioning-strategy"], "increase");
+  assert.deepEqual(update.allow.map((entry) => entry["dependency-name"]).sort(), [...piCorePackageNames].sort());
+  for (const name of piSdkPackageNames) {
+    assert.equal(update.allow.find((entry) => entry["dependency-name"] === name)["dependency-type"], "development");
+  }
+  assert.deepEqual(Object.keys(update.groups), ["pi-sdk"]);
+  assert.deepEqual([...update.groups["pi-sdk"].patterns].sort(), [...piCorePackageNames].sort());
+
+  const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "pi-sdk.yml"), "utf8"));
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+  assert.ok(Object.hasOwn(workflow.on, "workflow_dispatch"));
+  for (const path of ["package-lock.json", ".github/dependabot.yml", ".github/workflows/pi-sdk.yml"]) {
+    assert.ok(workflow.on.pull_request.paths.includes(path));
+  }
+  const commands = workflow.jobs.compatibility.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(commands, /npm ci --ignore-scripts/);
+  assert.match(commands, /node --test packages\/pi-maestro-flow\/test\/sdk-resolution-contract\.test\.mjs/);
+  for (const pkg of extensionManifests) {
+    assert.match(commands, new RegExp(`npm --prefix packages/${pkg.name} run typecheck`));
+  }
+  assert.doesNotMatch(commands, /npm (?:update|publish)|gh pr merge|test:release/);
+});
 
 test("installed and locked Pi core packages have supported versions without extraneous entries", () => {
   const lock = JSON.parse(readFileSync(join(repoRoot, "package-lock.json"), "utf8"));

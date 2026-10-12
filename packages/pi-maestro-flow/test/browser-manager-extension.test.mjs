@@ -19,9 +19,11 @@ process.env.PI_BROWSER_BRIDGE_AUTH_MODE = 'none';
 const { browserBridge } = await import('../src/tools/browser/bridge-server.ts');
 const { BrowserManager } = await import('../src/tools/browser/manager.ts');
 const { TeammateBrowserBroker } = await import('../src/teammate/browser-broker.ts');
+const { createBrowserTool } = await import('../src/tools/browser-tool.ts');
+const { browserSessionScopes } = await import('../src/tools/browser/session-scope.ts');
 const source = readFileSync(new URL('../optional/browser-bridge/background.js', import.meta.url), 'utf8');
 const sleep = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(predicate) { for (let i = 0; i < 400; i++) { if (predicate()) return; await sleep(); } throw new Error('condition not reached'); }
+async function until(predicate) { for (let i = 0; i < 400; i++) { if (await predicate()) return; await sleep(); } throw new Error('condition not reached'); }
 function gate() { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; }
 function event() { const listeners = new Set(); return { addListener: (f) => listeners.add(f), removeListener: (f) => listeners.delete(f), emit: (...args) => { for (const f of listeners) f(...args); } }; }
 async function extension(api = () => {}) {
@@ -189,6 +191,177 @@ test('T3 manager owns only proven opener newTabs and releases descendants withou
     await manager.closeAll();
     assert.equal(h.tabs.has(1), true); assert.equal(h.tabs.has(20), false); assert.equal(h.tabs.has(21), true);
   } finally { await manager.closeAll(); await h.stop(); }
+});
+
+test('interrupted local run reopens in place and late adapters cannot affect the next round', async () => {
+  const h = await extension(); const manager = new BrowserManager();
+  const key = `piBrowserRecovery-${webcrypto.randomUUID()}`;
+  const resume = gate(); const late = gate();
+  globalThis[key] = { resume: resume.promise, complete: late.resolve, error: null };
+  try {
+    await manager.open({ name: 'owned', url: 'https://owned.example/', channel: 'extension', cwd: process.cwd(), timeoutMs: 1500 });
+    const claimId = h.snapshot().resources.leases.find((item) => item.tabId === 10).lease.claimId;
+    await assert.rejects(run(manager, 'owned', `const state = globalThis[${JSON.stringify(key)}]; await state.resume; try { await page.goto('https://late.example/'); } catch (error) { state.error = error.name; } finally { state.complete(); }`, 30), /timed out/);
+    const status = (await manager.status()).namedTabs[0];
+    assert.equal(status.state, 'needs_revalidation'); assert.equal(status.pendingCommands, 0);
+    await assert.rejects(run(manager, 'owned', 'return 1;'), /reopen it to revalidate/);
+    await manager.open({ name: 'owned', channel: 'extension', cwd: process.cwd(), timeoutMs: 1500 });
+    assert.equal(h.tabs.get(10).url, 'https://owned.example/');
+    assert.equal(h.snapshot().resources.leases.find((item) => item.tabId === 10).lease.claimId, claimId);
+    assert.equal((await run(manager, 'owned', 'return await page.evaluate(() => 1);')).returnValue, 10);
+    resume.resolve(); await late.promise;
+    assert.equal(globalThis[key].error, 'AbortError');
+    assert.ok(!h.calls.some((call) => call[0] === 'update' && call[1] === 10));
+    assert.equal((await manager.status()).namedTabs[0].state, 'ready');
+  } finally { resume.resolve(); await manager.closeAll(); delete globalThis[key]; await h.stop(); }
+});
+
+test('interrupted remote run reopens only after real terminal and does not block another tab', async () => {
+  const command = gate(), detach = gate();
+  const h = await extension((chrome, { calls }) => {
+    chrome.debugger.sendCommand = async ({ tabId }) => { calls.push(['cdp-start', tabId]); if (tabId === 1) await command.promise; return { tabId }; };
+    chrome.debugger.detach = async ({ tabId }) => { calls.push(['detach-start', tabId]); if (tabId === 1) await detach.promise; };
+  });
+  const a = new BrowserManager(), b = new BrowserManager();
+  try {
+    await open(a, 'main', 'one.example'); await open(b, 'main', 'two.example');
+    const running = run(a, 'main', "return await tab.cdp('Runtime.evaluate');", 60);
+    await until(() => h.calls.some((call) => call[0] === 'cdp-start' && call[1] === 1));
+    assert.equal((await a.status()).namedTabs[0].state, 'busy');
+    await assert.rejects(open(a, 'main', 'one.example'), /is busy/);
+    await assert.rejects(running, /timed out/);
+    const status = (await a.status()).namedTabs[0];
+    assert.equal(status.state, 'draining'); assert.equal(status.pendingCommands, 1); assert.equal(status.drainingCommands, 1);
+    await assert.rejects(open(a, 'main', 'one.example'), /is draining/);
+    assert.equal((await run(b, 'main', "return await tab.cdp('Runtime.evaluate');")).returnValue.tabId, 2);
+    command.resolve(); await until(() => h.calls.some((call) => call[0] === 'detach-start' && call[1] === 1));
+    await assert.rejects(open(a, 'main', 'one.example'), /is draining/);
+    detach.resolve(); await until(async () => (await a.status()).namedTabs[0].state === 'needs_revalidation');
+    await open(a, 'main', 'one.example');
+    assert.equal((await run(a, 'main', "return await tab.cdp('Runtime.evaluate');")).returnValue.tabId, 1);
+    await assert.rejects(open(b, 'other', 'one.example'), /tab_busy/);
+  } finally { command.resolve(); detach.resolve(); await a.closeAll(); await b.closeAll(); await h.stop(); }
+});
+
+test('successful run fences late secondary claims before a later run starts', async () => {
+  const h = await extension(); const manager = new BrowserManager();
+  const key = `piBrowserLate-${webcrypto.randomUUID()}`; const late = gate(); const resume = gate();
+  globalThis[key] = { resume: resume.promise, complete: late.resolve, error: null };
+  try {
+    await open(manager, 'main', 'one.example');
+    await run(manager, 'main', `const state = globalThis[${JSON.stringify(key)}]; const pages = await browser.pages(); void state.resume.then(async () => { try { await pages[1].title(); } catch (error) { state.error = error.name; } finally { state.complete(); } }); return true;`);
+    await run(manager, 'main', 'return true;');
+    resume.resolve(); await late.promise;
+    assert.equal(globalThis[key].error, 'AbortError');
+    assert.ok(!h.wire.some((frame) => frame.cmd === 'claim' && frame.tabId === 2));
+    assert.equal((await manager.status()).namedTabs[0].state, 'ready');
+  } finally { resume.resolve(); await manager.closeAll(); delete globalThis[key]; await h.stop(); }
+});
+
+test('failed revalidation stays fenced and a replacement connection cannot revive an old binding', async () => {
+  let rejectGet = false;
+  let h = await extension((chrome) => {
+    const get = chrome.tabs.get;
+    chrome.tabs.get = async (id) => { if (rejectGet) throw new Error('injected tab read failure'); return get(id); };
+  });
+  const manager = new BrowserManager(), replacement = new BrowserManager(); const abort = new AbortController();
+  try {
+    await open(manager, 'main', 'one.example');
+    const running = manager.run('main', 'await wait(100);', process.cwd(), abort.signal, 1500);
+    abort.abort(); await assert.rejects(running, /aborted/);
+    rejectGet = true;
+    await assert.rejects(open(manager, 'main', 'one.example'), /injected tab read failure/);
+    assert.equal((await manager.status()).namedTabs[0].state, 'needs_revalidation');
+    await assert.rejects(run(manager, 'main', 'return 1;'), /is draining/);
+    rejectGet = false;
+    await h.stop();
+    assert.equal((await manager.status()).namedTabs[0].state, 'disconnected');
+    h = await extension();
+    await assert.rejects(open(manager, 'main', 'one.example'), /generation mismatch/);
+    assert.equal((await manager.status()).namedTabs[0].state, 'disconnected');
+    assert.equal(h.snapshot().resources.leases.length, 0);
+    await open(replacement, 'fresh', 'one.example');
+    const freshClaim = h.snapshot().resources.leases[0].lease.claimId;
+    assert.equal(await manager.closeAll(), 1);
+    assert.equal(manager.has('main'), false);
+    assert.equal(h.snapshot().resources.leases[0].lease.claimId, freshClaim);
+  } finally { abort.abort(); await replacement.closeAll(); await h.stop(); await manager.closeAll(); }
+});
+
+test('failed physical disposal retains the named binding and closeAll reports failure until retry', async () => {
+  let refuseRemove = true;
+  const h = await extension((chrome) => {
+    const remove = chrome.tabs.remove;
+    chrome.tabs.remove = async (id) => { if (refuseRemove) throw new Error('injected remove failure'); return remove(id); };
+  });
+  const manager = new BrowserManager();
+  try {
+    await manager.open({ name: 'owned', url: 'https://owned.example/', channel: 'extension', cwd: process.cwd(), timeoutMs: 1500 });
+    await assert.rejects(manager.close('owned'), /injected remove failure/);
+    assert.equal(manager.has('owned'), true); assert.equal(h.tabs.has(10), true);
+    assert.equal((await manager.status()).namedTabs[0].state, 'closed');
+    await assert.rejects(run(manager, 'owned', 'return 1;'), /aborted/);
+    await assert.rejects(manager.closeAll(), /ownership is retained for retry/);
+    assert.equal(manager.has('owned'), true); assert.equal(h.tabs.has(10), true);
+    refuseRemove = false;
+    assert.equal(await manager.closeAll(), 1);
+    assert.equal(manager.has('owned'), false); assert.equal(h.tabs.has(10), false);
+    assert.equal(h.snapshot().resources.leases.length, 0);
+  } finally { refuseRemove = false; await manager.closeAll(); await h.stop(); }
+});
+
+test('interrupted open retains failed provisional cleanup for closeAll retry', async () => {
+  const createGate = gate(); let started = false; let refuseRemove = true;
+  const h = await extension((chrome) => {
+    const create = chrome.tabs.create, remove = chrome.tabs.remove;
+    chrome.tabs.create = async (options) => { started = true; await createGate.promise; return create(options); };
+    chrome.tabs.remove = async (id) => { if (refuseRemove) throw new Error('injected provisional remove failure'); return remove(id); };
+  });
+  const manager = new BrowserManager();
+  try {
+    const opening = manager.open({ name: 'late', url: 'https://late.example/', channel: 'extension', cwd: process.cwd(), timeoutMs: 30 }).then(() => null, (error) => error);
+    await until(() => started); await sleep(40); createGate.resolve();
+    const failure = await opening;
+    assert.ok(failure instanceof AggregateError);
+    assert.equal(h.tabs.has(10), true);
+    await assert.rejects(manager.closeAll(), /cleanup failed/);
+    refuseRemove = false;
+    await manager.closeAll();
+    assert.equal(h.tabs.has(10), false); assert.equal(h.snapshot().resources.leases.length, 0);
+  } finally { createGate.resolve(); refuseRemove = false; await manager.closeAll(); await h.stop(); }
+});
+
+test('trusted host sessions keep equal names and interrupted cleanup isolated across real extension leases', async () => {
+  const command = gate();
+  const h = await extension((chrome, { calls }) => {
+    chrome.debugger.sendCommand = async ({ tabId }) => { calls.push(['cdp-start', tabId]); if (tabId === 1) await command.promise; return { tabId }; };
+  });
+  const first = createBrowserTool(), second = createBrowserTool();
+  const a = `session-a-${webcrypto.randomUUID()}`, b = `session-b-${webcrypto.randomUUID()}`;
+  const ctx = (id) => ({ cwd: process.cwd(), sessionManager: { getSessionId: () => id } });
+  const invoke = (tool, id, input, signal = new AbortController().signal) => tool.execute('integration', input, signal, undefined, ctx(id));
+  const abort = new AbortController();
+  try {
+    assert.ok(!(await invoke(first, a, { action: 'open', app: { channel: 'extension', target: 'one.example' } })).isError);
+    assert.ok(!(await invoke(second, b, { action: 'open', app: { channel: 'extension', target: 'two.example' } })).isError);
+    assert.deepEqual((await invoke(second, a, { action: 'status' })).details.status.namedTabs.map((tab) => tab.name), ['main']);
+    const interrupted = invoke(first, a, { action: 'run', code: "return await tab.cdp('Runtime.evaluate');" }, abort.signal);
+    await until(() => h.calls.some((call) => call[0] === 'cdp-start' && call[1] === 1));
+    abort.abort(); await assert.rejects(interrupted, { name: 'AbortError' });
+    let closed = false;
+    const cleanup = browserSessionScopes.closeSession(a).then(() => { closed = true; });
+    await assert.rejects(invoke(second, a, { action: 'run', code: 'return 1;' }), /scope is shutting down/);
+    const unaffected = await invoke(first, b, { action: 'run', code: 'return await page.evaluate(() => 1);' });
+    assert.ok(!unaffected.isError); assert.equal(closed, false);
+    command.resolve(); await cleanup;
+    assert.equal(browserBridge.isConnected(), true);
+    assert.equal(h.tabs.has(1), true);
+    assert.deepEqual(Array.from(h.snapshot().resources.leases, (item) => item.tabId), [2]);
+    assert.equal((await invoke(second, b, { action: 'status' })).details.status.namedTabs[0].state, 'ready');
+    assert.ok(!(await invoke(second, a, { action: 'open', app: { channel: 'extension', target: 'one.example' } })).isError);
+    assert.ok(!(await invoke(first, a, { action: 'close', all: true })).isError);
+    assert.deepEqual(Array.from(h.snapshot().resources.leases, (item) => item.tabId), [2]);
+  } finally { command.resolve(); abort.abort(); await browserSessionScopes.closeSession(a); await browserSessionScopes.closeSession(b); await h.stop(); }
 });
 
 test.after(async () => { await browserBridge.shutdown(); rmSync(directory, { recursive: true, force: true }); });

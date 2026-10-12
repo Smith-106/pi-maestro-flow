@@ -3,7 +3,9 @@
  *
  * A knowhow file is treated as a SOP document when its frontmatter carries a
  * non-empty `sop_topic` (kebab-case topic id) and a `tools` array naming at
- * least one pi tool. The loader scans `.workflow/knowhow/*.md` (project) and an
+ * least one pi tool, either in legacy outer frontmatter or a leading SOP hint
+ * in canonical published content. Outer title and lifecycle remain authoritative.
+ * The loader scans `.workflow/knowhow/*.md` (project) and an
  * optional global dir, parses frontmatter, and returns {@link SopDoc}s.
  *
  * Design mirrors `skills/skill-loader.ts`: a stat-based version key
@@ -87,19 +89,29 @@ export class SopLoader {
 
   /**
    * Load a single knowhow file as a SOP document. Returns undefined when the
-   * file lacks `sop_topic` + `tools` (not a SOP) or fails frontmatter
-   * validation. Throws {@link SopLoadError} only for unreadable/oversized
+   * file lacks `sop_topic` + `tools` in either supported location, has an
+   * inactive outer lifecycle, or fails frontmatter validation. Throws {@link SopLoadError} only for unreadable/oversized
    * files; callers decide whether to swallow.
    */
   async loadFile(filePath: string, source: SopSource = "knowhow"): Promise<SopDoc | undefined> {
     const snapshot = await this.readRaw(filePath);
-    const { frontmatter, body } = parseFrontmatter<SopFrontmatter>(snapshot.content);
-    const tools = parseToolsField(frontmatter.tools);
+    const { frontmatter, body: outerBody } = parseFrontmatter<SopFrontmatter>(snapshot.content);
+    const lifecycle = frontmatter.lifecycleStatus ?? frontmatter.status;
+    if (lifecycle === "deprecated" || lifecycle === "superseded") return undefined;
+    let binding = frontmatter;
+    let body = outerBody;
+    if (!parseToolsField(binding.tools).length || !parseTopicField(binding.sop_topic)) {
+      // Stage/promote keeps the self-evolve SOP hint inside canonical content.
+      const hinted = parseFrontmatter<SopFrontmatter>(outerBody.trimStart());
+      binding = hinted.frontmatter;
+      body = hinted.body;
+    }
+    const tools = parseToolsField(binding.tools);
     if (tools.length === 0) return undefined;
-    const topic = parseTopicField(frontmatter.sop_topic);
+    const topic = parseTopicField(binding.sop_topic);
     if (!topic) return undefined;
     const title = parseTitleField(frontmatter.title, filePath);
-    const order = parseOrderField(frontmatter.sop_order);
+    const order = parseOrderField(binding.sop_order);
     const tool = tools[0];
     return Object.freeze({
       tool,

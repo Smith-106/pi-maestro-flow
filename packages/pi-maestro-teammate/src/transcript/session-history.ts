@@ -98,7 +98,14 @@ export interface SessionHistoryOptions {
   signal?: AbortSignal;
 }
 export type SessionHistoryListOptions = SessionHistoryOptions;
-export type SessionHistorySearchOptions = SessionHistoryOptions;
+export interface SessionHistorySearchOptions extends SessionHistoryOptions {
+  /** Literal matching is the compatibility default; terms require every unique normalized term in one projected entry. */
+  mode?: "literal" | "terms";
+  /** Relevance ranks exact text, continuous phrase, then the tightest term span; ties retain source order. */
+  sort?: "source" | "relevance";
+  /** Zero-based match offset within this fresh scan (not a snapshot cursor). */
+  offset?: number;
+}
 export type SessionHistoryReadOptions = SessionHistoryOptions;
 export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
 
@@ -161,7 +168,10 @@ export interface SessionHistorySearchResult extends ScanMetrics {
   generation?: number;
   query: string;
   matches: readonly SessionHistorySearchMatch[];
+  /** Total matches in this scan, independent of pagination. */
   matchCount: number;
+  hasMore: boolean;
+  nextOffset?: number;
 }
 export interface SessionHistoryCompactionResult extends ScanMetrics {
   version: typeof SESSION_HISTORY_VERSION;
@@ -251,6 +261,7 @@ export class SessionHistoryService {
   }
 
   async list(options: SessionHistoryListOptions = {}): Promise<SessionHistoryListResult> {
+    rejectSearchOptions(options);
     const include = normalizedInclude(options.include);
     const limit = boundedLimit(options.limit);
     const scan = await this.#scan(include, options.signal);
@@ -268,36 +279,57 @@ export class SessionHistoryService {
 
   async search(query: string, options: SessionHistorySearchOptions = {}): Promise<SessionHistorySearchResult> {
     validateQuery(query);
+    const mode = options.mode ?? "literal";
+    const sort = options.sort ?? "source";
+    if (mode !== "literal" && mode !== "terms") throw new TypeError("mode must be literal or terms.");
+    if (sort !== "source" && sort !== "relevance") throw new TypeError("sort must be source or relevance.");
+    const offset = options.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError("offset must be a non-negative safe integer.");
+    const folded = mode === "terms" ? normalizedSearchText(query) : query.toLocaleLowerCase("en-US");
+    if (mode === "terms" && folded.length === 0) throw new TypeError("terms query must contain non-whitespace text.");
+    const terms = mode === "terms" ? [...new Set(folded.split(" "))] : [folded];
     const include = normalizedInclude(options.include);
     const limit = boundedLimit(options.limit);
     const scan = await this.#scan(include, options.signal);
-    const folded = query.toLocaleLowerCase("en-US");
-    const matches: SessionHistorySearchMatch[] = [];
-    let matchCount = 0;
+    const ranked: Array<{ entry: SessionHistoryEntry; index: number; rank: number; span: number; sourceOrder: number }> = [];
     for (const session of scan.sessions) {
       for (const entry of session.entries) {
-        const index = entry.text.toLocaleLowerCase("en-US").indexOf(folded);
-        if (index < 0) continue;
-        matchCount += 1;
-        if (matches.length >= limit) continue;
-        matches.push({
-          sessionId: entry.sessionId,
-          entryId: entry.entryId,
-          turn: entry.turn,
-          resourceUri: entry.resourceUri,
-          kind: entry.kind,
-          timestamp: entry.timestamp,
-          snippet: boundedSnippet(entry.text, index),
+        const text = mode === "terms" ? normalizedSearchText(entry.text) : entry.text.toLocaleLowerCase("en-US");
+        const indices = terms.map((term) => text.indexOf(term));
+        if (indices.some((index) => index < 0)) continue;
+        const phraseIndex = text.indexOf(folded);
+        ranked.push({
+          entry,
+          index: phraseIndex >= 0 ? phraseIndex : Math.min(...indices),
+          rank: text === folded ? 0 : phraseIndex >= 0 ? 1 : 2,
+          span: sort === "relevance" ? tightestTermSpan(text, terms, indices) : 0,
+          sourceOrder: ranked.length,
         });
       }
     }
+    if (sort === "relevance") ranked.sort((left, right) =>
+      left.rank - right.rank || left.span - right.span || left.sourceOrder - right.sourceOrder);
+    const page = ranked.slice(offset, offset + limit);
+    const matches: SessionHistorySearchMatch[] = page.map(({ entry, index }) => ({
+      sessionId: entry.sessionId,
+      entryId: entry.entryId,
+      turn: entry.turn,
+      resourceUri: entry.resourceUri,
+      kind: entry.kind,
+      timestamp: entry.timestamp,
+      snippet: boundedSnippet(entry.text, mode === "terms" && entry.text.length > MAX_SESSION_HISTORY_SNIPPET_CHARS
+        ? originalSearchIndex(entry.text, index) : index),
+    }));
+    const remaining = Math.max(0, ranked.length - offset - matches.length);
     return resultWithMetrics(scan, {
       version: SESSION_HISTORY_VERSION,
       ...(scan.generation === undefined ? {} : { generation: scan.generation }),
       query,
       matches: Object.freeze(matches),
-      matchCount,
-    }, matchCount - matches.length);
+      matchCount: ranked.length,
+      hasMore: remaining > 0,
+      ...(remaining > 0 ? { nextOffset: offset + matches.length } : {}),
+    }, remaining);
   }
 
   async searchSessions(query: string, options: SessionHistorySearchOptions = {}): Promise<SessionHistorySearchResult> {
@@ -305,6 +337,7 @@ export class SessionHistoryService {
   }
 
   async compactions(options: SessionHistoryCompactionOptions = {}): Promise<SessionHistoryCompactionResult> {
+    rejectSearchOptions(options);
     const limit = boundedLimit(options.limit);
     const scan = await this.#scan(new Set<SessionHistoryInclude>(["compaction"]), options.signal);
     const all = scan.sessions
@@ -331,6 +364,7 @@ export class SessionHistoryService {
     options: SessionHistoryReadOptions = {},
   ): Promise<SessionHistoryReadResult> {
     const request = typeof sessionOrRequest === "string" ? { sessionId: sessionOrRequest, ...options } : sessionOrRequest;
+    rejectSearchOptions(request);
     validateIdentifierInput(request.sessionId, "sessionId");
     if (request.entryId !== undefined) validateIdentifierInput(request.entryId, "entryId");
     if (request.turn !== undefined && (!Number.isSafeInteger(request.turn) || request.turn < 0)) {
@@ -774,6 +808,50 @@ function boundedLimit(value: number | undefined): number {
     throw new TypeError(`limit must be an integer between 1 and ${MAX_SESSION_HISTORY_MATCHES}.`);
   }
   return value;
+}
+function rejectSearchOptions(options: SessionHistoryOptions): void {
+  for (const key of ["mode", "sort", "offset"] as const) {
+    if (key in options) throw new TypeError(`${key} is available only for search.`);
+  }
+}
+function normalizedSearchText(text: string): string {
+  return text.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/gu, " ").trim();
+}
+
+/** Map a non-whitespace match back via whole-prefix normalization, only for
+ * returned long snippets. Per-character/grapheme normalization is insufficient:
+ * compatibility Hangul jamo can compose across original grapheme boundaries.
+ * Prefix lengths account for composition, expansion and collapsed whitespace. */
+function originalSearchIndex(text: string, target: number): number {
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (normalizedSearchText(text.slice(0, middle)).length > target) high = middle;
+    else low = middle + 1;
+  }
+  let index = Math.max(0, low - 1);
+  // A normalized character may expand to several UTF-16 units; anchor an
+  // astral source character at its high surrogate, not in its middle.
+  if (index > 0 && /[\uDC00-\uDFFF]/.test(text[index]!)) index -= 1;
+  return index;
+}
+
+/** Smallest covering window over all unique substring terms; no tokenization
+ * beyond query whitespace and no matching across projected entries. */
+function tightestTermSpan(text: string, terms: readonly string[], initial: readonly number[]): number {
+  if (terms.length === 1) return terms[0]!.length;
+  const indices = [...initial];
+  let best = Infinity;
+  while (true) {
+    const start = Math.min(...indices);
+    const end = Math.max(...indices.map((index, term) => index + terms[term]!.length));
+    best = Math.min(best, end - start);
+    const earliest = indices.indexOf(start);
+    const next = text.indexOf(terms[earliest]!, start + 1);
+    if (next < 0) return best;
+    indices[earliest] = next;
+  }
 }
 function validateQuery(query: string): void {
   if (typeof query !== "string" || query.length === 0 || query.length > MAX_SESSION_HISTORY_QUERY_CHARS || query.includes("\0")) {

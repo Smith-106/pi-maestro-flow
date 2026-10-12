@@ -7,6 +7,8 @@ sop_order: 0
 category: browser-sop
 created: 2026-08-23T00:00:00Z
 tags: [browser, sop]
+supersededBy: "knowhow-tip-20261011-07f626b7889f6857"
+status: "deprecated"
 ---
 
 Puppeteer antipatterns — silent-failure modes to avoid.

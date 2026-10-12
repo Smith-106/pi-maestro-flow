@@ -1,0 +1,43 @@
+name: Pi SDK compatibility
+
+on:
+  pull_request:
+    paths:
+      - package.json
+      - package-lock.json
+      - packages/pi-cockpit/package.json
+      - packages/pi-maestro-flow/package.json
+      - packages/pi-maestro-teammate/package.json
+      - packages/pi-maestro-flow/test/sdk-resolution-contract.test.mjs
+      - .github/dependabot.yml
+      - .github/workflows/pi-sdk.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-sdk-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked development dependencies without plugin setup
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify SDK versions and host-provided package boundaries
+        run: node --test packages/pi-maestro-flow/test/sdk-resolution-contract.test.mjs
+      - name: Check extension SDK types
+        run: |
+          npm --prefix packages/pi-cockpit run typecheck
+          npm --prefix packages/pi-maestro-teammate run typecheck
+          npm --prefix packages/pi-maestro-flow run typecheck
+      - name: Verify native edit ownership
+        working-directory: packages/pi-cockpit
+        run: node --test --experimental-transform-types --test-name-pattern='native quiet decorates|UTF8 tool_call policy' tests/native-host.test.ts

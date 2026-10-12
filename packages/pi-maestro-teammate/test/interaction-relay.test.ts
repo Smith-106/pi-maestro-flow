@@ -91,6 +91,23 @@ test("root question broker returns advisory decisions in headless mode using aut
   } finally { dispose(); }
 });
 
+test("root question broker forwards timeout recommendations without converting them to human answers", async () => {
+  const { state, agent } = createState();
+  const { pi } = createPi();
+  const replies: unknown[] = [];
+  const questions = [{ question: "Which helper?", options: [{ label: "A", recommended: true }, { label: "B" }] }];
+  const recommendations = [{ questionIndex: 0, question: "Which helper?", selected: ["A"], source: "timeout", timeoutMs: 60_000 }];
+  const dispose = registerTeammateChildToolBroker("ask-user-question", async (request) => {
+    assert.deepEqual(request.input, { questions });
+    return { content: [{ type: "text", text: "Timeout recommendation, not an approval" }], details: { answers: [], recommendations } };
+  });
+  try {
+    await handleChildInteractionRequest(pi, state, { requestId: "question-timeout", interaction: "question", correlationId: agent.correlationId,
+      payload: { questions, recommendations: [{ selected: ["B"], approved: true }] } }, (message) => replies.push(message), { hasUI: false } as ExtensionContext);
+    assert.deepEqual(replies, [{ type: "teammate_interaction_response", requestId: "question-timeout", result: { action: "answer", answers: [], recommendations } }]);
+  } finally { dispose(); }
+});
+
 test("unknown child cannot access root question broker", async () => {
   const { state } = createState();
   const { pi } = createPi();

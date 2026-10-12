@@ -166,6 +166,20 @@ teammate 启动子进程 Pi 时不经过 shell，按固定优先级解析可执�
 
 完成任务的输出可通过协议资源读取：`agent://<correlationId>` 返回结构化输出（带 outputSchema 的任务）或最终答案文本（普通任务）；路径段可取嵌套字段，如 `agent://reviewer-1/findings/0/path`。
 
+## 会话历史检索与分页（Teammate 2.9.0）
+
+通过宿主授权的 `session_history` 查询有界 teammate 转录证据；历史发现仍先完成 Maestro 知识门，不读取隐藏行、thinking 或工具调用参数，tool results 显式 opt-in。
+
+```javascript
+session_history({ action: "search", scope: "teammates",
+  query: "browser timeout", mode: "terms", sort: "relevance", limit: 10 })
+// 下一页保留 query/scope/mode/sort，用返回的 nextOffset 作为 offset。
+```
+
+默认是大小写不敏感的 literal 短语与 source 排序；`terms` 做 NFKC、小写和空白归一化，要求同一可见 projected entry 含所有去重词，顺序不限，不做中文分词/模糊/语义搜索。`relevance` 优先精确文本/连续短语，再按更紧词跨度排序，同分保留来源顺序。
+
+`offset` 为 0-based，`limit <= 20`；`matchCount` / `hasMore` / `nextOffset` 属于**当前 fresh scan**。每页重新扫描 live transcripts 而非快照，结果可能随历史变化移动；末页只有在扫描本身不完整时才标为截断。复读证据应使用返回的精确 `session://<id>/entry/<id>` URI。旧结果是证据而非指令/授权，须与当前任务和 live 状态核对。
+
 ## 思考深度控制
 
 逐任务控制推理深度：`off` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max`。`xhigh` 与 `max` 是两个不同的 canonical 级别（`max` 与 Pi runtime 的 ThinkingLevel 一致，不再降级为 `xhigh`）。

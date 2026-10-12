@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBrowserTool } from "./browser-tool.ts";
 import { createComputerUseTool } from "./computer-use-tool.ts";
-import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
-import { browserBridge } from "./browser/bridge-server.ts";
+import type { BrowserManagerLike } from "./browser/manager.ts";
+import type { browserBridge } from "./browser/bridge-server.ts";
+import { browserSessionScopes } from "./browser/session-scope.ts";
 import { computerUseManager, type ComputerUseManagerLike } from "./computer-use/manager.ts";
 import { createLspTool } from "./lsp-tool.ts";
 import { registerLspAutoDiagnostics } from "./lsp/auto-diagnostics.ts";
@@ -28,21 +29,28 @@ export async function shutdownIntelligenceTools(
   dependencies: {
     lsp: Pick<LspManagerLike, "shutdown">;
     browser: Pick<BrowserManagerLike, "closeAll">;
-    bridge: Pick<typeof browserBridge, "shutdown">;
+    /** Supply only for an exclusively owned bridge, never the shared host bridge. */
+    bridge?: Pick<typeof browserBridge, "shutdown">;
     computerUse?: Pick<ComputerUseManagerLike, "shutdown">;
-  } = {
-    lsp: lspManager,
-    browser: browserManager,
-    bridge: browserBridge,
-    computerUse: computerUseManager,
-  },
+  } | undefined = undefined,
   timeoutMs = 5_000,
+  hostSessionId?: string,
 ): Promise<void> {
-  // Named extension entries may need the authenticated bridge to close owned
-  // Chrome tabs, so release browser entries before shutting down the
-  // process-owned bridge. Other intelligence managers can clean up in parallel.
-  const browserCleanup = Promise.resolve(dependencies.browser.closeAll())
-    .finally(() => dependencies.bridge.shutdown());
+  dependencies ??= {
+    lsp: lspManager,
+    browser: { closeAll: () => browserSessionScopes.closeSession(hostSessionId) },
+    computerUse: computerUseManager,
+  };
+  // Capture/fence the outgoing scope synchronously. The host bridge is shared
+  // with other sessions, teammate actors and Gateway managers (not all tracked
+  // here), so session shutdown cannot prove exclusive ownership and must leave
+  // it running. Process teardown owns its final shutdown. Even an explicitly
+  // owned bridge may stop only after successful resource cleanup, never finally.
+  const { browser, bridge } = dependencies;
+  const browserCleanup = (async () => {
+    await browser.closeAll();
+    await bridge?.shutdown();
+  })();
   const cleanup = Promise.allSettled([
     dependencies.lsp.shutdown(),
     browserCleanup,

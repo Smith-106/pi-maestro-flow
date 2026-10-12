@@ -522,7 +522,11 @@ export declare function appendBoundedTranscriptMessage(messages: Array<{
     role: string;
     content: string;
 }): void;
-export declare function createUtf8LineDecoder(maxBufferedBytes?: number): Utf8LineDecoder;
+export declare function createUtf8LineDecoder(maxBufferedBytes?: number, onOverflow?: (info: {
+    receivedBytes: number;
+    maxBytes: number;
+    prefix: string;
+}) => void, onLine?: (line: string) => void): Utf8LineDecoder;
 export declare function appendDistinctAssistantMessage(messages: Array<{
     role: string;
     content: string;

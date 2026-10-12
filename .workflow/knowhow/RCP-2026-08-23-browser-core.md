@@ -7,6 +7,8 @@ sop_order: 0
 category: browser-sop
 created: 2026-08-23T00:00:00Z
 tags: [browser, sop]
+supersededBy: "knowhow-tip-20261011-a251400378620c11"
+status: "deprecated"
 ---
 
 Browser SOP — when to use which tab.* helper and field-tested recipes.

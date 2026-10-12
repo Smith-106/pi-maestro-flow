@@ -5,7 +5,22 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current version: v0.32.1 — Dependency Repairs & Runtime Hardening.** Node.js minimum 22.19.0, Pi 0.99.0 baseline; native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions and install commands retain their original values.
+> **Current version: v0.33.0 — Stable Browser Sessions & Scoped Automation.** Node.js minimum 22.19.0 and Pi 0.99.0 baseline are unchanged; existing native checks cover Windows x64 / Node 22.22 only. Minimum Node and macOS/Linux remain unverified. Historical versions/install commands retain their original values; this release's tests, build and publication evidence belong in repository RELEASE.md, not a premature pass claim here.
+
+## v0.33.0 — Stable Browser Sessions & Scoped Automation
+
+- Flow **0.33.0** and Teammate **2.9.0**; Cockpit **0.24.3**, Backends **0.1.7**, Backend-Core **0.1.5**, Settings-Core **0.2.3**, Fabric/Fabric-Core **0.1.0**, and pi-fluent-tui **0.1.2** remain unchanged. The engine remains the **`maestro-flow >=0.5.91`** range; other dependency versions and the host baseline are unchanged.
+- **Host-session browser ownership**: named tabs remain stable across turns in the trusted host session. `status.namedTabs` / `close all` target only that scope; bridge discovery remains process-shared and cookies/login state are not isolated.
+- **Unified run deadline and passive diagnostics**: managed/profile/CDP setup, execution and postprocessing share one timeout budget; cleanup may add latency. Extension command/execution waits are bounded, but setup/postprocessing may add latency. Failures provide bounded passive information without replay or interaction, not proof that prior actions stopped.
+- **Extension drain/reopen**: after interruption, wait for every entry command terminal and host operation to drain, then explicitly open the same name without a URL to revalidate the fixed tab/generation. Open rejects while draining, preserves the tab and never replays actions; bridge-wide zero counts do not replace entry checks.
+- **Cross-cycle Plan-auto**: a human parent TUI can enable the grant in Act/Plan. The session switch survives cycles and exit/clear, but new cycles refresh task authority and exit/clear invalidate the previous task. Off, session/cwd changes, fork, history navigation and reload/restart revoke it; exact durable approval and standalone/current execution remain authoritative.
+- **Ask-auto timeout recommendations**: human `/auto ask on [seconds]` (default 60 seconds) permits safe option questions to adopt explicit `recommended: true` choices on timeout. Results are `recommendations` / `source: timeout`, not human answers or approval. Policy classification takes priority; sensitive, external, uncertain, degraded, human-only and missing/ambiguous-recommendation decisions remain human.
+- **Session-history search and fresh-scan paging**: `terms` applies NFKC/lowercase/whitespace normalization and matches all terms in one visible entry; `relevance` ranks exact phrases and term spans. Zero-based `offset`, `matchCount`, `hasMore` and `nextOffset` describe each scan. Pages rescan live transcripts, not a snapshot; exact session URIs pin evidence and hidden-text boundaries remain unchanged.
+- **Bilingual classifier and published SOP hints**: settings/diagnostics follow `zh-CN` / `en` locale without changing protocol keys. SOP loading recognizes published/promoted knowledge hints; browser operations still require reading the relevant full topic.
+
+Upgrade: `pi install npm:pi-maestro-flow@0.33.0`. Close Pi first, restart afterward, and update preserved local companion overrides to Teammate 2.9.0 / Cockpit 0.24.3. Prior fork provenance, licensing and native verification evidence remain in the v0.32.1 history below.
+
+- **Teammate RPC image telemetry**: wire events omit repeated image bytes without changing original model/session data or structured output. Malformed/oversized JSONL immediately fails and retires the child; later corruption never rewrites an already published answer.
 
 ## v0.32.1 — Dependency Repairs & Runtime Hardening
 

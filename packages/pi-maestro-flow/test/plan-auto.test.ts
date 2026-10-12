@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  PLAN_AUTO_KEY, PLAN_AUTO_AUDIT_ENTRY, beginPlanAutoCycle, getPlanAutoSnapshot,
+  PLAN_AUTO_KEY, PLAN_AUTO_AUDIT_ENTRY, AUTO_AUDIT_ENTRY, beginPlanAutoCycle, getPlanAutoSnapshot,
+  getAskAutoSnapshot, isCurrentAskAutoGrant,
   getPlanAutoState, isCurrentPlanAutoGrant, isCurrentPlanAutoTask, markPlanAutoConfirmed,
   planAutoStatusLabel, registerPlanAuto, resetPlanAuto, revokePlanAuto, updatePlanAutoTaskContext,
 } from "../src/tools/plan-auto.ts";
@@ -60,14 +61,242 @@ function harness() {
   const emit = async (name: string, event = {}, context = ctx) => {
     for (const handler of events.get(name) ?? []) await handler(event, context);
   };
-  const start = async () => { await emit("session_start", { reason: "startup" }); beginPlanAutoCycle(ctx, { markdown: "# Scoped implementation", revision: 1 }); };
+  const start = async (inPlan = true) => {
+    plan = inPlan;
+    await emit("session_start", { reason: "startup" });
+    if (inPlan) beginPlanAutoCycle(ctx, { markdown: "# Scoped implementation", revision: 1 });
+  };
   const submit = (args = "on") => { editor = `/plan-auto${args ? ` ${args}` : ""}`; return terminal?.("\r"); };
-  return { api, ctx, commands, shortcuts, entries, notices, statuses, tools, emit, start, submit,
+  const submitAuto = (args = "") => { editor = `/auto${args ? ` ${args}` : ""}`; return terminal?.("\r"); };
+  return { api, ctx, commands, shortcuts, entries, notices, statuses, tools, emit, start, submit, submitAuto,
     setPlan: (value: boolean) => { plan = value; },
     terminal: (data: string) => terminal?.(data),
     setEditor: (text: string) => { editor = text; },
   };
 }
+
+test("/auto defaults to status and manages both independently audited preferences", async () => {
+  const h = harness(); await h.start(false);
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  assert.equal(h.statuses.get("maestro-ask-auto"), undefined);
+  for (const args of ["", "status", "plan", "plan status", "ask", "ask status"]) {
+    assert.deepEqual(h.submitAuto(args), { consume: true });
+    assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+    assert.match(h.notices.at(-1)!, /Plan:.*off.*Ask:.*off/);
+  }
+  assert.equal(h.entries.length, 0);
+  assert.deepEqual(h.commands.get("auto").getArgumentCompletions("ask o").map((v: any) => v.value), ["ask on", "ask off"]);
+  h.submitAuto("on");
+  const plan = getPlanAutoSnapshot(h.ctx)!;
+  const ask = getAskAutoSnapshot(h.ctx)!;
+  assert.equal(plan.confirmPending, false, "unified on is usable in Act");
+  assert.deepEqual(ask, { sessionId: "parent", cwd: "D:/scope", generation: ask.generation, timeoutMs: 60_000 });
+  assert.ok(Object.isFrozen(ask));
+  assert.ok(isCurrentAskAutoGrant(ask, h.ctx));
+  assert.match(h.statuses.get("maestro-ask-auto")!, /ASK-AUTO on 60s/);
+  assert.equal(h.entries.length, 1);
+  assert.equal(h.entries[0].customType, AUTO_AUDIT_ENTRY);
+  assert.equal(h.entries[0].data.target, "all");
+  assert.equal(h.entries[0].data.origin, "terminal");
+  assert.equal(h.entries[0].data.replayable, false);
+  h.submitAuto("on"); h.submitAuto();
+  assert.equal(getAskAutoSnapshot(h.ctx), ask);
+  assert.equal(getPlanAutoSnapshot(h.ctx), plan);
+  assert.equal(h.entries.length, 1, "status and idempotent on do not create authority");
+  assert.match(h.notices.at(-1)!, /Plan:.*on.*Ask:.*on 60s/);
+  h.submitAuto("off");
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  assert.equal(isCurrentAskAutoGrant(ask, h.ctx), false);
+  assert.equal(h.statuses.get("maestro-ask-auto"), undefined);
+  assert.equal(h.entries.at(-1)!.data.action, "off");
+});
+
+test("independent Ask timeout updates fence old snapshots; old Plan controls never disable Ask", async () => {
+  const h = harness(); await h.start();
+  h.submitAuto("ask on 2.5");
+  const first = getAskAutoSnapshot(h.ctx)!;
+  assert.equal(first.timeoutMs, 2500);
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  h.submitAuto("plan on");
+  const plan = getPlanAutoSnapshot(h.ctx)!;
+  h.submitAuto("ask on 2.5");
+  assert.equal(getAskAutoSnapshot(h.ctx), first);
+  h.submitAuto("ask on 3");
+  const next = getAskAutoSnapshot(h.ctx)!;
+  assert.ok(next.generation > first.generation);
+  assert.equal(isCurrentAskAutoGrant(first, h.ctx), false);
+  assert.ok(isCurrentAskAutoGrant(next, h.ctx));
+  assert.equal(getPlanAutoSnapshot(h.ctx), plan, "Ask updates cannot perturb Plan authority");
+  h.submitAuto("ask off");
+  assert.equal(getPlanAutoSnapshot(h.ctx), plan);
+  h.submitAuto("ask on");
+  const defaultAsk = getAskAutoSnapshot(h.ctx)!;
+  assert.equal(defaultAsk.timeoutMs, 60_000);
+  h.submit("off");
+  assert.equal(getAskAutoSnapshot(h.ctx), defaultAsk);
+  await h.shortcuts.get(PLAN_AUTO_KEY).handler(h.ctx);
+  await h.shortcuts.get(PLAN_AUTO_KEY).handler(h.ctx);
+  assert.equal(getAskAutoSnapshot(h.ctx), defaultAsk);
+  h.submitAuto("plan on"); h.submitAuto("plan off");
+  assert.equal(getAskAutoSnapshot(h.ctx), defaultAsk);
+  revokePlanAuto("external-plan-off");
+  assert.equal(getAskAutoSnapshot(h.ctx), defaultAsk);
+  resetPlanAuto("reload");
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  assert.equal(h.statuses.get("maestro-ask-auto"), undefined);
+});
+
+test("/auto invalid grammar and timer values are atomic, including mismatched scopes", async () => {
+  const h = harness(); await h.start(); h.submitAuto("on");
+  const plan = getPlanAutoSnapshot(h.ctx)!;
+  const ask = getAskAutoSnapshot(h.ctx)!;
+  const audits = h.entries.length;
+  for (const args of ["invalid", "plan toggle", "ask toggle", "on 10", "off 10", "status 10", "plan on 10",
+    "ask off 10", "ask status 10", "ask 10", "ask on 1 extra", "ask on 0", "ask on -1", "ask on NaN",
+    "ask on Infinity", "ask on 1e309", "ask on 2147483.648", "ask on 0.0001", "ask on 0x10", "ask on 1s"]) {
+    h.submitAuto(args);
+    assert.equal(getPlanAutoSnapshot(h.ctx), plan, args);
+    assert.equal(getAskAutoSnapshot(h.ctx), ask, args);
+    assert.equal(h.entries.length, audits, args);
+  }
+  await h.commands.get("auto").handler("ask on invalid", { ...h.ctx, cwd: "invalid-scope" });
+  assert.equal(getPlanAutoSnapshot(h.ctx), plan, "invalid command does not even revoke by observing scope");
+  assert.equal(getAskAutoSnapshot(h.ctx), ask);
+  for (const [seconds, timeout] of [["0.001", 1], ["2147483.647", 2147483647], ["1e-2", 10]] as const) {
+    h.submitAuto(`ask on ${seconds}`);
+    assert.equal(getAskAutoSnapshot(h.ctx)!.timeoutMs, timeout);
+  }
+});
+
+test("/auto direct commands, all source hooks, RPC, child and dialogs cannot enable", async () => {
+  const h = harness(); await h.start();
+  for (const args of ["on", "plan on", "ask on", "ask on 1"]) {
+    await h.commands.get("auto").handler(args, h.ctx);
+    for (const source of ["extension", "rpc", "interactive", undefined]) {
+      await h.emit("input", { text: `/auto ${args}`, source });
+      assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+      assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+    }
+  }
+  h.setEditor("/auto on");
+  assert.equal(h.terminal("/auto on\r"), undefined, "pasted command is not a physical Enter");
+  await h.emit("ui_prompt_start"); h.submitAuto("on");
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  await h.emit("ui_prompt_end");
+  const prior = process.env.PI_TEAMMATE_CHILD;
+  try {
+    process.env.PI_TEAMMATE_CHILD = "1";
+    h.submitAuto("on"); h.submitAuto("ask on");
+    assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  } finally {
+    if (prior === undefined) delete process.env.PI_TEAMMATE_CHILD; else process.env.PI_TEAMMATE_CHILD = prior;
+  }
+  h.ctx.mode = "rpc"; h.submitAuto("on");
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  h.ctx.mode = "tui"; h.ctx.hasUI = false; h.submitAuto("on");
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  h.ctx.hasUI = true; h.submitAuto("on");
+  const ask = getAskAutoSnapshot(h.ctx)!;
+  await h.commands.get("auto").handler("ask on 1", h.ctx);
+  assert.equal(getAskAutoSnapshot(h.ctx), ask, "machine cannot update an already-enabled timeout");
+  await h.emit("input", { text: "/auto status", source: "rpc" });
+  assert.equal(getAskAutoSnapshot(h.ctx), ask);
+  await h.emit("input", { text: "/auto off", source: "extension" });
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined, "unattested input may revoke");
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+});
+
+test("/auto real Pi command-before-input host paths never create authority", async () => {
+  const h = harness(); await h.start();
+  const host: any = {
+    _extensionRunner: { getCommand: (name: string) => h.commands.get(name), createCommandContext: () => h.ctx,
+      emitError: (error: any) => { throw new Error(error.error); } },
+    _tryExecuteExtensionCommand: (AgentSession.prototype as any)._tryExecuteExtensionCommand,
+    prompt: AgentSession.prototype.prompt,
+    _runInputHandlers: async (text: string, images: any, source: string) => {
+      await h.emit("input", { text, images, source }); return undefined;
+    },
+  };
+  for (const command of ["/auto on", "/auto ask on 1", "/auto plan on"]) {
+    await AgentSession.prototype.sendUserMessage.call(host, command);
+    await AgentSession.prototype.sendUserMessage.call(host, command, { expandPromptTemplates: true });
+    await AgentSession.prototype.prompt.call(host, command, { source: "rpc" });
+    assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  }
+  h.submitAuto("on");
+  await AgentSession.prototype.sendUserMessage.call(host, "/auto off");
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+});
+
+test("Ask lifecycle and scope fences revoke permanently without replaying audit entries", async () => {
+  const h = harness(); await h.start(); h.submitAuto("ask on");
+  const first = getAskAutoSnapshot(h.ctx)!;
+  const invalidated = { get sessionManager(): never { throw new Error("stale context"); } } as ExtensionContext;
+  assert.equal(isCurrentAskAutoGrant(first, invalidated), false);
+  assert.equal(getAskAutoSnapshot(h.ctx), first, "stale getter cannot revoke a newer session");
+  h.submitAuto("ask off"); h.submitAuto("ask on");
+  const second = getAskAutoSnapshot(h.ctx)!;
+  assert.equal(isCurrentAskAutoGrant(first, { ...h.ctx, cwd: "old-scope" }), false);
+  assert.equal(getAskAutoSnapshot(h.ctx), second, "stale generation does not inspect another scope");
+  assert.equal(getPlanAutoSnapshot({ ...h.ctx, cwd: "changed-cwd" }), undefined);
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined, "Plan reader observes scope even when only Ask is on");
+  h.submitAuto("on");
+  assert.equal(getAskAutoSnapshot({ ...h.ctx, sessionManager: { getSessionId: () => "other" } } as ExtensionContext), undefined);
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined, "Ask reader revokes both on actual scope change");
+  h.submitAuto("on");
+  updatePlanAutoTaskContext({ ...h.ctx, cwd: "different-task-scope" }, { markdown: "foreign", revision: 1 });
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined, "task update detecting actual scope change revokes both");
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  for (const event of ["session_before_switch", "session_before_fork", "session_before_tree", "session_shutdown"]) {
+    await h.start(); h.submitAuto("on");
+    const before = getAskAutoSnapshot(h.ctx)!;
+    await h.emit(event);
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined, event);
+    assert.equal(getPlanAutoSnapshot(h.ctx), undefined, event);
+    assert.equal(isCurrentAskAutoGrant(before, h.ctx), false, event);
+    assert.equal(h.statuses.get("maestro-ask-auto"), undefined, event);
+  }
+  for (const reason of ["startup", "reload", "new", "resume", "fork"]) {
+    await h.start(); h.submitAuto("ask on");
+    await h.emit("session_start", { reason });
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined, reason);
+  }
+  h.submitAuto("ask on");
+  registerPlanAuto(h.api, { isPlanMode: () => true, onStateChange() {} });
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined, "register/reload never replays earlier on audits");
+});
+
+test("/auto enable is audit-required, atomic on failure, and fenced against synchronous revocation", async () => {
+  const h = harness(); await h.start();
+  const append = h.api.appendEntry;
+  h.api.appendEntry = () => { throw new Error("audit unavailable"); };
+  for (const args of ["on", "ask on", "plan on"]) {
+    h.submitAuto(args);
+    assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+    assert.match(h.notices.at(-1)!, /审计写入失败/);
+  }
+  h.api.appendEntry = append; h.submitAuto("ask on 5");
+  const existing = getAskAutoSnapshot(h.ctx)!;
+  h.api.appendEntry = () => { throw new Error("audit unavailable"); };
+  h.submitAuto("on");
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined, "no partial Plan enable");
+  assert.equal(getAskAutoSnapshot(h.ctx), existing, "failed update leaves the prior audited grant intact");
+  h.submitAuto("off");
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined, "audit failure cannot prevent revocation");
+  h.api.appendEntry = (type, data) => { append(type, data); resetPlanAuto("revoked-in-audit"); };
+  h.submitAuto("on");
+  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+  assert.match(h.notices.at(-1)!, /授权已变更/);
+  await h.emit("session_shutdown");
+  h.api.appendEntry = append;
+});
 
 test("default off, physical command, completions, idempotence and shortcut share one grant", async () => {
   const h = harness();
@@ -103,12 +332,18 @@ test("default off, physical command, completions, idempotence and shortcut share
   assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
 });
 
-test("Act cannot enable or re-enable; off/status allowed after successful approval", async () => {
-  const h = harness(); await h.start();
-  h.setPlan(false); h.submit();
-  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
-  h.setPlan(true); h.submit();
+test("Act can enable before any Plan cycle, re-enable and rebind each subsequent cycle", async () => {
+  const h = harness(); await h.start(false);
+  h.submit();
+  const waiting = getPlanAutoSnapshot(h.ctx)!;
+  assert.equal(waiting.confirmPending, false);
+  assert.deepEqual(waiting.taskContext, { markdown: "", revision: 0 });
+  assert.match(planAutoStatusLabel(h.ctx), /AUTO on/);
+  h.setPlan(true);
+  beginPlanAutoCycle(h.ctx, { markdown: "# Scoped task", revision: 1 });
   const snapshot = getPlanAutoSnapshot(h.ctx)!;
+  assert.equal(snapshot.confirmPending, true);
+  assert.equal(isCurrentPlanAutoGrant(waiting, h.ctx), false);
   assert.equal(markPlanAutoConfirmed(h.ctx, snapshot, { markdown: "# Approved task", revision: 2, handoffKey: "approved-key" }), true);
   h.setPlan(false);
   assert.equal(getPlanAutoSnapshot(h.ctx)!.confirmPending, false);
@@ -117,8 +352,18 @@ test("Act cannot enable or re-enable; off/status allowed after successful approv
   assert.equal(markPlanAutoConfirmed(h.ctx, snapshot, { markdown: "other", revision: 3 }), false);
   h.submit("status");
   assert.match(h.notices.at(-1)!, /AUTO ask/);
-  h.submit("off"); h.submit();
-  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  h.setPlan(true);
+  beginPlanAutoCycle(h.ctx, { markdown: "# Next task", revision: 3 });
+  const next = getPlanAutoSnapshot(h.ctx)!;
+  assert.equal(next.confirmPending, true);
+  assert.equal(next.taskContext.handoffKey, undefined);
+  assert.equal(isCurrentPlanAutoGrant(snapshot, h.ctx), false);
+  h.setPlan(false); h.submit("off"); h.submit();
+  assert.equal(getPlanAutoSnapshot(h.ctx)!.confirmPending, false);
+  assert.ok(getPlanAutoSnapshot(h.ctx)!.generation > snapshot.generation);
+  h.submit("off");
+  await h.shortcuts.get(PLAN_AUTO_KEY).handler(h.ctx);
+  assert.ok(getPlanAutoSnapshot(h.ctx), "shortcut also enables in Act");
 });
 
 test("scope/lifecycle revocation and task-context freshness are irreversible", async () => {
@@ -128,7 +373,7 @@ test("scope/lifecycle revocation and task-context freshness are irreversible", a
   assert.ok(isCurrentPlanAutoGrant(initial, h.ctx));
   assert.equal(isCurrentPlanAutoTask(initial, h.ctx), false);
   beginPlanAutoCycle(h.ctx, { markdown: "new", revision: 3 });
-  assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+  assert.equal(getPlanAutoSnapshot(h.ctx)!.confirmPending, true);
   assert.equal(isCurrentPlanAutoGrant(initial, h.ctx), false);
   h.submit();
   const newer = getPlanAutoSnapshot(h.ctx)!;
@@ -232,7 +477,8 @@ test("same-session deterministic new_context preserves the in-memory grant", asy
   try {
     await mkdir(join(root, ".pi"));
     await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ compaction: { newContext: { enabled: true } } }));
-    await h.start(); h.submit(); const grant = getPlanAutoSnapshot(h.ctx)!;
+    await h.start(); h.submitAuto("on"); const grant = getPlanAutoSnapshot(h.ctx)!;
+    const ask = getAskAutoSnapshot(h.ctx)!;
     const arbiter = new CompactionArbiter();
     const controller = createNewContextController(arbiter);
     let compact: any;
@@ -246,11 +492,12 @@ test("same-session deterministic new_context preserves the in-memory grant", asy
     assert.ok(controller.consume(observed.trigger, resetCtx));
     compact.onComplete();
     assert.ok(isCurrentPlanAutoGrant(grant, h.ctx));
+    assert.ok(isCurrentAskAutoGrant(ask, h.ctx), "same-session new_context preserves independent Ask grant");
     controller.onSessionShutdown();
   } finally { await h.emit("session_shutdown"); await rm(root, { recursive: true, force: true }); }
 });
 
-test("real Plan edits/compaction/agent_end preserve; exit/clear/reentry/start/shutdown revoke", async () => {
+test("real Plan edits/compaction/exit/clear/reentry preserve enabled state; start/shutdown revoke", async () => {
   const root = await mkdtemp(join(tmpdir(), "plan-auto-"));
   const h = harness();
   Object.defineProperty(h.ctx, "cwd", { value: root, configurable: true });
@@ -260,7 +507,9 @@ test("real Plan edits/compaction/agent_end preserve; exit/clear/reentry/start/sh
     await h.emit("session_start"); await onSessionStartPlan(h.ctx);
     assert.equal(getMode(), "act");
     await toggleMode(h.ctx); assert.equal(getMode(), "plan");
-    h.submit(); const initial = getPlanAutoSnapshot(h.ctx)!;
+    h.submit(); h.submitAuto("ask on 5");
+    const ask = getAskAutoSnapshot(h.ctx)!;
+    const initial = getPlanAutoSnapshot(h.ctx)!;
     const updated = await h.tools.get("plan-update").execute("u", { markdown: "# New task", expectedRevision: 0 }, undefined, undefined, h.ctx);
     assert.equal(updated.isError, undefined);
     assert.ok(isCurrentPlanAutoGrant(initial, h.ctx));
@@ -268,13 +517,31 @@ test("real Plan edits/compaction/agent_end preserve; exit/clear/reentry/start/sh
     onCompactPlan(h.ctx);
     await onAgentEndPlan({ messages: [] }, h.ctx);
     assert.ok(isCurrentPlanAutoGrant(initial, h.ctx));
-    await exitModeAndRestore(h.ctx); assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
-    await toggleMode(h.ctx); h.submit(); assert.ok(getPlanAutoSnapshot(h.ctx));
-    clearPlan(); assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
-    h.submit(); assert.ok(getPlanAutoSnapshot(h.ctx));
+    await exitModeAndRestore(h.ctx);
+    const exited = getPlanAutoSnapshot(h.ctx)!;
+    assert.equal(exited.confirmPending, false);
+    assert.deepEqual(exited.taskContext, { markdown: "", revision: 0 });
+    assert.equal(isCurrentPlanAutoGrant(initial, h.ctx), false);
+    await toggleMode(h.ctx);
+    const reentered = getPlanAutoSnapshot(h.ctx)!;
+    assert.equal(reentered.confirmPending, true);
+    assert.equal(reentered.taskContext.markdown, "# New task");
+    clearPlan();
+    assert.ok(getPlanAutoSnapshot(h.ctx));
+    assert.equal(isCurrentPlanAutoGrant(reentered, h.ctx), false);
+    assert.deepEqual(getPlanAutoSnapshot(h.ctx)!.taskContext, { markdown: "", revision: 0 });
+    const beforeEmpty = getPlanAutoSnapshot(h.ctx)!;
+    const emptied = await h.tools.get("plan-update").execute("empty", { markdown: "", expectedRevision: updated.details.revision }, undefined, undefined, h.ctx);
+    assert.equal(emptied.isError, undefined);
+    assert.equal(getPlanAutoSnapshot(h.ctx)!.confirmPending, true);
+    assert.equal(isCurrentPlanAutoGrant(beforeEmpty, h.ctx), false);
+    assert.equal(getPlanAutoSnapshot(h.ctx)!.taskContext.markdown, "");
+    assert.equal(getAskAutoSnapshot(h.ctx), ask, "Plan edit/compaction/exit/clear/reentry leave independent Ask unchanged");
     await onSessionStartPlan(h.ctx); assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
-    await toggleMode(h.ctx); h.submit();
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined);
+    await toggleMode(h.ctx); h.submitAuto("on");
     onSessionShutdownPlan(h.ctx); assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
+    assert.equal(getAskAutoSnapshot(h.ctx), undefined);
   } finally { onSessionShutdownPlan(h.ctx); await h.emit("session_shutdown"); await rm(root, { recursive: true, force: true }); }
 });
 
@@ -374,6 +641,36 @@ test("human preauthorization confirms exact archive/manifest before Act; update/
     assert.equal(getPlanAutoSnapshot(h.ctx), undefined);
     assert.equal((await h.stores[0].load()).manifest.status, "approved");
   } finally { dispose(); await h.close(); }
+});
+
+test("Act enable persists through two real Plan confirmations without another human toggle", async () => {
+  const h = await approvalHarness();
+  try {
+    await h.run("plan-exit");
+    h.setPlan(false); h.submit();
+    assert.equal(getPlanAutoSnapshot(h.ctx)!.confirmPending, false);
+    let previous = getPlanAutoSnapshot(h.ctx)!;
+    h.ctx.hasUI = false;
+    for (const markdown of ["# First task", "# Second task"]) {
+      await h.run("plan-enter");
+      assert.equal(isCurrentPlanAutoGrant(previous, h.ctx), false);
+      assert.equal(getPlanAutoSnapshot(h.ctx)!.confirmPending, true);
+      await h.run("plan-update", { markdown });
+      const approved = await h.run("plan-confirm");
+      assert.equal(approved.details.approved, true);
+      assert.equal(approved.details.approvalAudit.result, "handed-off");
+      assert.equal(getMode(), "act");
+      previous = getPlanAutoSnapshot(h.ctx)!;
+      assert.equal(previous.confirmPending, false);
+    }
+    assert.equal(h.overlays(), 0);
+    assert.equal(h.entries.filter((entry) => entry.data.action === "on").length, 1);
+    assert.equal((await h.stores[0].load()).manifest.approvals.length, 2);
+    assert.equal(getPlanAutoSnapshot(h.ctx)!.taskContext.markdown, "# Second task");
+    h.submit("off");
+    await h.run("plan-enter");
+    assert.equal(getPlanAutoSnapshot(h.ctx), undefined, "new cycle cannot restore an explicitly disabled preference");
+  } finally { await h.close(); }
 });
 
 test("auto never inherits old workflow/compact execution or source documents", async () => {

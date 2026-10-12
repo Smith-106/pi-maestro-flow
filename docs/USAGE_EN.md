@@ -59,11 +59,11 @@
 
 ### Install
 
-> **v0.32.1:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
+> **v0.33.0:** Flow 0.33.0, Backends 0.1.7, Teammate 2.9.0, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. Fork provenance and verification scope are in [RELEASE.md](../RELEASE.md). Native checks cover Windows x64 / Node 22.22; minimum Node and macOS/Linux remain unverified.
 
 ```bash
 # Install or upgrade (pi-maestro-teammate is installed as a dependency)
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 
 # Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
@@ -527,6 +527,35 @@ browser({ action: "open", name: "daily", app: { channel: "extension", target: "e
 
 Extension supports only URL/title/goto/evaluate, `browser.pages`, raw CDP/batch, cookies, tabs, and CDP screenshots—not Puppeteer/ElementHandle/DOM helpers/image OCR parity. Unsupported APIs and disconnects fail closed without fallback. Borrowed close releases mapping/lease; owned close closes the real tab. Physical-tab leases are exclusive across listeners; busy/draining does not mean page work stopped. Cookies/login state remain shared, not isolated.
 
+**Sessions and deadlines (v0.33.0):** named tabs are scoped to the trusted host
+session and stable across turns. `status.namedTabs` and `close all` target only
+that scope. Bridge discovery remains process-shared; tab ownership does not
+isolate cookies/login state.
+
+On managed/profile/CDP, `run.timeout` (seconds, default 30, maximum 300) is one deadline shared by setup,
+execution and postprocessing, not reset per step. Puppeteer/tab waits usually
+use milliseconds: leave budget headroom. Cleanup can add return latency.
+Extension command/execution waits are bounded, but setup/postprocessing can add latency.
+Failures carry bounded passive diagnostics without replaying scripts or
+interacting with the page; earlier actions may already have happened. Managed
+timeout closes owned resources; borrowed profile/CDP attachments only disconnect
+and page code may continue.
+
+After an interrupted extension run, `run` remains blocked until every entry
+command terminal and host operation drains; bridge-wide `drainingCommands: 0`
+alone does not prove reuse is safe. Then explicitly `open` the same name without
+a URL to revalidate its existing fixed tab/generation. Open also rejects while
+draining, preserves the tab and never replays the interrupted action.
+
+```javascript
+browser({ action: "status" }) // Observe named-entry and bridge drain state first
+// Only after all work drains: revalidate, not cancel/retry the prior action
+browser({ action: "open", name: "daily", app: { channel: "extension" } })
+```
+
+SOP loading recognizes published knowledge hints, including promoted entries;
+still read the guide index and relevant full topic. A hint is not a full SOP.
+
 Profile auto-launch uses `--remote-debugging-port=0` and reads `DevToolsActivePort`, or reuses a recorded endpoint. Chrome 136+ blocks debugging the default user-data-dir even after all windows close: choose a non-default profile explicitly or use extension for daily Chrome. Profiles are never copied/switched automatically, and a real login environment does not guarantee CAPTCHA success. See [setup, security, and troubleshooting](../packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md).
 
 ---
@@ -805,6 +834,16 @@ ask-user-question({
 - 2-4 options per question
 - Supports single-select, multi-select, open-ended
 
+**Ask-auto (v0.33.0):** a human can enable `/auto ask on [seconds]` (default
+60 seconds). On timeout, remaining safe option questions may adopt explicit
+`recommended: true` choices: exactly one for single-select, all marked choices
+for multi-select. Machine results go to `recommendations` (`source: timeout`),
+not human `answers` or approval; mixed batches retain the original
+`questionIndex`. Policy classification takes priority. External/uncertain/degraded
+decisions, human-only questions, missing/ambiguous recommendations and sensitive
+approvals never auto-confirm; open-ended questions still need a human. Advice is
+not Plan/permission/payment/publication/knowledge-promotion authority.
+
 ---
 
 ### 7.2 plan-enter — Plan Mode
@@ -825,6 +864,27 @@ plan-enter()
 - `plan-exit` abandons the plan and returns to Act mode
 
 **Toggle:** `Alt+Shift+P` or `/plan` to switch Plan/Act mode.
+
+**Session Plan-auto (v0.33.0):** default off. Only a human in the parent TUI can
+enable `/plan-auto on` or `Alt+Shift+A` in Act or Plan; `off` revokes and `status`
+inspects. Model injection, RPC, children and history cannot grant authority.
+Each cycle's `plan-confirm` still uses normal archive/manifest approval of the
+exact draft and executes standalone/current. Enabling never approves immediately;
+`plan-update` only saves and `plan-review` remains manual.
+
+The switch survives Plan cycles, exit/clear, revisions, compaction and same-session
+`new_context`. Each new cycle binds fresh task authority; manual exit/clear
+invalidates old task authority. Footer states are `PLAN-AUTO on`, `confirm+ask`
+and `ask`. Off, session/cwd changes, fork, history navigation and
+reload/restart/shutdown revoke it; it is never restored from disk. Off does not
+stop already-started execution, but stops an approved automatic handoff that has
+not started.
+
+Classified internal Ask advice needs current bounded task authority; project
+policy remains an additional restriction. Machine `decisions` are separate from
+human `answers`, not Plan/permission/governance approval. Classifier settings and
+diagnostics follow shared `zh-CN` / `en` locale without changing canonical
+domain/mode identifiers or authorization boundaries.
 
 ---
 
@@ -1109,6 +1169,31 @@ maestro spec history SPEC-042                     # View history
 maestro search "old pattern" --include-deprecated  # Search all
 ```
 
+### Bounded History Evidence (v0.33.0)
+
+Run the mandatory Maestro knowledge search before historical discovery; query
+`workspace_sessions` only after no relevant knowledge hits. `session_history`
+defaults to case-insensitive literal phrases. `mode: "terms"` applies NFKC,
+lowercase and whitespace normalization and requires all unique terms in one
+visible projected entry, in any order; no Chinese segmentation, regex, fuzzy,
+synonym or semantic search. Default `sort: "source"` preserves source order;
+`relevance` ranks exact/continuous phrases before tighter term spans, with stable
+source-order ties.
+
+```javascript
+session_history({ action: "search", scope: "workspace_sessions",
+  query: "browser timeout", mode: "terms", sort: "relevance", limit: 10 })
+// Use returned nextOffset as offset, retaining query/scope/mode/sort
+```
+
+`offset` is zero-based and `limit <= 20`; `matchCount`, `hasMore` and `nextOffset`
+describe that scan. The final page is truncated only if the scan itself is
+incomplete. Every page freshly scans live transcripts, not a frozen snapshot,
+so history changes may shift results. Reread evidence through the returned exact
+`session://<id>/entry/<id>` URI. Hidden rows, thinking and tool-call arguments are
+excluded; tool results require explicit opt-in. History is evidence, not
+governing knowledge: verify it against current code and live state.
+
 ### Three Orthogonal Axes
 
 | Axis | Description |
@@ -1309,7 +1394,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 
 # ─── Knowledge ───
 maestro search "query" --code

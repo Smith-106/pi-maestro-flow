@@ -39,7 +39,7 @@ It ships as three plugins (install one, get all three):
 - 🖥️ **pi-teammate-models CLI** — maintain `.pi/teammate-backends.json` from the terminal: static route table, field-level edit, and a guided registration wizard with compile validation before every write and undoable `.bak`/`.bak.1` backup rotation
 - 🌐 **DSH direct-SSH deployments** — `mode: ssh` launches the DeepSeek Harness runtime on a remote host over OpenSSH: BatchMode prompt-free auth, pre-flight host-key fingerprint pinning, and per-request timeout guidance
 - 🎯 **Goal — autonomous long-running objectives** — set an objective and token budget, loop autonomously across turns, audited by an independent verifier
-- 📝 **Plan — approve before you change** — read-only Markdown drafts, a dedicated Plan model, and default-off, human-TUI Plan-auto preauthorization scoped to the current cycle (`/plan-auto`)
+- 📝 **Plan — approve before you change** — read-only Markdown drafts, a dedicated Plan model, and default-off, human-TUI session Plan-auto preauthorization (switch retained across cycles, task authority refreshed per cycle) (`/plan-auto`)
 - 🛰️ **Pi Cockpit visualization** — live view of running teammates and the todo plan, with 9 built-in themes; Quiet mode compresses tool output and folds thinking blocks
 - ⏱️ **bash_bg adaptive shell** — long commands auto-background on timeout and notify on completion, without blocking the conversation
 - 🧠 **Persistent knowledge system** — semantic search, spec & knowhow capture, survives across sessions
@@ -69,13 +69,13 @@ teammate({
 
 pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regular npm dependency). A single command installs the whole suite: Flow acts as the install entry and automatically pulls in and registers the remaining extensions and dependencies.
 
-> **v0.32.1:** dependency repairs, SSH PowerShell/UTF-8 hardening, and bounded teammate compaction recovery. Suite: Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3; engine requirement `maestro-flow >=0.5.91`. See [RELEASE.md](RELEASE.md) for the four `@dyw1234` forks, licensing, and verification scope. Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified. No cross-platform or whole-graph vulnerability-free claim is made.
+> **v0.33.0:** stable browser sessions, scoped automation, and paged history search. Suite: Flow 0.33.0, Backends 0.1.7, Teammate 2.9.0, Cockpit 0.24.3; engine requirement `maestro-flow >=0.5.91`. See [RELEASE.md](RELEASE.md) for the four `@dyw1234` forks, licensing, and verification scope. Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified. No cross-platform or whole-graph vulnerability-free claim is made.
 
 **Prerequisites:** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) 0.99.0 (validation baseline; 0.87–0.98 uses version-gated legacy compatibility)
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.32.1                              # install or upgrade the plugin (single entry)
+pi install npm:pi-maestro-flow@0.33.0                              # install or upgrade the plugin (single entry)
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 
@@ -118,7 +118,7 @@ Full tool parameters and workflow definitions live in the **[Usage Guide](docs/U
 | **[Usage Guide](docs/USAGE_EN.md)** / **[中文](docs/USAGE.md)** | Complete feature documentation — all tools, MCP, permissions, thinking depth, agents, workflows |
 | **[User Guide](GUIDE.md)** | In-depth tutorial with examples for every subsystem |
 | **[Smart Search Provider Config](docs/smart-search-provider-config.md)** | Search provider setup — dual-path architecture, API keys, credential syntax, TUI config, sync |
-| **[Release Notes](RELEASE.md)** | v0.32.1: dependency repairs and runtime hardening |
+| **[Release Notes](RELEASE.md)** | v0.33.0: stable browser sessions and scoped automation |
 | **[Browser Bridge Setup](packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)** | Multiple listeners, NONE/paired auth, explicit channels, shared login state, and troubleshooting |
 | Per-plugin READMEs | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 

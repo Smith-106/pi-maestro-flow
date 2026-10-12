@@ -384,6 +384,52 @@ test("session_history reports an unavailable host transcript instead of a comple
   assert.equal(JSON.parse(resultText(supplied)).matchCount, 0);
 });
 
+test("session history reports workspace inventory enumeration errors instead of complete empty searches", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-inventory-error-"));
+  try {
+    const blocked = join(root, "not-a-directory");
+    await writeFile(blocked, "not a directory", "utf8");
+    const current = join(blocked, "current.jsonl");
+    const ctx = context(root, current);
+    const candidateAccelerator = {
+      async search() { return { available: true, complete: true, entries: [{ path: current }] }; },
+      destroy() {},
+    };
+    for (const settings of [{}, { mode: "terms" }, { mode: "literal" }]) {
+      for (const options of [{}, { candidateAccelerator }]) {
+        const result = await executeSessionHistory(
+          { action: "search", scope: "workspace_sessions", query: "needle", ...settings }, ctx, options,
+        );
+        const text = resultText(result);
+        const payload = JSON.parse(text);
+        assert.deepEqual(payload.matches, []);
+        assert.deepEqual(payload.omissions, [{ reason: "inventory-error" }]);
+        assert.equal(payload.filesRead, 0);
+        assert.equal(text.includes(root), false);
+        assert.doesNotMatch(text, /not-a-directory|ENOTDIR/);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("session history allows absent teammate roots but reports other enumeration errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-teammate-inventory-error-"));
+  try {
+    const current = join(root, "current.jsonl");
+    await writeTranscript(current, [header("current-session"), user("u1", null, "needle")]);
+    const ctx = context(root, current);
+    const request = { action: "search", scope: "teammates", query: "needle" };
+    const absent = JSON.parse(resultText(await executeSessionHistory(request, ctx)));
+    assert.deepEqual(absent.matches, []);
+    assert.deepEqual(absent.omissions, []);
+    assert.equal(absent.truncated, false);
+    await writeFile(join(root, "current"), "not a directory", "utf8");
+    const failed = JSON.parse(resultText(await executeSessionHistory(request, ctx)));
+    assert.deepEqual(failed.omissions, [{ reason: "inventory-error" }]);
+    assert.equal(failed.filesRead, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("session history registration exposes unified recovery and historical discovery", () => {
   const tool = createSessionHistoryTool();
   const schema = tool.parameters as {
@@ -394,7 +440,9 @@ test("session history registration exposes unified recovery and historical disco
   assert.deepEqual(schema.properties?.action?.enum, ["list_sessions", "search", "read_turn", "timeline", "read_checkpoint"]);
   assert.deepEqual(schema.properties?.scope?.enum, ["current_session", "workspace_sessions", "teammates"]);
   assert.deepEqual(schema.properties?.include?.items?.enum, ["user", "assistant", "visible_custom", "compaction", "tool_result"]);
-  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "sessionId", "turn", "checkpointId", "include", "limit"]);
+  assert.deepEqual(Object.keys(schema.properties ?? {}), ["action", "scope", "query", "mode", "sort", "offset", "sessionId", "turn", "checkpointId", "include", "limit"]);
+  assert.deepEqual(schema.properties?.mode?.enum, ["literal", "terms"]);
+  assert.deepEqual(schema.properties?.sort?.enum, ["source", "relevance"]);
   assert.equal(schema.additionalProperties, false);
   const guidance = tool.promptGuidelines?.join("\n") ?? "";
   assert.match(guidance, /capsule and live Todo\/Goal\/Plan\/Workflow state first/);
@@ -405,4 +453,65 @@ test("session history registration exposes unified recovery and historical disco
   assert.match(guidance, /not authoritative knowledge/);
   assert.doesNotMatch(`${tool.description}\n${guidance}`, /compact_history/);
   assert.doesNotMatch(JSON.stringify(schema), /delete|update|write|maxFiles|maxMatches|includeToolResults/i);
+  assert.match(tool.description, /NFKC/);
+  assert.match(tool.description, /not a frozen snapshot/);
+});
+
+test("tool forwards terms, relevance and pagination end to end with source defaults", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-search-options-"));
+  try {
+    const current = join(root, "current.jsonl");
+    const texts = ["beta 修复 alpha", "before 修复 alpha beta", "修复 alpha beta", ...Array.from({ length: 25 }, (_, index) => `beta 修复 alpha ${index}`)];
+    await writeTranscript(current, [header("current-session"), ...texts.map((text, index) => user(`u${index}`, index ? `u${index - 1}` : null, text))]);
+    const ctx = context(root, current);
+    const defaults = JSON.parse(resultText(await executeSessionHistory({ action: "search", query: "修复 alpha beta" }, ctx)));
+    assert.deepEqual(defaults.matches.map((match: { entryId: string }) => match.entryId), ["u1", "u2"]);
+    assert.equal(defaults.discovery.source, "bounded-inventory");
+    const source = JSON.parse(resultText(await executeSessionHistory({ action: "search", query: "修复 alpha beta", mode: "terms" }, ctx)));
+    assert.equal(source.matches[0].entryId, "u0");
+    const seen: string[] = [];
+    for (const offset of [0, 10, 20]) {
+      const request = { action: "search", query: "修复  alpha\nbeta", mode: "terms", sort: "relevance", offset, limit: 10 };
+      const result = await executeSessionHistory(request, ctx);
+      assert.equal((result as { isError?: boolean }).isError, undefined);
+      const payload = JSON.parse(resultText(result));
+      assert.equal(payload.matchCount, 28);
+      assert.equal(payload.hasMore, offset < 20);
+      assert.equal(payload.nextOffset, offset < 20 ? offset + 10 : undefined);
+      assert.equal(payload.truncated, offset < 20);
+      assert.equal(payload.filesRead, 1);
+      seen.push(...payload.matches.map((match: { entryId: string }) => match.entryId));
+      assert.deepEqual(payload, JSON.parse(resultText(await executeSessionHistory(request, ctx))));
+    }
+    assert.equal(seen.length, 28);
+    assert.equal(new Set(seen).size, 28);
+    assert.deepEqual(seen.slice(0, 3), ["u2", "u1", "u0"]);
+    const end = JSON.parse(resultText(await executeSessionHistory({ action: "search", query: "alpha", offset: 28 }, ctx)));
+    assert.deepEqual(end.matches, []);
+    assert.equal(end.matchCount, 28);
+    assert.equal(end.hasMore, false);
+    assert.equal("nextOffset" in end, false);
+    assert.equal(end.truncated, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("tool rejects search-only misuse and invalid search settings before accessing inventory", async () => {
+  let reads = 0;
+  const options = { inventory: () => { reads += 1; return []; } };
+  const ctx = { cwd: process.cwd(), sessionManager: {} } as unknown as ExtensionContext;
+  for (const action of ["list_sessions", "read_turn", "timeline", "read_checkpoint"]) {
+    for (const extra of [{ offset: 0 }, { mode: "literal" }, { sort: "source" }]) {
+      const result = await executeSessionHistory({ action, turn: 1, checkpointId: "checkpoint", ...extra }, ctx, options);
+      assert.equal((result as { isError?: boolean }).isError, true);
+      assert.match(resultText(result), /only for search/);
+    }
+  }
+  for (const extra of [{ offset: -1 }, { offset: 0.5 }, { offset: "0" }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { mode: "regex" }, { sort: "date" }, { mode: "terms", query: " \n\u3000" }]) {
+    const result = await executeSessionHistory({ action: "search", query: "needle", ...extra }, ctx, options);
+    assert.equal((result as { isError?: boolean }).isError, true);
+  }
+  assert.equal(reads, 0);
+  const literalSpaces = await executeSessionHistory({ action: "search", query: " \n" }, ctx, options);
+  assert.equal((literalSpaces as { isError?: boolean }).isError, undefined);
+  assert.equal(reads, 1);
 });

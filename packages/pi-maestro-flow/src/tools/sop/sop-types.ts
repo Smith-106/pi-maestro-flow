@@ -2,8 +2,8 @@
  * SOP loader types.
  *
  * A SOP document is a knowhow entry (`.workflow/knowhow/*.md`) whose frontmatter
- * carries `sop_topic` + `tools`, marking it as a Standard Operating Procedure
- * that the loader can attach to a pi tool's `guide` action. The loader reads
+ * carries `sop_topic` + `tools` in legacy frontmatter or a leading canonical
+ * content hint, marking it as a Standard Operating Procedure that the loader can attach to a pi tool's `guide` action. The loader reads
  * the knowhow directory; embedded baselines (the former hardcoded
  * `BROWSER_SOPS` / `COMPUTER_USE_SOPS`) are the zero-dependency fallback so a
  * missing or empty knowhow directory still serves SOPs.
@@ -57,6 +57,8 @@ export interface SopFrontmatter extends Record<string, unknown> {
   readonly tools?: unknown;
   readonly sop_topic?: unknown;
   readonly sop_order?: unknown;
+  readonly lifecycleStatus?: unknown;
+  readonly status?: unknown;
 }
 
 /** Options for {@link SopLoader.loadAll}. */

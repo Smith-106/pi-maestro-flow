@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import test from "node:test";
+import { Theme } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale, registerTuiLocaleEvents } from "../src/tui/locale.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createClassifierSettingsProvider } from "../src/classifier/settings-provider.ts";
 import { classifierModelCatalog, configuredPanelValues, modelOptions, panelChanges, saveClassifierPanel } from "../src/classifier/panel-model.ts";
@@ -14,7 +17,7 @@ import registerClassifier from "../src/classifier/extension.ts";
 const theme = { fg(_role: string, text: string) { return text; }, bold(text: string) { return text; } };
 const down = "\x1b[B";
 const flush = async () => { await new Promise(resolve => setTimeout(resolve, 20)); };
-async function harness() {
+async function harness(locale: SupportedSettingsLocale = "en", renderTheme = theme) {
   const cwd = await mkdtemp(join(tmpdir(), "classifier-tui-"));
   const domains = [{ name: "retry-error", modes: ["off", "shadow"] as const }, { name: "custom", modes: ["off", "shadow", "jev"] as const }];
   const applied: unknown[] = [];
@@ -27,10 +30,10 @@ async function harness() {
   const controller = new AbortController();
   const results: string[] = [];
   let lastSave: Promise<typeof snapshot> | undefined;
-  const overlay = new ClassifierSettingsOverlay({ state, engineRows: () => classifierEngineRows(provider),
-    classifierModels: { options: [{ reference: "typesafe/jev-1", label: "typesafe/jev-1" }] },
+  const overlay = new ClassifierSettingsOverlay({ locale, state, engineRows: () => classifierEngineRows(provider, locale),
+    classifierModels: { options: [{ reference: "typesafe/jev-1", label: "typesafe/jev-1 · 中文分类模型" }] },
     llmModels: { options: [{ reference: "openai/gpt-5", label: "openai/gpt-5" }] },
-    theme, requestRender() {}, done: intent => { results.push(intent); }, signal: controller.signal,
+    theme: renderTheme, requestRender() {}, done: intent => { results.push(intent); }, signal: controller.signal,
     saveEngine: changes => lastSave = saveClassifierPanel(provider, context, state.snapshot, changes, () => { if (controller.signal.aborted) throw new Error("Stale panel"); }),
   });
   return { cwd, domains, applied, provider, context, state, controller, results, overlay, waitSave: async () => { assert.ok(lastSave); await lastSave; }, cleanup: () => rm(cwd, { recursive: true, force: true }) };
@@ -54,9 +57,9 @@ test("typed authenticated catalog never substitutes generic models; old/missing/
 test("live domain rows use supported modes and newly registered domains appear", async () => {
   const h = await harness();
   try {
-    assert.deepEqual(classifierEngineRows(h.provider).find(row => row.key === "classifier.domains.retry-error")?.choices, ["off", "shadow"]);
+    assert.deepEqual(classifierEngineRows(h.provider, "en").find(row => row.key === "classifier.domains.retry-error")?.choices, ["off", "shadow"]);
     h.domains.push({ name: "late-domain", modes: ["off", "shadow", "jev"] });
-    const rows = classifierEngineRows(h.provider);
+    const rows = classifierEngineRows(h.provider, "en");
     assert.ok(rows.some(row => row.key === "classifier.cacheTtlMs"));
     h.state.selected = rows.findIndex(row => row.key === "classifier.domains.late-domain");
     h.overlay.handleInput("\r"); h.overlay.handleInput(down); h.overlay.handleInput(down); h.overlay.handleInput("\r");
@@ -130,7 +133,7 @@ test("numeric editor and provider enforce declared bounds without altering exist
   const h = await harness();
   try {
     for (const [key, low, high] of [["classifier.timeoutMs", 499, 30001], ["classifier.maxCallsPerSession", 0, 501]] as const) {
-      const row = classifierEngineRows(h.provider).findIndex(row => row.key === key);
+      const row = classifierEngineRows(h.provider, "en").findIndex(row => row.key === key);
       for (const value of [low, high]) {
         h.state.selected = row;
         h.overlay.handleInput("\r"); h.overlay.handleInput("\x15"); h.overlay.handleInput(String(value)); h.overlay.handleInput("\r");
@@ -204,12 +207,12 @@ test("failed publication keeps UI draft and does not publish runtime; late/dispo
   try {
     h.state.engine["classifier.enabled"] = true;
     await writeFile(join(h.cwd, "external.json"), "{}");
-    const failing = new ClassifierSettingsOverlay({ state: h.state, engineRows: () => classifierEngineRows(h.provider), classifierModels: { options: [] }, llmModels: { options: [] }, theme, signal: h.controller.signal, requestRender() {}, done() {}, saveEngine: async () => { throw new Error("disk failed"); } });
+    const failing = new ClassifierSettingsOverlay({ locale: "en", state: h.state, engineRows: () => classifierEngineRows(h.provider, "en"), classifierModels: { options: [] }, llmModels: { options: [] }, theme, signal: h.controller.signal, requestRender() {}, done() {}, saveEngine: async () => { throw new Error("disk failed"); } });
     failing.handleInput("\x13"); failing.handleInput("\r"); await flush();
     assert.match(h.state.notice, /Save failed: disk failed/); assert.equal(h.state.engine["classifier.enabled"], true); assert.equal(h.applied.length, 0);
     let resolve!: (value: typeof h.state.snapshot) => void;
     const pending = new Promise<typeof h.state.snapshot>(done => { resolve = done; });
-    const late = new ClassifierSettingsOverlay({ state: h.state, engineRows: () => classifierEngineRows(h.provider), classifierModels: { options: [] }, llmModels: { options: [] }, theme, signal: h.controller.signal, requestRender() {}, done() {}, onDispose: () => h.controller.abort(), saveEngine: () => pending });
+    const late = new ClassifierSettingsOverlay({ locale: "en", state: h.state, engineRows: () => classifierEngineRows(h.provider, "en"), classifierModels: { options: [] }, llmModels: { options: [] }, theme, signal: h.controller.signal, requestRender() {}, done() {}, onDispose: () => h.controller.abort(), saveEngine: () => pending });
     late.handleInput("\x13"); late.handleInput("\r"); const notice = h.state.notice;
     late.dispose(); resolve(h.state.snapshot); await flush();
     assert.equal(h.controller.signal.aborted, true); assert.equal(h.state.notice, notice); assert.equal(h.state.engine["classifier.enabled"], true);
@@ -281,7 +284,7 @@ test("policy save failure reopens a fresh handle, reloads only policy and keeps 
         } else if (opens === 2) {
           assert.match(overlay.render(140).join("\n"), /policy reloaded, engine draft preserved/);
           overlay.handleInput("\t");
-          assert.match(overlay.render(140).join("\n"), /Enabled: true/);
+          assert.match(overlay.render(140).join("\n"), /Enabled:\s+true/);
           overlay.handleInput("\t");
         }
         if (opens <= 2) {
@@ -294,7 +297,7 @@ test("policy save failure reopens a fresh handle, reloads only policy and keeps 
     },
   };
   try {
-    await showClassifierSettings(ctx as never, h.provider, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); });
+    await showClassifierSettings(ctx as never, h.provider, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); }, "en");
     assert.equal(opens, 3); assert.equal(confirms, 2);
     assert.equal(JSON.parse(await readFile(join(h.cwd, ".pi", "decision-policy.json"), "utf8")).backend, "classifier");
     await assert.rejects(readFile(join(h.cwd, ".pi", "classifier.json")), { code: "ENOENT" });
@@ -331,7 +334,7 @@ test("unified wrapper settles custom overlay before policy host confirmation; dr
     },
   };
   try {
-    await showClassifierSettings(ctx as never, h.provider, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); });
+    await showClassifierSettings(ctx as never, h.provider, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); }, "en");
     assert.equal(confirms, 1); assert.equal(opens, 2);
     assert.equal(JSON.parse(await readFile(join(h.cwd, ".pi", "decision-policy.json"), "utf8")).backend, "classifier");
     await assert.rejects(readFile(join(h.cwd, ".pi", "classifier.json")), { code: "ENOENT" });
@@ -340,4 +343,88 @@ test("unified wrapper settles custom overlay before policy host confirmation; dr
     if (managed === undefined) delete process.env.PI_TEAMMATE_MANAGED_WINDOW; else process.env.PI_TEAMMATE_MANAGED_WINDOW = managed;
     await h.cleanup();
   }
+});
+
+// Use Pi's real ANSI foreground/background renderer, not an identity theme.
+const ansiTheme = new Theme({ accent: 39, text: 252, muted: 244, dim: 240, warning: 214, thinkingXhigh: 99 } as ConstructorParameters<typeof Theme>[0],
+  { customMessageBg: 235, selectedBg: 237 } as ConstructorParameters<typeof Theme>[1], "256color");
+const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+for (const locale of ["en", "zh-CN"] as const) {
+  test(`classifier ${locale}: ANSI hierarchy, aligned values, all modes fit 1..120 and narrow help remains available`, async () => {
+    const h = await harness(locale, ansiTheme);
+    const matrix = () => {
+      for (let width = 1; width <= 120; width++) for (const line of h.overlay.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `${locale}/${width}: ${line}`);
+      }
+    };
+    try {
+      const rendered = h.overlay.render(120);
+      assert.ok(rendered.some(line => line.includes(ansiTheme.getFgAnsi("accent"))));
+      assert.ok(rendered.some(line => line.includes(ansiTheme.getFgAnsi("muted"))));
+      const enabled = plain(rendered.find(line => plain(line).includes(locale === "en" ? "> Enabled:" : "> 启用:"))!);
+      const endpoint = plain(rendered.find(line => plain(line).includes(locale === "en" ? "JEV endpoint:" : "JEV 端点:"))!);
+      assert.equal(visibleWidth(enabled.slice(0, enabled.indexOf(locale === "en" ? "false" : "停用"))),
+        visibleWidth(endpoint.slice(0, endpoint.indexOf(locale === "en" ? "auto" : "自动"))));
+      assert.match(plain(rendered.join("\n")), locale === "en" ? /\[ Engine \]/ : /\[ 引擎 \]/);
+      assert.equal(classifierEngineRows(h.provider, locale)[0]!.label, locale === "en" ? "Enabled" : "启用");
+      for (const key of ["Esc", "Enter", "Ctrl+S", "Ctrl+R", "F5", "F6"]) assert.ok(plain(h.overlay.render(24).join("\n")).includes(key), key);
+      matrix();
+      h.state.selected = 2; h.overlay.handleInput("\r");
+      h.overlay.handleInput("\x1b[20"); h.overlay.handleInput("0~中文"); h.overlay.handleInput("分类模型\x1b[201~");
+      assert.match(plain(h.overlay.render(120).join("\n")), /中文分类模型/);
+      matrix(); h.overlay.handleInput("\r");
+      assert.equal(h.state.engine["classifier.model"], "typesafe/jev-1");
+      assert.match(h.state.notice, locale === "en" ? /Unsaved draft/ : /草稿未保存/);
+      h.state.selected = 3; h.overlay.handleInput("\r"); matrix();
+      h.overlay.handleInput("\x15"); h.overlay.handleInput("\x1b[200~1234\x1b[201~"); h.overlay.handleInput("\r");
+      h.overlay.handleInput("\x13"); matrix(); h.overlay.handleInput("\x1b");
+      assert.deepEqual(h.results, [], "nested Esc only returns to menu");
+      h.overlay.handleInput("\t"); matrix();
+      assert.match(plain(h.overlay.render(120).join("\n")), locale === "en" ? /Ask mode/ : /提问模式/);
+      h.state.selected = 2; h.overlay.handleInput("\r"); matrix(); h.overlay.handleInput(down); h.overlay.handleInput("\r");
+      assert.equal(h.state.policy.backend, "classifier");
+      h.overlay.handleInput("\x13"); matrix(); h.overlay.handleInput("\x1b");
+      h.state.selected = 3; h.overlay.handleInput("\r"); matrix(); h.overlay.handleInput("\x1b");
+      h.overlay.handleInput("\t"); h.overlay.handleInput("\x13"); h.overlay.handleInput("\r"); await h.waitSave();
+      assert.match(h.state.notice, locale === "en" ? /saved; policy draft untouched/ : /已保存；策略草稿未变更/);
+      const saved = JSON.parse(await readFile(join(h.cwd, ".pi", "classifier.json"), "utf8"));
+      assert.equal(saved.model, "typesafe/jev-1"); assert.equal(saved.timeoutMs, 1234);
+      assert.equal(h.state.policy.backend, "classifier", "other file draft survives save");
+    } finally { await h.cleanup(); }
+  });
+}
+
+test("classifier zh-CN save failure keeps selection, raw draft and retry semantics", async () => {
+  const h = await harness("zh-CN", ansiTheme);
+  try {
+    h.state.engine["classifier.model"] = "missing/原始模型"; h.state.selected = 2;
+    const failing = new ClassifierSettingsOverlay({ locale: "zh-CN", state: h.state, engineRows: () => classifierEngineRows(h.provider, "zh-CN"),
+      classifierModels: { options: [], unavailable: "No authenticated classifier models available." }, llmModels: { options: [] }, theme: ansiTheme,
+      signal: h.controller.signal, requestRender() {}, done() {}, saveEngine: async () => { throw new Error("disk failed"); } });
+    failing.handleInput("\x13"); failing.handleInput("\r"); await flush();
+    assert.equal(h.state.notice, "保存失败：disk failed"); assert.equal(h.state.selected, 2);
+    assert.equal(h.state.engine["classifier.model"], "missing/原始模型"); assert.equal(h.applied.length, 0);
+    failing.handleInput("\r");
+    assert.match(plain(failing.render(120).join("\n")), /已配置模型不可用（已保留）：missing\/原始模型/);
+    assert.match(plain(failing.render(120).join("\n")), /没有已认证的可用分类器模型/);
+    failing.handleInput("不存在");
+    assert.match(plain(failing.render(120).join("\n")), /没有匹配的候选项/);
+    for (let width = 1; width <= 120; width++) for (const line of failing.render(width)) assert.ok(visibleWidth(line) <= width);
+    failing.handleInput("\x1b"); assert.equal(h.state.engine["classifier.model"], "missing/原始模型");
+  } finally { await h.cleanup(); }
+});
+
+test("classifier follows shared locale events unless an explicit locale is supplied", () => {
+  const original = getTuiLocale();
+  let update!: (payload: unknown) => void;
+  const unbind = registerTuiLocaleEvents({ on(_event, handler) { update = handler; } });
+  const provider = createClassifierSettingsProvider();
+  try {
+    update({ version: 1, locale: "zh-CN", generation: "classifier-test" });
+    assert.equal(classifierEngineRows(provider)[0]!.label, "启用");
+    assert.equal(classifierEngineRows(provider, "en")[0]!.label, "Enabled");
+    update({ version: 1, locale: "en", generation: "classifier-test-en" });
+    assert.equal(classifierEngineRows(provider)[0]!.label, "Enabled");
+  } finally { update({ version: 1, locale: original, generation: "classifier-test-restore" }); unbind(); }
 });

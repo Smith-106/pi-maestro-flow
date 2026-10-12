@@ -6,6 +6,7 @@
  */
 
 import { Type, type Static } from "typebox";
+import { Errors } from "typebox/value";
 import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
 import {
   TODO_ADVANCE_TRANSITIONS,
@@ -21,6 +22,8 @@ import {
   TODO_MAX_HANDOFF_TEXT_BYTES,
   TODO_MAX_RESOURCE_URI_BYTES,
   TODO_MAX_RESOURCE_URIS,
+  TODO_RESOURCE_URI_GUIDANCE,
+  TODO_RESOURCE_URI_SCHEMA_PATTERN,
   TODO_UPDATE_FIELDS,
 } from "../tools/todo-contract.ts";
 
@@ -191,6 +194,7 @@ export const OcrReviewParams = Type.Object({
 
 const QuestionOptionSchema = Type.Object({
   label: Type.String({ description: "Option display text" }),
+  recommended: Type.Optional(Type.Boolean({ description: "Explicit recommended option for host Ask-auto timeout fallback; never an approval. Single-select requires one recommended option; multi-select adopts all marked options." })),
   description: Type.Optional(
     Type.String({ description: "Explanation of this option" }),
   ),
@@ -238,7 +242,8 @@ const TodoResourceUrisSchema = Type.Array(
   Type.String({
     minLength: 1,
     maxLength: TODO_MAX_RESOURCE_URI_BYTES,
-    description: "Trimmed resource URI; runtime enforces the UTF-8 byte limit",
+    pattern: TODO_RESOURCE_URI_SCHEMA_PATTERN,
+    description: `Trimmed resource URI; runtime enforces the UTF-8 byte limit. ${TODO_RESOURCE_URI_GUIDANCE}`,
   }),
   {
     maxItems: TODO_MAX_RESOURCE_URIS,
@@ -459,3 +464,19 @@ export const TodoToolParams = Type.Object({
 // omit conditionals that Gemini function declarations do not support.
 const { allOf: _todoConditions, ...todoModelSchema } = TodoToolParams as typeof TodoToolParams & { allOf?: unknown };
 export const TodoModelParams = Type.Unsafe<Static<typeof TodoToolParams>>(todoModelSchema);
+
+export function formatTodoArgumentError(params: unknown): string {
+  const [error] = Errors(TodoToolParams, params);
+  if (!error) return "Invalid todo arguments.";
+  const path = error.instancePath || "$";
+  if (/\/resourceUris\/\d+$/.test(path)) {
+    let value: unknown = params;
+    for (const key of path.split("/").slice(1)) {
+      value = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+    }
+    const preview = JSON.stringify(value)?.slice(0, 160) ?? String(value);
+    const message = error.keyword === "pattern" ? "must be a structurally valid resource URI" : error.message;
+    return `Invalid todo arguments at ${path}: ${message}; received ${preview}. ${TODO_RESOURCE_URI_GUIDANCE}`;
+  }
+  return `Invalid todo arguments at ${path}: ${error.message}`;
+}

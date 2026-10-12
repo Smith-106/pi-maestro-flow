@@ -4,7 +4,7 @@ import { decisionPolicyPath, loadDecisionPolicy, policyFingerprint } from "../de
 import { isDecisionPolicyConfiguring } from "../decision-policy/extension.ts";
 import { evaluateDecisionPolicy, hostAskGrantFingerprint, PolicyAdviceSchema, type HostAskPolicyResolver, type PolicyEvaluation } from "../decision-policy/service.ts";
 import { beginDecisionPolicyStatus } from "../decision-policy/status.ts";
-import { getPlanAutoSnapshot, isCurrentPlanAutoTask } from "./plan-auto.ts";
+import { getAskAutoSnapshot, getPlanAutoSnapshot, isCurrentAskAutoGrant, isCurrentPlanAutoTask } from "./plan-auto.ts";
 import type { TodoTask } from "./todo.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -28,6 +28,7 @@ import {
 export interface AskQuestionOption {
   label: string;
   description?: string;
+  recommended?: boolean;
 }
 
 export interface AskQuestionSpec {
@@ -67,8 +68,17 @@ export interface AskDecision {
   question: string;
   evaluation: PolicyEvaluation;
 }
+export interface AskTimeoutRecommendation {
+  questionIndex: number;
+  question: string;
+  selected: string[];
+  source: "timeout";
+  timeoutMs: number;
+}
 export interface AskResultDetails {
   answers: AskAnswer[];
+  /** Explicit option recommendations adopted under host Ask-auto, not human answers. */
+  recommendations?: AskTimeoutRecommendation[];
   /** Machine recommendations/observations, never user answers or approvals. */
   decisions?: AskDecision[];
   cancelled?: boolean;
@@ -122,7 +132,7 @@ export async function executeAsk(
     || typeof question.question !== "string" || !question.question.trim()
     || (question.header !== undefined && typeof question.header !== "string")
     || (question.multiSelect !== undefined && typeof question.multiSelect !== "boolean")
-    || (question.options !== undefined && (!Array.isArray(question.options) || question.options.some((option) => !option || typeof option.label !== "string" || (option.description !== undefined && typeof option.description !== "string")))))) {
+    || (question.options !== undefined && (!Array.isArray(question.options) || question.options.some((option) => !option || typeof option.label !== "string" || (option.description !== undefined && typeof option.description !== "string") || (option.recommended !== undefined && typeof option.recommended !== "boolean")))))) {
     return askError("Invalid questionnaire input.");
   }
   const questions = cloneAskQuestions(params.questions.slice(0, 4));
@@ -137,6 +147,7 @@ export async function executeAsk(
       action: "answer" | "cancel";
       answers?: AskAnswer[];
       decisions?: AskDecision[];
+      recommendations?: AskTimeoutRecommendation[];
     }>("question", { questions }, undefined, signal);
     if (!relay.ok) {
       if (relay.reason === "aborted") return cancelledAsk();
@@ -145,7 +156,7 @@ export async function executeAsk(
     }
     const relayed = relay.result;
     if (relayed.action === "answer" && Array.isArray(relayed.answers)) {
-      return askSuccess(relayed.answers, relayed.decisions);
+      return askSuccess(relayed.answers, relayed.decisions, relayed.recommendations);
     }
     if (relayed.action === "cancel") return cancelledAsk();
     return askError("The parent session returned an invalid teammate questionnaire response.");
@@ -210,10 +221,13 @@ export async function executeAsk(
     if (decisions.length > 0) {
       if (!await fresh() || !ownerFresh()) return askError("Project policy, session or Plan-auto authorization changed; discard these recommendations and retry.");
       if (!external.length) return askSuccess([], decisions);
-      const human = await executeHumanAsk(external.map((item) => item.question), ctx, options);
+      const autoAllowed = external.every((item) => decisions.some((decision) => decision.questionIndex === item.index
+        && decision.evaluation.mode === "off" && !decision.evaluation.degradedReason));
+      const human = await executeHumanAsk(external.map((item) => item.question), ctx, options, autoAllowed, fresh);
       if (human.isError || human.details.cancelled) return human;
       if (!await fresh() || !ownerFresh()) return askError("Project policy, session or Plan-auto authorization changed while awaiting human answers; recommendations were discarded.");
-      return askSuccess(human.details.answers.map((answer, index) => ({ ...answer, questionIndex: external[index].index })), decisions);
+      return askSuccess(human.details.answers.map((answer, index) => ({ ...answer, questionIndex: external[index].index })), decisions,
+        human.details.recommendations?.map((item) => ({ ...item, questionIndex: external[item.questionIndex].index })));
     }
   }
   return executeHumanAsk(questions, ctx, options);
@@ -227,18 +241,79 @@ export function requiresHumanDecision(question: string | AskQuestionSpec): boole
     ...(question.options ?? []).flatMap((option) => [option.label, option.description ?? ""]),
   ].join("\n");
   if (/\b(?:config\w*|settings?|authentication|authorization|personal\s+prefer\w*|unknown\s+facts?|ignore\s+(?:all\s+)?(?:previous|prior|rules|instructions)|override\s+(?:the\s+)?(?:policy|rules)|system\s+prompt)\b|(?:配置|设置|设定|认证|鉴权|个人偏好|未知事实|忽略.{0,12}(?:规则|指令)|覆盖.{0,8}(?:策略|规则))/i.test(text)) return true;
-  return /\b(?:approv\w*|permission|promot\w*|supersede|deprecat\w*|credential\w*|payment|purchase|secret\w*|api[ -]?key|delet\w*|eras\w*|destruct\w*|drop|wipe|publish\w*|deploy\w*|scope[ -]?(?:expansion|change)|(?:expand|change)\s+(?:the\s+)?scope|confirm\w*\s+(?:(?:this|the)\s+)?plan)\b|(?:批准|审批|授权|权限确认|晋升|取代规范|废弃规范|支付|购买|密钥|凭据|删除|清空|销毁|破坏性|发布|部署|扩大范围|扩展范围|变更范围|修改范围|确认.{0,8}(?:计划|方案))/i.test(text);
+  return /\b(?:approv\w*|permission|promot\w*|supersede|deprecat\w*|credential\w*|pay\w*|paid|invoice\w*|bills?|purchase\w*|refund\w*|remit\w*|checkout|(?:transfer|send|wire)\s+(?:money|funds|cash)|secret\w*|api[ -]?key|delet\w*|remov\w*|eras\w*|destruct\w*|drop|wipe|publish\w*|deploy\w*|scope[ -]?(?:expansion|change)|(?:expand|change)\s+(?:the\s+)?scope|confirm\w*\s+(?:(?:this|the)\s+)?plan)\b|(?:批准|审批|授权|权限确认|晋升|取代规范|废弃规范|支付|付款|转账|汇款|退款|扣款|充值|发票|账单|购买|密钥|凭据|删除|移除|抹除|擦除|清空|销毁|破坏性|发布|部署|扩大范围|扩展范围|变更范围|修改范围|确认.{0,8}(?:计划|方案))/i.test(text);
 }
 
-async function executeHumanAsk(questions: AskQuestionSpec[], ctx: ExtensionContext, options: AskExecutionOptions): Promise<AskToolResult> {
+async function executeHumanAsk(
+  questions: AskQuestionSpec[], ctx: ExtensionContext, options: AskExecutionOptions,
+  autoAllowed = true, validatePolicy?: () => Promise<boolean>,
+): Promise<AskToolResult> {
   const status = typeof ctx.sessionManager?.getSessionId === "function" ? beginDecisionPolicyStatus(ctx, "ask", "waiting-user") : undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await executeHumanAskDialog(questions, ctx, options);
-    status?.finish({ humanAnswered: !result.isError && !result.details.cancelled, cancelled: !!result.details.cancelled, degraded: !!result.isError });
+    const signal = options.signal ?? ctx.signal;
+    const grant = autoAllowed && !options.humanOnly && ctx.hasUI ? getAskAutoSnapshot(ctx) : undefined;
+    const selected = questions.map((question) => {
+      const choices = question.options?.filter((option) => option.recommended) ?? [];
+      const labels = (question.options ?? []).map((option) => option.label);
+      if (requiresHumanDecision(question) || !choices.length || (!question.multiSelect && choices.length !== 1)
+        || new Set(labels).size !== labels.length || choices.some((option) => !option.label.trim() || option.label === NONE_OPTION_LABEL)) return undefined;
+      return choices.map((option) => option.label);
+    });
+    let result: AskToolResult;
+    if (!grant || isDecisionPolicyConfiguring(ctx) || selected.some((choices) => !choices)) {
+      result = await executeHumanAskDialog(questions, ctx, options);
+    } else {
+      // Snapshot policy before opening either endpoint; timeout must not outlive its authority.
+      let fingerprint: string | undefined;
+      try {
+        const policy = await loadDecisionPolicy(ctx.cwd);
+        if (!policy || policy.ask.mode === "off") fingerprint = policy ? policyFingerprint(policy) : "missing";
+      } catch {
+        // Invalid policy cannot authorize fallback; ordinary human dialogue remains available.
+      }
+      const fresh = async (): Promise<boolean> => {
+        try {
+          if (signal?.aborted || !isCurrentAskAutoGrant(grant, ctx) || isDecisionPolicyConfiguring(ctx) || !fingerprint) return false;
+          if (validatePolicy && !await validatePolicy()) return false;
+          const policy = await loadDecisionPolicy(ctx.cwd);
+          return !signal?.aborted && isCurrentAskAutoGrant(grant, ctx) && !isDecisionPolicyConfiguring(ctx)
+            && (policy ? policyFingerprint(policy) : "missing") === fingerprint;
+        } catch { return false; }
+      };
+      const controller = new AbortController();
+      const dialogSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      let settled = false;
+      let timedOut = false;
+      const pending = executeHumanAskDialog(questions, ctx, { ...options, signal: dialogSignal }).finally(() => {
+        settled = true;
+      });
+      if (fingerprint) {
+        ctx.ui.notify(`Ask-auto：${grant.timeoutMs / 1000} 秒后采用标记的推荐项；作答或取消优先。`, "info");
+        timer = setTimeout(() => {
+          void fresh().then((valid) => {
+            if (!valid || settled || signal?.aborted) return;
+            timedOut = true;
+            controller.abort();
+          });
+        }, grant.timeoutMs);
+      }
+      result = await pending;
+      if (timedOut) {
+        if (signal?.aborted) result = cancelledAsk();
+        else if (!await fresh()) result = askError("Ask-auto authorization, session or policy changed; retry the questionnaire.");
+        else result = askSuccess([], undefined, questions.map((question, questionIndex) => ({
+          questionIndex, question: question.question, selected: selected[questionIndex]!, source: "timeout", timeoutMs: grant.timeoutMs,
+        })));
+      }
+    }
+    status?.finish({ humanAnswered: !result.isError && !result.details.cancelled && !result.details.recommendations?.length, cancelled: !!result.details.cancelled, degraded: !!result.isError });
     return result;
   } catch (error) {
     status?.finish({ cancelled: options.signal?.aborted ?? ctx.signal?.aborted, degraded: true });
     throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -298,6 +373,7 @@ function cloneAskQuestions(questions: readonly QuestionSpec[]): QuestionSpec[] {
       options: question.options.map((option) => ({
         label: option.label,
         ...(option.description === undefined ? {} : { description: option.description }),
+        ...(option.recommended === undefined ? {} : { recommended: option.recommended }),
       })),
     }),
     ...(question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect }),
@@ -506,7 +582,7 @@ async function selectOneDialog(
   signal?: AbortSignal,
 ): Promise<string[] | undefined> {
   const labels = options.map((option, index) =>
-    `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`
+    `${index + 1}. ${option.label}${option.recommended ? " [推荐]" : ""}${option.description ? ` — ${option.description}` : ""}`
   );
   const choice = await ctx.ui.select(title, labels, { signal });
   const index = choice ? labels.indexOf(choice) : -1;
@@ -522,7 +598,7 @@ async function selectMultipleDialog(
   const selected = new Set<number>();
   while (true) {
     const labels = options.map((option, index) =>
-      `${selected.has(index) ? "[x]" : "[ ]"} ${index + 1}. ${option.label}`
+      `${selected.has(index) ? "[x]" : "[ ]"} ${index + 1}. ${option.label}${option.recommended ? " [推荐]" : ""}`
     );
     const done = `完成（${selected.size}）`;
     const choice = await ctx.ui.select(title, [...labels, done], { signal });
@@ -544,7 +620,7 @@ async function selectMultipleDialog(
   }
 }
 
-function askSuccess(answers: AskAnswer[], decisions?: AskDecision[]): AskToolResult {
+function askSuccess(answers: AskAnswer[], decisions?: AskDecision[], recommendations?: AskTimeoutRecommendation[]): AskToolResult {
   return {
     content: [{
       type: "text",
@@ -559,10 +635,11 @@ function askSuccess(answers: AskAnswer[], decisions?: AskDecision[]): AskToolRes
           return [`${(answer.questionIndex ?? index) + 1}. ${answer.question}`, `   ${finalChoice}`];
         }),
         ...(decisions?.length ? ["Internal machine policy recommendations may be used to continue within task scope; they are NOT user answers or approval."] : []),
-        JSON.stringify({ answers, ...(decisions?.length ? { decisions } : {}) }, null, 2),
+        ...(recommendations?.length ? ["Ask-auto timeout adopted the explicitly recommended options. These are machine recommendations, NOT user answers or approval."] : []),
+        JSON.stringify({ answers, ...(decisions?.length ? { decisions } : {}), ...(recommendations?.length ? { recommendations } : {}) }, null, 2),
       ].join("\n"),
     }],
-    details: { answers, ...(decisions?.length ? { decisions } : {}) },
+    details: { answers, ...(decisions?.length ? { decisions } : {}), ...(recommendations?.length ? { recommendations } : {}) },
   };
 }
 
@@ -798,7 +875,7 @@ async function showAskWizard(
             const active = cursor === i;
             const checked = selected[step].has(i);
             const marker = active ? theme.fg("success", "›") : " ";
-            const labelText = `${options[i].label}${checked ? "  已选" : ""}`;
+            const labelText = `${options[i].label}${options[i].recommended ? " [推荐]" : ""}${checked ? "  已选" : ""}`;
             const coloredLabel = checked || active ? theme.fg("success", labelText) : labelText;
             const label = checked
               ? theme.bg("selectedBg", theme.bold(` ${coloredLabel} `))
@@ -921,7 +998,7 @@ async function showAskWizard(
         const active = cursors[step] === i;
         const checked = selected[step].has(i);
         const marker = active ? theme.fg("success", "›") : " ";
-        const labelText = `${options[i].label}${checked ? "  已选" : ""}`;
+        const labelText = `${options[i].label}${options[i].recommended ? " [推荐]" : ""}${checked ? "  已选" : ""}`;
         const coloredLabel = checked || active ? theme.fg("success", labelText) : labelText;
         const label = checked ? theme.bg("selectedBg", theme.bold(` ${coloredLabel} `)) : coloredLabel;
         const selection = q.multiSelect ? (checked ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]")) : "";
@@ -1000,7 +1077,7 @@ async function showAskWizard(
         const ci = typing && detailCursor >= 0 ? detailCursor : cursors[step];
         const opt = options[ci];
         if (!opt) return out;
-        push(theme.bold(opt.label));
+        push(theme.bold(`${opt.label}${opt.recommended ? " [推荐]" : ""}`));
         push("");
         if (opt.description) {
           push(opt.description);

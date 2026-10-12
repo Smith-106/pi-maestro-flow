@@ -15,9 +15,11 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.32.1` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.33.0` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
-> **v0.32.1 — Dependency Repairs & Runtime Hardening:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. The `active-win` and `@nut-tree-fork/nut-js` import keys use scoped `@dyw1234` forks; provenance and verification scope are in [RELEASE.md](../../RELEASE.md). Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified, with no whole-graph vulnerability-free claim.
+> **v0.33.0 — Stable Browser Sessions & Scoped Automation:** Flow 0.33.0 and Teammate 2.9.0; Cockpit 0.24.3, Backends 0.1.7, the remaining package versions, and `maestro-flow >=0.5.91` are unchanged. Named browser tabs survive turns, Plan-auto retains its session switch across cycles with fresh task authority, and Ask-auto timeout results remain machine recommendations, not answers or approval.
+
+> **v0.32.1 baseline — Dependency Repairs & Runtime Hardening:** Flow 0.32.1, Backends 0.1.7, Teammate 2.8.1, Cockpit 0.24.3, and `maestro-flow >=0.5.91`. The `active-win` and `@nut-tree-fork/nut-js` import keys use scoped `@dyw1234` forks; provenance and verification scope are in [RELEASE.md](../../RELEASE.md). Native checks cover Windows x64 / Node 22.22 only; minimum Node and macOS/Linux remain unverified, with no whole-graph vulnerability-free claim.
 
 > **v0.32.0 baseline — Scoped Decisions, Exact Evidence & Browser Bridge:** human-scoped Plan-auto, advisory policy, exact Goal evidence, multi-listener extension bridging, and scoped Codex Fast. Pi baseline remains 0.99.0; legacy 0.87–0.98 is version-gated. Release verification/publication is tracked in [RELEASE.md](../../RELEASE.md).
 
@@ -75,7 +77,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -317,11 +319,28 @@ existing Chrome DevTools Protocol endpoint (`app.cdp_url`, optional
 `app.target`). `run` exposes navigation, observation, selector/element input,
 evaluation, waits, screenshots, and extraction helpers.
 
-`browser.run` intentionally executes trusted host code with the same
-`AsyncFunction` semantics as oh-my-pi. Treat it like shell execution: do not run
-untrusted code. Supported asynchronous browser operations obey timeout and
-`AbortSignal`; abort or timeout closes the named tab. Session shutdown closes all
-tabs and removes automatically created screenshots.
+Named tabs are scoped to the trusted host session and remain stable across turns.
+`status.namedTabs` and `close all` target only that scope. Bridge discovery is
+process-shared; operation ownership does not isolate cookies/login state.
+
+`browser.run` intentionally executes trusted host code with `AsyncFunction`
+semantics. Treat it like shell execution: do not run untrusted code. On
+managed/profile/CDP, `timeout` is one deadline shared by setup, execution and
+postprocessing, not per step; cleanup can add latency. Extension command/execution
+waits are bounded, but setup/postprocessing can add latency. Failures include bounded passive diagnostics without
+replaying actions. Managed timeout closes owned resources; borrowed profile/CDP
+attachments disconnect, and their page code may continue.
+
+An interrupted extension run blocks reuse until all command terminals and host
+operations drain. Then explicitly `open` the same name without a URL to revalidate
+the existing fixed tab/generation; this preserves the tab and does not replay the
+interrupted action. `open` rejects while draining. A timeout/error or bridge-wide
+`drainingCommands: 0` alone is not proof that an entry is reusable. Shutdown cleans
+up session-owned resources and automatically created screenshots.
+
+Load the SOP index and relevant full topic through `browser guide` before browser
+operations. SOP loading also recognizes published knowledge hints from promoted
+entries; a hint is not a substitute for reading the full topic.
 
 ### BM25 tool discovery
 
@@ -383,12 +402,12 @@ session model. The command saves to `.pi/settings.local.json`.
 
 ### Session-only Plan auto-confirm
 
-After entering Plan mode, type `/plan-auto on` in the parent TUI or press
+In Act or Plan mode, type `/plan-auto on` in the parent TUI or press
 `Alt+Shift+A`. `/plan-auto` without arguments toggles; `status` reports the grant,
 and `off` revokes it. Only physical TUI submission or the shortcut can enable it;
 model-injected commands, child agents, RPC and resumed audit entries cannot.
 
-The next `plan-confirm` approves the exact persisted draft through the normal
+Each Plan cycle's `plan-confirm` approves the exact persisted draft through the normal
 archive/manifest transaction and starts **standalone, current-context** execution.
 Enabling does not approve an existing draft immediately; `plan-update` only saves
 and `plan-review` remains manual. Old Workflow/New Context settings are not inherited.
@@ -405,12 +424,26 @@ Sensitive choices, personal preferences, uncertain scope, low confidence, invali
 output, timeouts and exhausted budgets require a human; configuration and remote
 human-only flows are unchanged.
 
-The footer shows `PLAN-AUTO confirm+ask` or `PLAN-AUTO ask`. The grant survives
-revision, ordinary compaction and same-session `new_context`, but is revoked by
-off, manual Plan exit/clear, a new Plan cycle, session/cwd change, fork, reload,
-restart or shutdown. It is never restored from disk. Turning it off stops future
+The footer shows `PLAN-AUTO on` while waiting for a Plan, `PLAN-AUTO confirm+ask`
+during planning, or `PLAN-AUTO ask` during authorized execution. The switch stays
+on across Plan cycles, manual Plan exit/clear, revision, ordinary compaction and
+same-session `new_context`. New cycles bind fresh task authority; manual exit/clear
+invalidates old task authority without disabling the switch. Off, session/cwd
+change, fork, history navigation, reload, restart or shutdown revoke it. It is never
+restored from disk. Turning it off stops future
 automatic decisions, not already-started execution. Approval already committed
 before revocation remains recorded, but an unstarted automatic handoff is stopped.
+
+### Ask-auto timeout recommendations
+
+A human can enable `/auto ask on [seconds]` (default 60 seconds). On timeout,
+remaining safe option questions may adopt explicit `recommended: true` choices:
+one for single-select, all marked options for multi-select. Results stay in
+`recommendations` with `source: timeout`, never human `answers` or approval;
+mixed batches retain `questionIndex`. Policy classification takes priority.
+External/uncertain/degraded decisions, human-only questions, missing or ambiguous
+recommendations and sensitive approvals never auto-confirm. This is not a Plan,
+permission, payment, publication or knowledge-promotion authorization channel.
 
 ### Approval-mode shortcut
 
@@ -545,6 +578,26 @@ Enter opens its inspector; typing filters by task, member, or ID; Escape returns
 closes. Wide terminals use a list/inspector split, while narrow terminals collapse to
 one reversible column and keep the Escape recovery cue visible.
 
+## Bounded Session History
+
+`session_history` defaults to case-insensitive literal phrase search. Optional
+`mode: "terms"` applies NFKC, lowercase and whitespace normalization and requires
+all unique terms in a single visible projected entry, in any order. It does not
+perform Chinese word segmentation, regex, fuzzy or semantic matching.
+`sort: "relevance"` ranks exact/continuous phrases first, then tighter term spans;
+ties retain source order and `source` remains the default sort.
+
+Search uses zero-based `offset` and `limit <= 20`; `matchCount`, `hasMore` and
+`nextOffset` describe the current scan. Each page freshly scans live transcripts,
+not a frozen snapshot; the last page is not truncated unless the scan itself is
+incomplete. Use a returned exact `session://<id>/entry/<id>` URI to pin evidence.
+Hidden rows, thinking and tool-call arguments remain excluded; tool results are
+explicit opt-in. Run the mandatory Maestro knowledge search before historical
+workspace discovery and verify historical evidence against live code/state.
+
+Classifier settings/diagnostics follow the shared `zh-CN` / `en` TUI locale;
+canonical domain/mode identifiers and authorization boundaries are unchanged.
+
 ## Session Compaction Checkpoints
 
 Pi compaction is extended with a Maestro recovery checkpoint that preserves the
@@ -558,14 +611,14 @@ Skills are authored and maintained by the [Maestro Flow](https://github.com/catl
 the bundled `.pi/skills/` directory. In this repository the canonical source set lives under
 the root `.pi/skills`; prepack copies it into `packages/pi-maestro-flow/.pi/skills` for npm,
 while the root `.pi/settings.json` references its local `skills` directory for development. Install the package through
-`pi install npm:pi-maestro-flow@0.31.3` (or register a local package path) and Pi discovers
+`pi install npm:pi-maestro-flow@0.33.0` (or register a local package path) and Pi discovers
 the bundled skills through its standard package resource loader.
 
 Project system instructions use `.pi/SYSTEM.md` as their single authority; the
 previous bundled `AGENTS.md` injection is retired. Migrate projects that depended
 on that old injection to `.pi/SYSTEM.md`.
 
-`pi-maestro-flow@0.32.1` requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin). Package installation does not imply model inference validation.
+`pi-maestro-flow@0.33.0` requires `maestro-flow >=0.5.91` as an associated workflow resource package (a range, not an exact pin). Package installation does not imply model inference validation.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

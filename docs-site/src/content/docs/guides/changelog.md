@@ -5,7 +5,22 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前版本：v0.32.1 — 依赖修补与运行时加固。** Node.js 最低 22.19.0，Pi 验证基线 0.99.0；原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。历史版本记录与安装命令保留原值。
+> **当前版本：v0.33.0 — 浏览器会话稳定性与范围化自动决策。** Node.js 最低 22.19.0，Pi 验证基线 0.99.0；既有原生实测限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。历史版本记录与安装命令保留原值；本次测试、构建与发布证据由仓库 RELEASE.md 记录，不在此预先声明通过。
+
+## v0.33.0 — 浏览器会话稳定性与范围化自动决策
+
+- Flow **0.33.0**、Teammate **2.9.0**；Cockpit **0.24.3**、Backends **0.1.7**、Backend-Core **0.1.5**、Settings-Core **0.2.3**、Fabric/Fabric-Core **0.1.0**、pi-fluent-tui **0.1.2** 不变。引擎仍为范围 **`maestro-flow >=0.5.91`**，其余依赖版本与宿主基线不变。
+- **Host-session 浏览器归属**：命名 tab 在同一可信宿主会话跨 turn 稳定，`status.namedTabs` / `close all` 只针对本 scope；bridge discovery 仍进程共享，cookies/登录态不是隔离的。
+- **统一 run deadline 与 passive 诊断**：managed/profile/CDP 的 setup、执行、postprocessing 共用一个 timeout 预算，cleanup 可增加延迟；extension command/execution 等待有界，setup/postprocessing 可另加延迟；失败提供有界被动信息、不自动重放或交互，不能把异常当成动作停止的证明。
+- **Extension drain/reopen**：中断后须等待 entry 所有 command terminal 与 host operation drain，再显式 open 同名且不传 url，重验证 fixed tab/generation；draining 时 open 也拒绝，保留 tab、不重放旧动作，bridge 总计为零不代替 entry 检查。
+- **跨周期 Plan-auto**：真人父 TUI 可在 Act/Plan 开启 grant；会话开关跨 cycle 与 exit/clear 保留，但新 cycle 更新任务授权，exit/clear 使旧授权失效。off、会话/cwd 切换、fork、历史导航与重载/重启撤销；精确 durable approval 与 standalone/current 执行边界不变。
+- **Ask-auto 超时机器建议**：真人 `/auto ask on [seconds]`（默认 60 秒）允许安全选项题超时采用明确 `recommended: true`；结果为 `recommendations` / `source: timeout`，不是人工答案或批准。Policy classification 优先，敏感、外部、不确定、降级、human-only、缺失/歧义推荐仍交人工。
+- **Session history 搜索与 fresh-scan 分页**：`terms` 以 NFKC/小写/空白归一化匹配同一可见 entry 的全部词；`relevance` 按精确短语与词跨度排序。0-based `offset`、`matchCount`、`hasMore`、`nextOffset` 描述每次扫描，每页重扫 live transcripts，不是快照；精确 session URI 用于复读证据，隐藏文本边界不变。
+- **Classifier 双语与 published SOP hint**：设置/诊断跟随 `zh-CN` / `en` locale，协议键不变；SOP loading 支持已发布/晋升知识的 hint，浏览器操作前仍读完整相关 topic。
+
+升级：`pi install npm:pi-maestro-flow@0.33.0`。升级前关闭 Pi，完成后重启；保留的本地 companion 覆盖需同步到 Teammate 2.9.0 / Cockpit 0.24.3。旧 fork 来源、许可与原生验证证据保留在下方 v0.32.1 历史记录。
+
+- **Teammate RPC 图像 telemetry**：wire event 省略重复图像字节，保留模型/持久会话原始数据及结构化输出；损坏或超限 JSONL 立即判失败并回收 child，已发布答案不被后续损坏事件改写。
 
 ## v0.32.1 — 依赖修补与运行时加固
 

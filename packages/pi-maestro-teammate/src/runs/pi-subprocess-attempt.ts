@@ -106,6 +106,7 @@ import {
   releasePublishedTurnHistory,
   resetUsage,
   setUsageSnapshot,
+  truncateUtf8Head,
   truncateUtf8Tail,
   writeSchemaFile,
   writeSystemPromptFile,
@@ -875,6 +876,10 @@ export async function runSingleAttempt(
     forkSessionFile,
     params.fast ?? agentConfig.fast,
   );
+  const projectionImport = `--import=${new URL("./rpc-stdout-projection.mjs", import.meta.url).href}`;
+  if (!spawnEnv.NODE_OPTIONS?.split(/\s+/).includes(projectionImport)) {
+    spawnEnv.NODE_OPTIONS = [spawnEnv.NODE_OPTIONS, projectionImport].filter(Boolean).join(" ");
+  }
   const spawnSpec = getPiSpawnCommand(piArgs);
   const probedChildVersion = options.spawnChildProcess
     ? options.childPiVersion
@@ -1141,8 +1146,17 @@ export async function runSingleAttempt(
     // Parse JSON lines from stdout. Pi's agent_end event can repeat the full
     // message history even without structured output, so framing must allow the
     // bounded transcript plus JSON escaping and event metadata in every lane.
-    const stdoutLines = createUtf8LineDecoder(EXECUTION_BUFFER_LIMITS.transcriptBytes * 4);
+    const failStdoutProtocol = (reason: string): void => {
+      if (state.terminal) return;
+      state.receivedFirstActivity = true;
+      state.stdoutProtocolViolation = true;
+      addReplayEvidence("stdout-protocol", reason);
+      state.runtimeFailure = `Teammate stdout JSONL protocol violation (agent=${params.agent}, correlationId=${correlationId}): ${reason}`;
+      appendBoundedTranscriptMessage(messages, { role: "system", content: state.runtimeFailure });
+      completeTurn(undefined, true, 1, "failed");
+    };
     const processStdoutLine = (line: string) => {
+      if (state.terminal) return;
       const trimmed = line.trim();
       if (!trimmed) {
         state.receivedFirstActivity = true;
@@ -1150,24 +1164,34 @@ export async function runSingleAttempt(
         if (timers.firstActivity) clearTimeout(timers.firstActivity);
         return;
       }
+      let event: JsonLineEvent;
       try {
-        const event = JSON.parse(trimmed) as JsonLineEvent;
+        event = JSON.parse(trimmed) as JsonLineEvent;
+      } catch (error) {
+        failStdoutProtocol(`malformed JSON, receivedBytes=${Buffer.byteLength(line)}: ${error instanceof Error ? truncateUtf8Head(error.message, 256) : String(error)}`);
+        return;
+      }
+      if (!event || typeof event !== "object" || typeof event.type !== "string") {
+        failStdoutProtocol(`invalid event envelope, receivedBytes=${Buffer.byteLength(line)}`);
+        return;
+      }
+      try {
         processEvent(event);
-      } catch {
-        state.receivedFirstActivity = true;
-        addReplayEvidence("stdout-protocol", "malformed-json-line");
-        state.stdoutProtocolViolation = true;
-        if (timers.firstActivity) clearTimeout(timers.firstActivity);
-        state.lastContent = appendUtf8Tail(
-          state.lastContent,
-          trimmed + "\n",
-          EXECUTION_BUFFER_LIMITS.streamBytes,
-        );
+      } catch (error) {
+        failStdoutProtocol(`event processing failed, event=${truncateUtf8Head(event.type, 64)}: ${error instanceof Error ? truncateUtf8Head(error.message, 256) : String(error)}`);
       }
     };
+    const stdoutLines = createUtf8LineDecoder(
+      EXECUTION_BUFFER_LIMITS.transcriptBytes * 4,
+      ({ receivedBytes, maxBytes, prefix }) => {
+        const eventType = /"type"\s*:\s*"([\w-]{1,64})"/.exec(prefix)?.[1] ?? "unknown";
+        failStdoutProtocol(`oversized event=${eventType}, receivedBytes=${receivedBytes}, limitBytes=${maxBytes}`);
+      },
+      processStdoutLine,
+    );
     child.stdout?.on("data", (chunk: Buffer) => {
       pokeLifecycleDeadline();
-      for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
+      stdoutLines.write(chunk);
     });
 
     const clearInterrupt = (): PendingInterrupt | undefined => {
@@ -1358,7 +1382,10 @@ export async function runSingleAttempt(
       exitCode = 0,
       terminalStatus: AgentTerminalStatus = exitCode === 0 ? "completed" : "failed",
     ): void {
-      if (state.terminal || state.turnLifecycleSettled) return;
+      if (state.terminal) return;
+      // A settled result stays published, but a later corrupt RPC line must
+      // retire the still-live runtime and report a failed lifecycle.
+      if (state.turnLifecycleSettled && !(state.stdoutProtocolViolation && terminalStatus === "failed")) return;
       if (state.stdoutProtocolViolation && exitCode === 0) {
         appendBoundedTranscriptMessage(messages, {
           role: "system",

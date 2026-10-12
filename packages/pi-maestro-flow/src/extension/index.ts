@@ -52,6 +52,7 @@ import {
   AskUserQuestionParams,
   TodoToolParams,
   TodoModelParams,
+  formatTodoArgumentError,
   OcrReviewParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
@@ -277,7 +278,9 @@ import type { UserAttentionHandler } from "../notify/user-attention.ts";
 import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
 import { SkillManagerStore } from "../skills/skill-manager-store.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
+import { browserHostSessionId } from "../tools/browser/session-scope.ts";
 import { registerGatewayBoardTool } from "../tools/gateway-board.ts";
+import { TODO_RESOURCE_URI_GUIDANCE } from "../tools/todo-contract.ts";
 import { registerGatewayFabricTools } from "../tools/fabric.ts";
 import { createLspTool } from "../tools/lsp-tool.ts";
 import { lspManager } from "../tools/lsp/manager.ts";
@@ -2097,13 +2100,16 @@ Read Continue/truncation hints only when more information is needed; field=summa
 
 Each actor has at most one in_progress task and advances only its own work. Bind teammate tasks[].todo for delegation. Skills are optional and require exactly one primary when present. context records current progress/next action; summary records outcome and evidence. resourceUris retain references without loading content; prefer immutable agent publication IDs. handoff stores up to 3 next steps and file reading values (required|conditional|skip|unknown) for New Context.
 
+${TODO_RESOURCE_URI_GUIDANCE}
+Todo is a tool, not a shell command; call it with structured arguments rather than running \`todo update\` in Bash.
+
 Completion-form advance may request transition=keep_context|new_context. A single update of the caller's active in_progress task may request transition=new_context to persist intermediate state before scheduling the reset. new_context requires compaction.newContext.enabled=true or fails before mutation; transition receipts are not persisted. Omission keeps existing context behavior.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then keep it live by advancing each task immediately when its outcome is complete.",
     promptGuidelines: [
       "Use todo when work has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in one batch create BEFORE executing.",
       "A task is a verifiable outcome (feature, phase, component), not a single edit or command; put affected files and verification criteria in description/context.",
-      "Create short task outlines; keep large evidence in resourceUris. Use the activation brief first, then get only the fields needed; never automatically drain every Continue page.",
+      "Create short task outlines; keep evidence content behind supported resourceUris, never put paths or evidence text in that array. Use the activation brief first, then get only the fields needed; never automatically drain every Continue page.",
       "Batch blockedBy: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
       "Todo is a live execution state machine: immediately after a task meets its acceptance criteria, call todo advance with its id and summary before any tool call or work belonging to another Todo; never batch-complete finished tasks during finalization.",
       "Only provide handoff.nextSteps when an authorized later phase exists; for final or blocked work, explicitly clear stale nextSteps with an empty array and report or settle instead of inventing work. At completion, annotate only files/resources relevant to resumption as required, conditional with an explicit trigger, skip with a reason that prevents wasteful reload, or unknown; clear stale files with an empty array when nothing remains worth carrying, and do not read extra files merely to classify them.",
@@ -2123,7 +2129,7 @@ Completion-form advance may request transition=keep_context|new_context. A singl
       ctx: ExtensionContext,
     ): Promise<FlowToolResult> {
       if (!Check(TodoToolParams, params)) {
-        return { content: [{ type: "text", text: "Invalid todo arguments." }], isError: true, details: {} };
+        return { content: [{ type: "text", text: formatTodoArgumentError(params) }], isError: true, details: {} };
       }
       const todoParams = params as unknown as TodoParams;
       const result = await executeTodo(todoParams, ctx);
@@ -3747,6 +3753,10 @@ When NOT to use:
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    // SDK reasons: quit/reload/new/resume/fork; there is no "switch" reason.
+    // Capture the outgoing live host identity and fence its browser scope before
+    // any await. Cleanup is scope-local for every reason; the bridge stays shared.
+    const intelligenceCleanup = shutdownIntelligenceTools(undefined, 5_000, browserHostSessionId(ctx));
     // Fence compaction and retire this provider before the first await. Retiring
     // hides it from new dispatches; dispatch pins keep admitted publications on
     // this exact generation until teammate shutdown drains them.
@@ -3811,7 +3821,7 @@ When NOT to use:
     setWorkflowCoordinator(undefined);
     onSessionShutdownPlan(ctx);
     ctx.ui.setStatus("approval-mode", undefined);
-    await shutdownIntelligenceTools();
+    await intelligenceCleanup;
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -5007,6 +5017,9 @@ Tasks created here are attributed to this teammate and assigned to self by defau
 create returns a compact index (up to 20 entries, then remaining IDs). list discovers tasks without detail/summaries; offset/limit count filtered tasks (0-based, default 20, max 50). get returns a bounded overview with resourceUris; field/offset/limit page full details or summary (Unicode code points, default 4096, max 16384; field defaults to all when paging). advance returns a completion receipt and the next task's bounded execution brief. Related summaries come from the same plan, or the same assignee only when no plan is bound. Follow Continue/read hints only when more information is needed; never automatically drain every page.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
+${TODO_RESOURCE_URI_GUIDANCE}
+Todo is a tool, not a shell command; call it with structured arguments rather than running \`todo update\` in Bash.
+
 If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on it, and immediately finish it with \`todo advance\` using that id, a one-line summary, optional resourceUris/handoff, and optional transition (keep_context|new_context). Advance only completes or activates tasks assigned to you. Use \`todo advance\` without id/summary/resourceUris/handoff when you have no active task and need to activate your next assigned task. Use a single \`todo update\` with transition=new_context to persist intermediate progress on your active task before scheduling a reset; use ordinary update when blocked, paused, or completing without continuing.`,
     promptSnippet: "Keep teammate-owned tasks live in the shared root Todo list and advance each one immediately when its work finishes.",
     promptGuidelines: [
@@ -5021,7 +5034,7 @@ If root delegated a task to you (spawned with todo: "<id>"), it is usually alrea
     parameters: TodoModelParams,
     async execute(_id, params, signal, _onUpdate, ctx) {
       if (!Check(TodoToolParams, params)) {
-        return { content: [{ type: "text", text: "Invalid todo arguments." }], isError: true, details: {} };
+        return { content: [{ type: "text", text: formatTodoArgumentError(params) }], isError: true, details: {} };
       }
       const result = await proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
       const todoParams = params as unknown as TodoParams;
@@ -5135,7 +5148,7 @@ function registerAskUserQuestionTool(
 
 Users may add supplementary details to any option (including a free-form answer for "None of the above"); these come back in each answer's details map and text field.
 
-The tool returns structured human answers. An enabled project decision policy may instead return explicit machine recommendations in decisions; these are NOT user answers or approval. Mixed batches preserve original questionIndex.
+The tool returns structured human answers. An enabled project decision policy may instead return explicit machine recommendations in decisions. With a human-enabled /auto ask on [seconds] grant (default 60s), remaining safe questions may adopt options marked recommended: true after timeout, returned in recommendations with source: timeout. Policy classification takes priority; external/uncertain/degraded decisions, human-only questions, missing or ambiguous recommendations and sensitive approvals never auto-confirm. Both forms are NOT user answers or approval. Mixed batches preserve original questionIndex.
 
 When to use:
 - A genuine decision fork the user must own (approach A vs B, which features, naming) that you cannot resolve by reading code or docs.
@@ -5192,6 +5205,7 @@ When NOT to use:
       }
       const count = details.answers.length;
       const recommendations = details.decisions?.filter((decision) => decision.evaluation.owner === "internal" && decision.evaluation.advice) ?? [];
+      const timeoutRecommendations = details.recommendations ?? [];
       const answerLines = details.answers.map((answer, index) => {
         const chosen = answer.selected.map((label) => {
           const detail = answer.details?.[label];
@@ -5204,9 +5218,10 @@ When NOT to use:
         name: "ask",
         ok: true,
         arg,
-        summary: `${count} answer${count !== 1 ? "s" : ""}${recommendations.length ? ` · ${recommendations.length} machine recommendation(s)` : ""}`,
+        summary: `${count} answer${count !== 1 ? "s" : ""}${recommendations.length + timeoutRecommendations.length ? ` · ${recommendations.length + timeoutRecommendations.length} machine recommendation(s)` : ""}`,
         expanded: opts.expanded,
-        detail: [...answerLines, ...recommendations.map((decision) => `${decision.questionIndex + 1}. ${decision.question} → [machine advisory] ${decision.evaluation.advice!.recommendation}`)].join("\n"),
+        detail: [...answerLines, ...recommendations.map((decision) => `${decision.questionIndex + 1}. ${decision.question} → [machine advisory] ${decision.evaluation.advice!.recommendation}`),
+          ...timeoutRecommendations.map((item) => `${item.questionIndex + 1}. ${item.question} → [timeout recommendation] ${item.selected.join("、")}`)].join("\n"),
       });
     },
   };

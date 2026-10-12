@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FileFinderApi, GrepCursor, GrepMatch } from "@ff-labs/fff-node";
+import type { FileFinderApi, GrepCursor, GrepMatch, InitOptions } from "@ff-labs/fff-node";
 import {
   MAX_SESSION_HISTORY_FILES,
 } from "pi-maestro-teammate/v1/session-history";
@@ -80,9 +80,10 @@ test("session history FFF accelerator is lazy, literal, paginated, and path boun
     let scanTimeout = 0;
     const calls: Array<{ query: string; options: Record<string, unknown> }> = [];
     const cursor = {} as GrepCursor;
+    let destroyed = false;
     const finder: FileFinderApi = {
-      isDestroyed: false,
-      destroy() { finder.isDestroyed = true; },
+      get isDestroyed() { return destroyed; },
+      destroy() { destroyed = true; },
       async waitForScan(timeoutMs) { scanTimeout = timeoutMs ?? 0; return { ok: true, value: true }; },
       grep(query, options) {
         calls.push({ query, options: options as Record<string, unknown> });
@@ -164,7 +165,7 @@ test("session history FFF accelerator is lazy, literal, paginated, and path boun
       healthCheck() { throw new Error("unused"); },
     };
     const accelerator = createSessionHistoryFffAccelerator({
-      createFinder: ((options) => {
+      createFinder: ((options: InitOptions) => {
         createCount += 1;
         assert.equal(options.basePath, root);
         return { ok: true, value: finder };
@@ -213,9 +214,10 @@ test("session history FFF candidate inventory is capped and incomplete paginatio
       match(index === 0 ? "active.jsonl" : `candidate-${index}.jsonl`, index));
     let calls = 0;
     const cursor = {} as GrepCursor;
+    let destroyed = false;
     const finder = {
-      isDestroyed: false,
-      destroy() { finder.isDestroyed = true; },
+      get isDestroyed() { return destroyed; },
+      destroy() { destroyed = true; },
       async waitForScan() { return { ok: true as const, value: true }; },
       glob() { return { ok: true, value: { items: [], scores: [], totalMatched: 0, totalFiles: 0 } }; },
       grep() {
@@ -318,7 +320,7 @@ test("session history falls back to bounded inventory without exposing accelerat
   }
 });
 
-test("session history verifies empty FFF results against the authorized inventory", async () => {
+test("session history merges empty FFF results with the authorized inventory", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-empty-"));
   try {
     const current = join(root, "current.jsonl");
@@ -333,7 +335,8 @@ test("session history verifies empty FFF results against the authorized inventor
     );
     const payload = JSON.parse(resultText(result));
     assert.deepEqual(payload.matches.map((item: { sessionId: string }) => item.sessionId), ["current"]);
-    assert.equal(payload.discovery?.reason, "no-visible-matches");
+    assert.equal(payload.discovery?.source, "candidates-and-bounded-inventory");
+    assert.equal(payload.filesRead, 1);
     assert.equal(payload.truncated, false);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -385,7 +388,7 @@ test("session history rejects invalid queries before invoking FFF", async () => 
   assert.equal(calls, 0);
 });
 
-test("session history verifies FFF candidates with no visible matches and preserves fallback limits", async () => {
+test("session history scans FFF and inventory candidates only once under the shared file cap", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-visible-"));
   try {
     const current = join(root, "current.jsonl");
@@ -406,17 +409,18 @@ test("session history verifies FFF candidates with no visible matches and preser
     )));
     assert.equal(payload.matches.length, 1);
     assert.notEqual(payload.matches[0].sessionId, "current");
-    assert.equal(payload.filesRead, MAX_SESSION_HISTORY_FILES + 1);
+    assert.equal(payload.filesRead, MAX_SESSION_HISTORY_FILES);
     assert.equal(payload.truncated, true);
     assert.ok(payload.omissions.some((item: { reason: string }) => item.reason === "file-limit"));
     assert.ok(payload.omissions.some((item: { reason: string }) => item.reason === "result-limit"));
-    assert.equal(payload.discovery?.reason, "no-visible-matches");
+    assert.equal(payload.matchCount, MAX_SESSION_HISTORY_FILES - 1);
+    assert.equal(payload.discovery?.source, "candidates-and-bounded-inventory");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("session history preserves top-level truncation for incomplete FFF candidates", async () => {
+test("session history reports incomplete FFF discovery without falsely truncating a complete scan", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-truncated-"));
   try {
     const sessions = join(root, "sessions");
@@ -441,11 +445,12 @@ test("session history preserves top-level truncation for incomplete FFF candidat
     const payload = JSON.parse(resultText(result)) as {
       matches: unknown[];
       truncated: boolean;
-      discovery?: { complete?: boolean };
+      discovery?: { candidateComplete?: boolean; source?: string };
     };
     assert.equal(payload.matches.length, 1);
-    assert.equal(payload.truncated, true);
-    assert.equal(payload.discovery?.complete, false);
+    assert.equal(payload.truncated, false);
+    assert.equal(payload.discovery?.candidateComplete, false);
+    assert.equal(payload.discovery?.source, "candidates-and-bounded-inventory");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -484,6 +489,110 @@ test("session history rejects injected FFF paths outside the authorized workspac
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
+});
+
+test("complete positive FFF subset A cannot exclude matching B or reread A", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-positive-"));
+  try {
+    const current = join(root, "current.jsonl");
+    const other = join(root, "other.jsonl");
+    const a = `${header("A")}\n${user("u", "positive needle A")}\n`;
+    const b = `${header("B")}\n${user("u", "positive needle B")}\n`;
+    await writeFile(current, a);
+    await writeFile(other, b);
+    const accelerator: SessionHistoryFffCandidateAccelerator = {
+      async search() { return { available: true, complete: true, entries: [{ path: current }, { path: current }] }; },
+      destroy() {},
+    };
+    const payload = JSON.parse(resultText(await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "needle" },
+      context(root, current), { candidateAccelerator: accelerator },
+    )));
+    assert.deepEqual(payload.matches.map((item: { sessionId: string }) => item.sessionId), ["A", "B"]);
+    assert.equal(payload.matchCount, 2);
+    assert.equal(payload.filesRead, 2);
+    assert.equal(payload.bytesRead, Buffer.byteLength(a) + Buffer.byteLength(b));
+    assert.equal(payload.truncated, false);
+    assert.equal(payload.hasMore, false);
+    assert.deepEqual(payload.omissions, []);
+    assert.deepEqual(payload.discovery, { accelerator: "fff", source: "candidates-and-bounded-inventory", candidateComplete: true });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("FFF prioritizes older authorized candidates while current remains first and budget stays 100", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-priority-"));
+  try {
+    const current = join(root, "000-current.jsonl");
+    const older = join(root, "000-archived.jsonl");
+    await writeFile(current, `${header("current")}\n${user("u", "current needle")}\n`);
+    await writeFile(older, `${header("archived")}\n${user("u", "archived needle")}\n`);
+    await Promise.all(Array.from({ length: 101 }, (_, index) => writeFile(
+      join(root, `2026-new-${String(index).padStart(3, "0")}.jsonl`), `${header(`new-${index}`)}\n${user("u", "ordinary")}\n`,
+    )));
+    const accelerator: SessionHistoryFffCandidateAccelerator = {
+      async search() { return { available: true, complete: true, entries: [{ path: older }] }; },
+      destroy() {},
+    };
+    const payload = JSON.parse(resultText(await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "needle" },
+      context(root, current), { candidateAccelerator: accelerator },
+    )));
+    assert.deepEqual(payload.matches.map((item: { sessionId: string }) => item.sessionId), ["current", "archived"]);
+    assert.equal(payload.filesRead, MAX_SESSION_HISTORY_FILES);
+    assert.equal(payload.truncated, true);
+    assert.ok(payload.omissions.some((item: { reason: string }) => item.reason === "file-limit"));
+    assert.ok(!payload.omissions.some((item: { reason: string }) => item.reason === "duplicate"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("terms bypasses FFF even for single-line queries and validates whitespace before discovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-terms-"));
+  try {
+    const current = join(root, "current.jsonl");
+    await writeFile(current, `${header("current")}\n${user("u", "修复  ＡＬＰＨＡ\nbeta")}\n`);
+    let calls = 0;
+    const accelerator: SessionHistoryFffCandidateAccelerator = {
+      async search() { calls += 1; throw new Error("must bypass"); },
+      destroy() {},
+    };
+    const ctx = context(root, current);
+    const result = await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: "beta alpha 修复", mode: "terms" }, ctx, { candidateAccelerator: accelerator },
+    );
+    const payload = JSON.parse(resultText(result));
+    assert.equal(payload.matchCount, 1);
+    assert.equal(payload.truncated, false);
+    assert.equal(payload.discovery?.reason, "terms-query");
+    const invalid = await executeSessionHistory(
+      { action: "search", scope: "workspace_sessions", query: " \n\t\u3000", mode: "terms" }, ctx, { candidateAccelerator: accelerator },
+    );
+    assert.equal((invalid as { isError?: boolean }).isError, true);
+    assert.match(resultText(invalid), /non-whitespace/);
+    assert.equal(calls, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("thrown and malformed accelerator responses use inventory without leaking errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-flow-session-history-fff-errors-"));
+  try {
+    const current = join(root, "current.jsonl");
+    await writeFile(current, `${header("current")}\n${user("u", "needle")}\n`);
+    const accelerators: SessionHistoryFffCandidateAccelerator[] = [
+      { async search() { throw new Error("C:\\private\\secret.jsonl"); }, destroy() {} },
+      { async search() { return { available: true, entries: [] } as never; }, destroy() {} },
+    ];
+    for (const accelerator of accelerators) {
+      const result = await executeSessionHistory(
+        { action: "search", scope: "workspace_sessions", query: "needle" }, context(root, current), { candidateAccelerator: accelerator },
+      );
+      const payload = JSON.parse(resultText(result));
+      assert.equal(payload.matchCount, 1);
+      assert.equal(payload.filesRead, 1);
+      assert.equal(payload.truncated, false);
+      assert.equal(payload.discovery?.source, "bounded-inventory");
+      assert.doesNotMatch(resultText(result), /private|secret\.jsonl/);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("session history uses FFF only for workspace search", async () => {

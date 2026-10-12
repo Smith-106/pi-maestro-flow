@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SopRegistry, type EmbeddedBaselines } from "../src/tools/sop/sop-registry.ts";
+import { BROWSER_HELPER_QUICKREF, BROWSER_SOPS_BASELINE } from "../src/tools/sop/embedded/browser.ts";
 
 const EMBEDDED: EmbeddedBaselines = {
   browser: {
@@ -84,6 +85,29 @@ test("SopRegistry higher order wins over lower order external", async () => {
   }
 });
 
+test("SopRegistry published content hints participate in existing order and lifecycle rules", async () => {
+  const published = (body: string, title: string, lifecycle = "active") => `---\ntitle: ${title}\ntype: recipe\nlifecycleStatus: ${lifecycle}\n---\n\n${body}`;
+  const root = await withKnowhowDir({
+    "RCP-legacy.md": sopDoc("browser", "core", "Old", "old core body", 0),
+    "RCP-published.md": published(sopDoc("browser", "core", "Hint label", "new full SOP body", 1), "Published core"),
+    "RCP-retired.md": published(sopDoc("browser", "core", "Retired", "retired body", 100), "Retired", "deprecated"),
+    "RCP-equal.md": published(sopDoc("browser", "safety", "Hint", "external safety body", 0), "Published safety"),
+  });
+  try {
+    const registry = new SopRegistry({ cwd: root, embedded: EMBEDDED });
+    await registry.ensureLoaded();
+    const core = registry.get("browser", "core");
+    assert.equal(core?.source, "knowhow");
+    assert.equal(core?.body, "new full SOP body");
+    assert.equal(core?.title, "Published core");
+    assert.match(core?.filePath ?? "", /RCP-published\.md$/);
+    assert.equal(registry.get("browser", "safety")?.body, "external safety body", "equal-order external still overrides embedded");
+    assert.equal(registry.get("computer_use", "core")?.body, "embedded cu core body");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SopRegistry lower-order external does not override higher-order external", async () => {
   const root = await withKnowhowDir({
     "RCP-high.md": sopDoc("browser", "core", "High", "high body", 10),
@@ -124,6 +148,48 @@ test("SopRegistry renderIndex produces a sorted topic listing", async () => {
     assert.match(index, /antibot\s+Antibot/);
     assert.match(index, /core\s+Embedded core/);
     assert.match(index, /safety\s+Embedded safety/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("browser timeout recovery SOP covers dialogs, bounded evidence and non-replay", () => {
+  const core = BROWSER_SOPS_BASELINE.core.body;
+  const automation = BROWSER_SOPS_BASELINE["automation-antipatterns"].body;
+  assert.match(core, /Omitting the policy installs no automatic handler/);
+  assert.match(core, /custom handlers must await dialog\.accept\(\) or dialog\.dismiss\(\)/);
+  assert.match(core, /never silently auto-accept destructive confirmations/);
+  assert.match(core, /bounded partial text output and screenshot metadata/);
+  assert.match(core, /raw ElementHandle\/keyboard\/CDPSession\/custom host awaits are not/);
+  assert.match(core, /browser\.target\(\)\.createCDPSession\(\)/);
+  assert.match(core, /BEFORE triggering export/);
+  assert.match(core, /Do not use page-target tab\.waitForCdp for Browser-domain events/);
+  assert.match(core, /Extension failures do not provide these Puppeteer diagnostics/);
+  assert.match(automation, /borrowed profile\/CDP pages are not closed/);
+  assert.match(automation, /Never kill a borrowed browser/);
+  assert.match(automation, /Do not count only explicit waitFor timeouts/);
+  assert.match(automation, /Raising the default cannot fix a run that explicitly sets timeout/);
+  assert.match(automation, /responsive HTTP endpoint does not prove the renderer or CDP is responsive/);
+  assert.match(automation, /not replaying the entire submission/);
+});
+
+test("browser guide index retains timeout recovery contracts under external topic overrides", async () => {
+  const root = await withKnowhowDir({
+    "RCP-core.md": sopDoc("browser", "core", "Custom core", "custom core body", 1),
+    "RCP-automation.md": sopDoc("browser", "automation-antipatterns", "Custom automation", "custom automation body", 1),
+  });
+  try {
+    const registry = new SopRegistry({ cwd: root, embedded: { browser: BROWSER_SOPS_BASELINE } });
+    await registry.ensureLoaded();
+    assert.equal(registry.get("browser", "core")?.body, "custom core body");
+    const index = registry.renderIndex("browser", (n) => `Browser SOP Registry — ${n} documents.`, BROWSER_HELPER_QUICKREF);
+    assert.match(index, /Managed\/profile\/CDP run failures retain bounded partial output\/operation\/timing diagnostics/);
+    assert.match(index, /Extension command\/execution waits are bounded but setup\/postprocessing may add latency/);
+    assert.match(index, /borrowed profile\/CDP pages only disconnect and may continue executing/);
+    assert.match(index, /recording-only dialog listener can leave native prompts blocking/);
+    assert.match(index, /never blindly replay submit/);
+    assert.match(index, /Configure downloads before export/);
+    assert.match(index, /cleanup can add latency/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

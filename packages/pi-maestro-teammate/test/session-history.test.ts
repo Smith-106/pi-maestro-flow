@@ -259,3 +259,144 @@ test("context_edit entries project replacements within the surviving scope", asy
   const omitted = await service.read({ sessionId: "edit-session", turn: 3 });
   assert.equal(omitted.found, false);
 });
+
+test("terms normalizes mixed languages, order, whitespace and NFKC without changing literal defaults", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = writeTranscript(dir, "terms.jsonl", [
+    header("terms"),
+    user("mixed", null, "修复  Session\nHistory café ＦＵＬＬ"),
+    user("partial", "mixed", "Session History only"),
+  ]);
+  const service = new SessionHistoryService(inventory(file));
+  for (const query of ["session 修复", "修复  HISTORY\nSESSION", "Cafe\u0301 full 修复", "ＦＵＬＬ café"] ) {
+    const result = await service.search(query, { mode: "terms" });
+    assert.deepEqual(result.matches.map((match) => match.entryId), ["mixed"], query);
+    assert.equal(result.matchCount, 1);
+    assert.equal(result.hasMore, false);
+    assert.equal(result.truncated, false);
+  }
+  assert.equal((await service.search("修复 Session")).matchCount, 0, "literal must not fold whitespace");
+  assert.equal((await service.search("cafe\u0301")).matchCount, 0, "literal must not normalize accents");
+  assert.equal((await service.search("full")).matchCount, 0, "literal must not fold width");
+  for (const query of [" ", "  ", "\n", "SESSION", "café"]) {
+    const defaults = await service.search(query);
+    assert.deepEqual(defaults, await service.search(query, { mode: "literal", sort: "source", offset: 0 }));
+  }
+  assert.equal((await service.search("session session", { mode: "terms" })).matchCount, 2, "duplicates count entries, not occurrences");
+  assert.equal((await service.search("修复session", { mode: "terms" })).matchCount, 0, "no implicit Chinese segmentation");
+});
+
+test("terms keeps assistant text blocks independent and respects the safe projection", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = writeTranscript(dir, "blocks.jsonl", [
+    header("blocks"), user("u", null, "ordinary"),
+    { type: "message", id: "a", parentId: "u", message: { role: "assistant", content: [
+      { type: "text", text: "alpha" }, { type: "text", text: "beta" },
+      { type: "thinking", thinking: "alpha beta hidden" },
+      { type: "toolCall", name: "secret", arguments: { text: "alpha beta" } },
+    ] } },
+    toolResult("tool", "a", "beta alpha"),
+  ]);
+  const service = new SessionHistoryService(inventory(file));
+  assert.equal((await service.search("alpha beta", { mode: "terms" })).matchCount, 0);
+  assert.equal((await service.search("alpha\nbeta")).matchCount, 0);
+  assert.equal((await service.search("alpha", { mode: "terms" })).matchCount, 1);
+  const explicit = await service.search("alpha beta", { mode: "terms", include: ["tool_result"] });
+  assert.deepEqual(explicit.matches.map((match) => match.entryId), ["tool"]);
+});
+
+test("normalized long snippets point into the original source, not normalized offsets", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const prefixes = [" \n".repeat(2500), "e\u0301".repeat(2500), "ﬃ".repeat(2500), "\u1100\u1161".repeat(2500), "\u3131\u314f".repeat(2500)];
+  for (const [index, prefix] of prefixes.entries()) {
+    const original = `${prefix}实际 ＮＥＥＤＬＥ cafe\u0301 ${"z".repeat(1500)}`;
+    const file = writeTranscript(dir, `snippet-${index}.jsonl`, [header(`snippet-${index}`), user("u", null, original)]);
+    const result = await new SessionHistoryService(inventory(file)).search("needle café", { mode: "terms" });
+    const snippet = result.matches[0]!.snippet;
+    assert.match(snippet, /实际 ＮＥＥＤＬＥ cafe\u0301/);
+    assert.ok(snippet.length <= MAX_SESSION_HISTORY_SNIPPET_CHARS);
+    assert.doesNotMatch(snippet, /needle café/);
+  }
+});
+
+test("search pagination visits 27 matches once and preserves scan totals on every boundary", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = writeTranscript(dir, "pages.jsonl", [header("pages"),
+    ...Array.from({ length: 27 }, (_, index) => user(`u${index}`, index ? `u${index - 1}` : null, `needle ${index}`)),
+  ]);
+  const service = new SessionHistoryService(inventory(file));
+  for (const sort of ["source", "relevance"] as const) {
+    const seen: string[] = [];
+    let offset = 0;
+    do {
+      const page = await service.search("needle", { sort, offset, limit: 10 });
+      assert.equal(page.matchCount, 27);
+      seen.push(...page.matches.map((match) => match.entryId));
+      assert.equal(page.hasMore, offset < 20);
+      assert.equal(page.truncated, page.hasMore);
+      assert.equal(page.nextOffset, offset < 20 ? offset + 10 : undefined);
+      assert.equal(page.omissions.find((omission) => omission.reason === "result-limit")?.count, offset < 20 ? 27 - offset - 10 : undefined);
+      offset = page.nextOffset ?? 27;
+    } while (offset < 27);
+    assert.deepEqual(seen, Array.from({ length: 27 }, (_, index) => `u${index}`));
+    assert.equal(new Set(seen).size, 27);
+  }
+  for (const offset of [27, 28, Number.MAX_SAFE_INTEGER]) {
+    const page = await service.search("needle", { offset });
+    assert.deepEqual(page.matches, []);
+    assert.equal(page.matchCount, 27);
+    assert.equal(page.hasMore, false);
+    assert.equal("nextOffset" in page, false);
+    assert.equal(page.truncated, false);
+  }
+});
+
+test("relevance ranks exact/phrase/tightest span with deterministic source ties", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const texts = ["beta xxxx alpha", "beta alpha", "before alpha beta after", "alpha beta", "beta alpha", "beta xxxxxxxxx alpha ... beta alpha"];
+  const file = writeTranscript(dir, "ranked.jsonl", [header("ranked"), ...texts.map((text, index) => user(`u${index}`, index ? `u${index - 1}` : null, text))]);
+  const service = new SessionHistoryService(inventory(file));
+  assert.deepEqual((await service.search("alpha beta", { mode: "terms" })).matches.map((match) => match.entryId), texts.map((_, index) => `u${index}`));
+  const ranked = await service.search("alpha beta", { mode: "terms", sort: "relevance" });
+  assert.deepEqual(ranked.matches.map((match) => match.entryId), ["u3", "u2", "u1", "u4", "u5", "u0"]);
+  assert.deepEqual(ranked, await service.search("alpha beta", { mode: "terms", sort: "relevance" }));
+  assert.deepEqual((await service.search("alpha beta", { sort: "relevance" })).matches.map((match) => match.entryId), ["u3", "u2"]);
+});
+
+test("search validates options before scanning and non-search rejects search-only options", async () => {
+  let scans = 0;
+  const service = new SessionHistoryService(() => { scans += 1; return []; });
+  for (const offset of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(service.search("needle", { offset }), /offset/);
+  }
+  for (const query of [" ", "\n\t", "\u3000"]) {
+    await assert.rejects(service.search(query, { mode: "terms" }), /non-whitespace/);
+  }
+  await assert.rejects(service.search("needle", { mode: "regex" as "literal" }), /mode/);
+  await assert.rejects(service.search("needle", { sort: "date" as "source" }), /sort/);
+  for (const extra of [{ offset: 0 }, { mode: "literal" }, { sort: "source" }]) {
+    await assert.rejects(service.list({ limit: 1, ...extra }), /only for search/);
+    await assert.rejects(service.compactions({ limit: 1, ...extra }), /only for search/);
+    await assert.rejects(service.read({ sessionId: "session", ...extra }), /only for search/);
+  }
+  assert.equal(scans, 0);
+});
+
+test("last search page keeps file-limit truncation when the scan is incomplete", async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const files = Array.from({ length: 101 }, (_, index) => writeTranscript(dir, `${index}.jsonl`, [header(`s${index}`), user("u", null, "needle")]));
+  const result = await new SessionHistoryService(inventory(...files)).search("needle", { offset: 99, limit: 1 });
+  assert.equal(result.filesRead, 100);
+  assert.equal(result.matchCount, 100);
+  assert.equal(result.hasMore, false);
+  assert.equal(result.truncated, true);
+  assert.equal("nextOffset" in result, false);
+  assert.ok(result.omissions.some((omission) => omission.reason === "file-limit"));
+  assert.ok(!result.omissions.some((omission) => omission.reason === "result-limit"));
+});

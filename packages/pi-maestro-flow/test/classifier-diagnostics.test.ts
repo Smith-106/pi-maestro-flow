@@ -3,9 +3,9 @@ import test from "node:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { Theme, VERSION } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { bindClassifierRuntime, classifierStatus, configureClassifier, registerClassifyDomain, registerBuiltinClassifyDomains, resetClassifierForTest } from "pi-maestro-teammate/v1/classify";
+import { bindClassifierRuntime, classifierStatus, listClassifyDomains, configureClassifier, registerClassifyDomain, registerBuiltinClassifyDomains, resetClassifierForTest } from "pi-maestro-teammate/v1/classify";
 import { boundedDiagnosticInput, businessPolicyDiagnostic, classifierBusinessStatus, diagnosticText, diagnosticWait, rawClassifierDiagnostic, readClassifierShadow } from "../src/classifier/diagnostics.ts";
 import { defaultDecisionPolicy } from "../src/decision-policy/config.ts";
 import { policyClassifyDomain } from "../src/decision-policy/domains.ts";
@@ -100,17 +100,17 @@ test("shadow is bounded, recent, malformed-visible, control-safe and withholds s
 test("diagnostic overlay paste/text is bounded, cancel/dispose aborts, every mode fits 1..120 columns", () => {
   const controller = new AbortController();
   let value: string | undefined;
-  const input = new ClassifierDiagnosticOverlay({ title: "Diagnostic", input: true }, theme, controller.signal, text => { value = text; }, () => {}, () => controller.abort());
+  const input = new ClassifierDiagnosticOverlay({ title: "Diagnostic", input: true }, theme, controller.signal, text => { value = text; }, () => {}, () => controller.abort(), "en");
   input.handleInput("\x1b[200~" + "a".repeat(4000) + "\x07\x1b[201~");
-  const choices = new ClassifierDiagnosticOverlay({ title: "Select", choices: [{ value: "one", label: "\x1b[31mone" }] }, theme, controller.signal, () => {}, () => {}, () => {});
-  const result = new ClassifierDiagnosticOverlay({ title: "Result", lines: Array.from({ length: 40 }, () => "long ".repeat(70)) }, theme, controller.signal, () => {}, () => {}, () => {});
+  const choices = new ClassifierDiagnosticOverlay({ title: "Select", choices: [{ value: "one", label: "\x1b[31mone" }] }, theme, controller.signal, () => {}, () => {}, () => {}, "en");
+  const result = new ClassifierDiagnosticOverlay({ title: "Result", lines: Array.from({ length: 40 }, () => "long ".repeat(70)) }, theme, controller.signal, () => {}, () => {}, () => {}, "en");
   for (let width = 1; width <= 120; width++) for (const overlay of [input, choices, result]) for (const line of overlay.render(width)) assert.ok(visibleWidth(line) <= width);
   input.handleInput("\r"); assert.equal(value!.length, 3000);
   assert.throws(() => boundedDiagnosticInput("x".repeat(3001)), /exceeds/);
   assert.throws(() => boundedDiagnosticInput("  "), /required/);
   assert.throws(() => boundedDiagnosticInput("\x00\x07"), /required/);
   choices.dispose();
-  const abandoned = new ClassifierDiagnosticOverlay({ title: "Disposed", input: true }, theme, controller.signal, () => {}, () => {}, () => controller.abort());
+  const abandoned = new ClassifierDiagnosticOverlay({ title: "Disposed", input: true }, theme, controller.signal, () => {}, () => {}, () => controller.abort(), "en");
   abandoned.dispose(); assert.equal(controller.signal.aborted, true);
 });
 
@@ -137,17 +137,17 @@ test("openrouter-only actual panel probes selected model; F5/F6 retain independe
         overlay.handleInput("\r"); overlay.handleInput(down); overlay.handleInput("\r"); // dirty policy
         overlay.handleInput("\x1b[17~"); // F6
       } else if (opens === 2) {
-        assert.match(rendered, /policy \*/); assert.match(rendered, /Classification backend: classifier/);
+        assert.match(rendered, /Policy \*/); assert.match(rendered, /Classification backend:\s+classifier/);
         assert.match(rendered, /drafts and pins preserved/);
-        overlay.handleInput("\t"); assert.match(overlay.render(140).join("\n"), /Enabled: true/);
+        overlay.handleInput("\t"); assert.match(overlay.render(140).join("\n"), /Enabled:\s+true/);
         overlay.handleInput("\x1b[15~"); // F5
       } else if (opens === 3) { assert.match(rendered, /diagnostics/); overlay.handleInput("\x1b"); }
-      else { assert.match(rendered, /Enabled: true/); overlay.handleInput("\x1b"); overlay.handleInput("\x1b"); }
+      else { assert.match(rendered, /Enabled:\s+true/); overlay.handleInput("\x1b"); overlay.handleInput("\x1b"); }
       overlay.dispose();
     });
   };
   try {
-    await showClassifierSettings(f.ctx as never, provider, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); });
+    await showClassifierSettings(f.ctx as never, provider, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); }, "en");
     assert.equal(opens, 4); assert.equal(refreshes, 1); assert.ok(probes >= 4); assert.equal(f.requests.length, 0);
     await assert.rejects(readFile(join(f.cwd, ".pi", "classifier.json")), { code: "ENOENT" });
     assert.deepEqual(JSON.parse(await readFile(join(f.cwd, ".pi", "decision-policy.json"), "utf8")), f.policy);
@@ -243,7 +243,7 @@ for (const variant of ["apply", "conditional", "cancel", "session-fence"] as con
           overlay.dispose();
         });
       };
-      const work = showClassifierDiagnostics(f.ctx as never, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); }, "handoff");
+      const work = showClassifierDiagnostics(f.ctx as never, controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); }, "handoff", "en");
       if (variant === "session-fence") await assert.rejects(work, /Cancelled/);
       else await work;
       assert.equal(confirms, 1); assert.equal(f.requests.length, 1);
@@ -303,15 +303,15 @@ test("TUI modelrefresh retains unavailable saved pin and both dirty drafts on ca
       overlay.handleInput("\x1b[17~");
     } else {
       let lines = overlay.render(140).join("\n");
-      assert.match(lines, /Classification backend: classifier/); assert.match(lines, /refresh offline/);
+      assert.match(lines, /Classification backend:\s+classifier/); assert.match(lines, /refresh offline/);
       overlay.handleInput("\t"); lines = overlay.render(140).join("\n");
-      assert.match(lines, /Enabled: true/); assert.match(lines, /legacy\/unavailable/);
+      assert.match(lines, /Enabled:\s+true/); assert.match(lines, /legacy\/unavailable/);
       overlay.handleInput("\x1b"); overlay.handleInput("\x1b");
     }
     overlay.dispose();
   });
   try {
-    await showClassifierSettings(f.ctx as never, createClassifierSettingsProvider(), controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); });
+    await showClassifierSettings(f.ctx as never, createClassifierSettingsProvider(), controller, () => { if (controller.signal.aborted) throw new Error("Cancelled"); }, "en");
     assert.equal(opens, 2); assert.equal(classifierStatus().model, "legacy/unavailable");
     assert.deepEqual(JSON.parse(await readFile(join(f.cwd, ".pi", "classifier.json"), "utf8")), saved);
   } finally {
@@ -335,7 +335,7 @@ for (const missing of ["active", "unknown", "next-step"] as const) {
       seen.push(overlay.render(140).join("\n")); overlay.handleInput("\r"); overlay.dispose();
     });
     try {
-      await showClassifierDiagnostics(f.ctx as never, new AbortController(), () => {}, "handoff");
+      await showClassifierDiagnostics(f.ctx as never, new AbortController(), () => {}, "handoff", "en");
       assert.match(seen.join("\n"), missing === "active" ? /No active\/owned Todo/ : missing === "unknown" ? /No existing unknown/ : /No explicit next action/);
       assert.equal(f.requests.length, 0); assert.equal(JSON.stringify(getVisibleTasks()), before);
     } finally {
@@ -358,7 +358,7 @@ test("business TUI jump only copies an explicit entry; it does not execute/enabl
     overlay.handleInput("\r"); overlay.dispose();
   });
   try {
-    await showClassifierDiagnostics(f.ctx as never, controller, () => {}, "business");
+    await showClassifierDiagnostics(f.ctx as never, controller, () => {}, "business", "en");
     assert.equal(copied, "/self-evolve"); assert.equal(f.requests.length, 0);
     await assert.rejects(readFile(join(f.cwd, ".pi", "self-evolve.json")), { code: "ENOENT" });
   } finally { await f.close(); }
@@ -383,7 +383,7 @@ for (const boundary of ["cwd", "session", "abort"] as const) {
     });
     const assertFresh = () => { if (controller.signal.aborted || f.ctx.cwd !== originalCwd || session !== originalSession) throw new Error("Cancelled or stale"); };
     try {
-      const work = showClassifierDiagnostics(f.ctx as never, controller, assertFresh, "test");
+      const work = showClassifierDiagnostics(f.ctx as never, controller, assertFresh, "test", "en");
       const rejected = assert.rejects(work, /Cancelled or stale/);
       await reached;
       if (boundary === "cwd") (f.ctx as any).cwd = `${originalCwd}-other`;
@@ -394,3 +394,77 @@ for (const boundary of ["cwd", "session", "abort"] as const) {
     } finally { release(); await f.close(); }
   });
 }
+
+const ansiTheme = new Theme({ accent: 39, text: 252, muted: 244, dim: 240, warning: 214, thinkingXhigh: 99 } as ConstructorParameters<typeof Theme>[0],
+  { customMessageBg: 235, selectedBg: 237 } as ConstructorParameters<typeof Theme>[1], "256color");
+const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+for (const locale of ["en", "zh-CN"] as const) {
+  test(`diagnostic ${locale}: real ANSI input/choices/results fit 1..120; Chinese paste and raw values survive`, () => {
+    const controller = new AbortController();
+    let value: string | undefined; let choice: string | undefined;
+    const input = new ClassifierDiagnosticOverlay({ title: locale === "en" ? "Diagnostic input" : "诊断输入", input: true }, ansiTheme,
+      controller.signal, text => { value = text; }, () => {}, () => {}, locale);
+    input.handleInput("直接输入中文"); input.handleInput("\x1b[20"); input.handleInput("0~粘贴多字\n"); input.handleInput("文本\x07\x1b[201~");
+    const choices = new ClassifierDiagnosticOverlay({ title: "选择域", choices: [{ value: "file-value", label: "文件价值（file-value）" }, { value: "ask", label: "提问（ask）" }] }, ansiTheme,
+      controller.signal, text => { choice = text; }, () => {}, () => {}, locale);
+    const results = new ClassifierDiagnosticOverlay({ title: "诊断结果", lines: Array.from({ length: 40 }, () => "layer=rule · model=原始/模型 · 中文\x1b[31mraw\x07") }, ansiTheme,
+      controller.signal, () => {}, () => {}, () => {}, locale);
+    for (let width = 1; width <= 120; width++) for (const overlay of [input, choices, results]) for (const line of overlay.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `${locale}/${width}: ${line}`);
+    }
+    const rendered = input.render(120).join("\n");
+    assert.ok(rendered.includes(ansiTheme.getFgAnsi("accent")));
+    assert.match(plain(rendered), locale === "en" ? /Esc cancel.*Enter run/ : /Esc 取消.*Enter 运行/);
+    assert.match(plain(rendered), /直接输入中文粘贴多字 文本/);
+    assert.ok(!results.render(120).join("\n").includes("\x1b[31m"), "untrusted ANSI is stripped before theming");
+    choices.handleInput(down); choices.handleInput("\r"); assert.equal(choice, "ask");
+    input.handleInput("\r"); assert.equal(value, "直接输入中文粘贴多字 文本");
+    assert.equal(controller.signal.aborted, false);
+  });
+}
+
+test("Chinese diagnostic menu, prompts, results and notices preserve raw actions/models/commands", async () => {
+  const f = await fixture();
+  const seen: string[] = []; const notices: string[] = [];
+  let opens = 0;
+  f.ctx.ui.notify = (text: string) => { notices.push(text); };
+  (f.ctx.ui as any).custom = async (factory: any) => new Promise(resolve => {
+    const overlay = factory({ requestRender() {} }, ansiTheme, {}, resolve);
+    const rendered = plain(overlay.render(140).join("\n")); seen.push(rendered);
+    for (let width = 1; width <= 120; width++) for (const line of overlay.render(width)) assert.ok(visibleWidth(line) <= width);
+    if (++opens === 1) {
+      assert.match(rendered, /分类器诊断/); assert.match(rendered, /原始域测试 · test/);
+      assert.match(rendered, /业务策略测试 · businessdiagnose/); assert.match(rendered, /交接建议 · handoff/);
+      overlay.handleInput("\r");
+    } else if (opens === 2) {
+      assert.match(rendered, /已注册的原始域/);
+      for (let i = 0; i < listClassifyDomains().indexOf("file-value"); i++) overlay.handleInput(down);
+      overlay.handleInput("\r");
+    } else if (opens === 3) {
+      assert.match(rendered, /测试 file-value（使用现有预算；不强制启用）/);
+      overlay.handleInput("中文测试"); overlay.handleInput("\x1b[200~ odd.extension next action\x1b[201~"); overlay.handleInput("\r");
+    } else if (opens === 4) {
+      assert.match(rendered, /诊断结果/); assert.match(rendered, /file-value.*layer=/); overlay.handleInput("\r");
+    } else overlay.handleInput("\x1b");
+    overlay.dispose();
+  });
+  try {
+    await showClassifierDiagnostics(f.ctx as never, new AbortController(), () => {}, undefined, "zh-CN");
+    assert.equal(opens, 5); assert.equal(f.requests.length, 1);
+    assert.match(JSON.stringify(f.requests[0]), /中文测试/);
+    assert.match(notices[0]!, /分类器诊断.*\/classifier cancel/);
+    let copied = "";
+    (f.ctx.ui as any).setEditorText = (text: string) => { copied = text; };
+    (f.ctx.ui as any).custom = async (factory: any) => new Promise(resolve => {
+      const overlay = factory({ requestRender() {} }, ansiTheme, {}, resolve);
+      const rendered = plain(overlay.render(140).join("\n"));
+      if (rendered.includes("仅复制入口到编辑器")) { assert.match(rendered, /返回/); overlay.handleInput(down); }
+      else assert.match(rendered, /业务状态 \/ 入口命令（只读）/);
+      overlay.handleInput("\r"); overlay.dispose();
+    });
+    await showClassifierDiagnostics(f.ctx as never, new AbortController(), () => {}, "business", "zh-CN");
+    assert.equal(copied, "/self-evolve"); assert.match(notices.at(-1)!, /未修改业务配置/);
+    assert.equal(f.requests.length, 1);
+  } finally { await f.close(); }
+});

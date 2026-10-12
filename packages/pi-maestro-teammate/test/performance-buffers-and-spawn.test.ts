@@ -2493,7 +2493,7 @@ test("non-JSON stdout startup diagnostics do not replay a fallback", async () =>
 
   assert.equal(result.exitCode, 1);
   assert.deepEqual(launchedModels, ["provider/primary"]);
-  assert.match(result.messages.map((message) => message.content).join("\n"), /failed to initialize child runtime/);
+  assert.match(result.messages.map((message) => message.content).join("\n"), /stdout JSONL protocol violation[\s\S]*malformed JSON, receivedBytes=34/);
 });
 
 test("whitespace stdout and signal termination do not qualify as silent nonzero exits", async () => {
@@ -2668,7 +2668,12 @@ test("runtime diagnostic channels fence authoritative fallback replay", async ()
 
     assert.equal(result.exitCode, 1, diagnosticChannel);
     assert.deepEqual(launchedModels, ["provider/primary"], diagnosticChannel);
-    assert.match(result.messages.at(-1)?.content ?? "", /externalReplayRisk=true/, diagnosticChannel);
+    if (diagnosticChannel === "stdout") {
+      assert.match(result.messages.map((message) => message.content).join("\n"), /stdout JSONL protocol violation[\s\S]*malformed JSON/);
+      assert.match(result.messages.at(-1)?.content ?? "", /settlementAuthority=unknown/, diagnosticChannel);
+    } else {
+      assert.match(result.messages.at(-1)?.content ?? "", /externalReplayRisk=true/, diagnosticChannel);
+    }
   }
 });
 

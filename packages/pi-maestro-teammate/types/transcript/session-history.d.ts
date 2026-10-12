@@ -59,7 +59,14 @@ export interface SessionHistoryOptions {
     signal?: AbortSignal;
 }
 export type SessionHistoryListOptions = SessionHistoryOptions;
-export type SessionHistorySearchOptions = SessionHistoryOptions;
+export interface SessionHistorySearchOptions extends SessionHistoryOptions {
+    /** Literal matching is the compatibility default; terms require every unique normalized term in one projected entry. */
+    mode?: "literal" | "terms";
+    /** Relevance ranks exact text, continuous phrase, then the tightest term span; ties retain source order. */
+    sort?: "source" | "relevance";
+    /** Zero-based match offset within this fresh scan (not a snapshot cursor). */
+    offset?: number;
+}
 export type SessionHistoryReadOptions = SessionHistoryOptions;
 export type SessionHistoryCompactionOptions = Omit<SessionHistoryOptions, "include">;
 export interface SessionHistorySession {
@@ -117,7 +124,10 @@ export interface SessionHistorySearchResult extends ScanMetrics {
     generation?: number;
     query: string;
     matches: readonly SessionHistorySearchMatch[];
+    /** Total matches in this scan, independent of pagination. */
     matchCount: number;
+    hasMore: boolean;
+    nextOffset?: number;
 }
 export interface SessionHistoryCompactionResult extends ScanMetrics {
     version: typeof SESSION_HISTORY_VERSION;

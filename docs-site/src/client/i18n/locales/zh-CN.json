@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.32.1 — 依赖修补与运行时加固。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.32.1",
+    "title": "v0.33.0 — 浏览器会话稳定性与范围化自动决策。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.33.0",
     "close": "关闭提示"
   },
   "accessibility": {

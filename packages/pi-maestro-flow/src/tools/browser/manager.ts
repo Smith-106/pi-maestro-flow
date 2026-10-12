@@ -4,12 +4,15 @@ import { writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Script, constants as vmConstants } from "node:vm";
+import { performance } from "node:perf_hooks";
 import type { Browser, CDPSession, CookieParam, Dialog, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 import { PICKER_INJECT_JS, PICKER_POLL_JS, PICKER_TEARDOWN_JS } from "./picker.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "./stealth.ts";
 import { runOcr, runDetect, isLocalVisionError, type OcrOutcome, type DetectOutcome } from "../../providers/local-vision.ts";
+import { attachBrowserRunFailureDiagnostics, BrowserRunDiagnosticCapture, createBrowserRunDeadline, type BrowserRunDiagnostics } from "./run-diagnostics.ts";
 import {
   browserBridge,
   type BridgeCommandTerminal,
@@ -173,7 +176,7 @@ class BrowserOutputCollector {
   private spillChunks: string[] = [];
   private spillBytes = 0;
   private static readonly spillCap = 1_000_000;
-  constructor(private readonly maximum?: number) {}
+  constructor(private readonly maximum?: number, private readonly captureText?: (text: string) => void) {}
 
   private collectSpill(text: string): void {
     if (!text || this.maximum === undefined || this.spillBytes >= BrowserOutputCollector.spillCap) return;
@@ -202,6 +205,7 @@ class BrowserOutputCollector {
   }
 
   pushDisplay(displays: BrowserRunOutput["displays"], item: BrowserRunOutput["displays"][number]): void {
+    if (item.type === "text") this.captureText?.(item.text);
     this.collectSpill(item.type === "text" ? item.text : `[image: ${item.mimeType}]`);
     this.reserve(item);
     displays.push(item);
@@ -266,6 +270,9 @@ export interface BrowserNamedTabStatus {
   channel: BrowserChannel;
   ownership: BrowserOwnership;
   capabilities: BrowserCapabilities;
+  state?: "ready" | "busy" | "draining" | "needs_revalidation" | "disconnected" | "closed";
+  pendingCommands?: number;
+  drainingCommands?: number;
 }
 
 export interface BrowserManagerStatus {
@@ -476,12 +483,18 @@ export class BrowserManager implements BrowserManagerLike {
     }
     if (existing) {
       if (existing.key !== key) throw new Error(`Tab "${options.name}" already uses a different browser. Close it before changing app settings.`);
+      if (existing.busy) throw new Error(`Tab "${options.name}" is busy.`);
       const combined = combineSignals(canonical.signal, this.#lifecycle.signal);
+      existing.busy = true;
       try {
         const effective = { ...canonical, signal: combined.signal };
+        if (existing.backend === "extension" && !existing.acceptingCommands) {
+          await this.#revalidateExtensionEntry(existing, combined.signal, canonical.timeoutMs);
+        }
         await this.#configureEntry(existing, effective);
-        return this.#info(existing, true, combined.signal, canonical.timeoutMs);
+        return await this.#info(existing, true, combined.signal, canonical.timeoutMs);
       } finally {
+        existing.busy = false;
         combined.dispose();
       }
     }
@@ -564,7 +577,7 @@ export class BrowserManager implements BrowserManagerLike {
           bridgeIdentity,
           options.signal,
           options.timeoutMs,
-          () => sendOwnedExtensionCommand(operationOwner, "tabs", { method: "create", url: options.url, active: false }, options.timeoutMs),
+          () => sendOwnedExtensionCommand(operationOwner, "tabs", { method: "create", url: options.url, active: false }, options.timeoutMs, options.signal),
           operationOwner,
         );
         selected = parseExtensionTab(result.data, "tabs.create");
@@ -622,12 +635,16 @@ export class BrowserManager implements BrowserManagerLike {
         } catch (caught) {
           cleanupError = caught;
         }
-        if (this.#tabs.get(entry.name) === entry) this.#tabs.delete(entry.name);
+        if (cleanupError !== undefined) {
+          entry.disposePromise = null;
+          this.#tabs.set(entry.name, entry);
+        } else if (this.#tabs.get(entry.name) === entry) this.#tabs.delete(entry.name);
+        this.#provisionalExtensionOwners.delete(operationOwner);
       } else {
         cancelExtensionOperations(operationOwner);
         try { await releaseExtensionOwner(operationOwner); } catch (caught) { cleanupError = caught; }
+        this.#retireProvisionalExtensionOwner(operationOwner);
       }
-      this.#retireProvisionalExtensionOwner(operationOwner);
       if (cleanupError !== undefined) {
         throw new AggregateError(
           [error, cleanupError],
@@ -679,7 +696,7 @@ export class BrowserManager implements BrowserManagerLike {
           entry.bridgeIdentity,
           combined.signal,
           timeoutMs,
-          () => sendOwnedExtensionCommand(entry, "exec", { tabId: entry.tabId, code }, timeoutMs),
+          () => sendOwnedExtensionCommand(entry, "exec", { tabId: entry.tabId, code }, timeoutMs, combined.signal),
           entry,
         );
         assertExtensionEntryActive(entry, combined.signal);
@@ -761,17 +778,39 @@ export class BrowserManager implements BrowserManagerLike {
       }
       throw error;
     } finally {
+      // Every adapter captures this run's signal; late callbacks cannot act in a later run.
+      controller.abort();
       if (entry.activeRun?.promise === promise) entry.activeRun = null;
       combined.dispose();
     }
   }
 
+  async #revalidateExtensionEntry(entry: ExtensionEntry, signal: AbortSignal, timeoutMs: number): Promise<void> {
+    if (entry.closed) throw abortError();
+    if (entry.terminalOperations.size || entry.hostOperations.size) {
+      throw new Error(`Browser extension entry ${JSON.stringify(entry.name)} is draining; wait for its command terminals before reopening it.`);
+    }
+    assertExtensionConnection(entry.bridgeIdentity, signal);
+    entry.acceptingCommands = true;
+    try {
+      await this.#info(entry, true, signal, timeoutMs);
+    } catch (error) {
+      entry.acceptingCommands = false;
+      throw error;
+    }
+  }
+
   async #runPuppeteer(entry: PuppeteerEntry, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number, maxOutputBytes?: number): Promise<BrowserRunOutput> {
+    const deadline = createBrowserRunDeadline(timeoutMs);
+    const capture = new BrowserRunDiagnosticCapture();
+    const controller = new AbortController();
+    const combined = combineSignals(signal, controller.signal);
+    const runSignal = combined.signal;
     const name = entry.name;
     entry.busy = true;
     const displays: BrowserRunOutput["displays"] = [];
     const screenshots: BrowserRunOutput["screenshots"] = [];
-    const output = new BrowserOutputCollector(maxOutputBytes);
+    const output = new BrowserOutputCollector(maxOutputBytes, (text) => capture.captureText(text));
     const beforeUrl = entry.page.isClosed() ? "" : entry.page.url();
     // Capture new tabs via the targetcreated event instead of a before/after
     // browser.pages() diff: window.open mid-run can race the after-snapshot and
@@ -800,96 +839,155 @@ export class BrowserManager implements BrowserManagerLike {
     let runFailed = false;
     let requestFailed = false;
     let cleanupFailed = false;
+    let failure: unknown;
+    let diagnostics: BrowserRunDiagnostics | undefined;
+    let dialogSession: CDPSession | undefined;
+    const onDialogOpening = (event: { type: string }) => { capture.dialogType = event.type; };
+    const onDialogClosed = () => { capture.dialogType = undefined; };
     try {
-      if (entry.requestScope) {
-        try {
-          entry.requestScope.cleanup();
-        } catch (error) {
-          cleanupFailed = true;
-          throw error;
-        }
-        entry.requestScope = undefined;
-      }
-      await disablePageRequestInterception(entry.page);
-      requestScope = installRequestListenerScope(entry.page);
-      entry.requestScope = requestScope;
-      const tab = createTabApi(entry, cwd, displays, screenshots, signal, timeoutMs, output);
-      const navGuard = entry.policy
-        ? (url: string) => {
-            if (!entry.policy!.allowed(url)) {
-              recordPolicyViolation(entry.policy!, "goto", url);
-              throw new Error(`Browser navigation blocked by domain policy: ${url}`);
-            }
+      // One envelope: setup and target/request post-processing spend the same budget as code.
+      return await raceAbort((async () => {
+        throwIfAborted(runSignal);
+        if (entry.requestScope) {
+          try {
+            entry.requestScope.cleanup();
+          } catch (error) {
+            cleanupFailed = true;
+            throw error;
           }
-        : undefined;
-      const runApis = observeBrowserRunApis(name, entry.page, entry.browser, tab, undefined, navGuard);
-      const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
-      const wait = (ms: number) => abortableDelay(ms, signal);
-      const display = (value: unknown) => output.pushDisplay(displays, { type: "text", text: formatDisplay(value) });
-      const print = (...values: unknown[]) => output.pushDisplay(displays, { type: "text", text: values.map(formatDisplay).join(" ") });
-      const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
-      const execute = compileRunCode(code);
-      const execution = (async () => {
-        const value = await execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, signal, capturedConsole);
-        await requestScope!.settle();
-        return value;
-      })();
-      const requestFailure = requestScope.failure.then((error) => {
-        requestFailed = true;
-        requestScope!.cleanup();
-        throw error;
-      });
-      const returnValue = await raceAbort(Promise.race([execution, requestFailure]), signal, timeoutMs);
-      output.reserve(returnValue);
-      const afterUrl = entry.page.isClosed() ? "" : entry.page.url();
-      const navigated = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl);
-      if (targetOverflow) output.fail(`Browser opened more than ${maxNewTabs} new tabs in one run.`);
-      let newTabs: Array<{ url: string }> | undefined;
-      if (createdTargets.size > 0) {
-        const added: Array<{ url: string }> = [];
-        for (const target of createdTargets) {
-          let item: { url: string };
-          try { const page = await raceAbort(target.page(), signal, Math.min(2_000, timeoutMs)); item = { url: page?.url() ?? target.url() }; }
-          catch { item = { url: target.url() }; }
-          if (!item.url) continue;
-          output.reserve(item);
-          added.push(item);
+          entry.requestScope = undefined;
         }
-        if (added.length > 0) newTabs = added;
-      }
-      // Surface navigations the entry-level guards blocked during this run.
-      if (entry.policy?.violations.length) {
-        for (const violation of entry.policy.violations.splice(0)) {
-          output.pushDisplay(displays, { type: "text", text: violation });
+        await disablePageRequestInterception(entry.page);
+        throwIfAborted(runSignal);
+        // CDP event observation does not add a Page dialog listener (which would
+        // intercept Puppeteer's dialog behavior), and never probes the DOM.
+        if (!entry.cdpSession || entry.cdpSession.connection() === null) {
+          const session = await acquireResource(entry.page.target().createCDPSession(), runSignal, deadline.remaining(),
+            async (late) => { await completesWithin(late.detach(), 2_000).catch(() => false); });
+          entry.cdpSession = session;
         }
-      }
-      output.reserve({ url: afterUrl, navigated: navigated || undefined });
-      await raceAbort(Promise.race([requestScope.settle(), requestFailure]), signal, timeoutMs);
-      return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
+        dialogSession = entry.cdpSession;
+        dialogSession.on("Page.javascriptDialogOpening", onDialogOpening);
+        dialogSession.on("Page.javascriptDialogClosed", onDialogClosed);
+        await dialogSession.send("Page.enable");
+        throwIfAborted(runSignal);
+        requestScope = installRequestListenerScope(entry.page);
+        entry.requestScope = requestScope;
+        const tab = createTabApi(entry, cwd, displays, screenshots, runSignal, timeoutMs, output, deadline.remaining);
+        const navGuard = entry.policy
+          ? (url: string) => {
+              if (!entry.policy!.allowed(url)) {
+                recordPolicyViolation(entry.policy!, "goto", url);
+                throw new Error(`Browser navigation blocked by domain policy: ${url}`);
+              }
+            }
+          : undefined;
+        const runApis = observeBrowserRunApis(name, entry.page, entry.browser, tab, undefined, navGuard, (operation) => {
+          throwIfAborted(runSignal);
+          deadline.remaining();
+          return capture.operation(operation);
+        });
+        const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
+        const wait = (ms: number) => abortableDelay(ms, runSignal);
+        const display = (value: unknown) => output.pushDisplay(displays, { type: "text", text: formatDisplay(value) });
+        const print = (...values: unknown[]) => output.pushDisplay(displays, { type: "text", text: values.map(formatDisplay).join(" ") });
+        const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
+        const execute = compileRunCode(code, cwd);
+        capture.phase = "execution";
+        const execution = (async () => {
+          const value = await execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, runSignal, capturedConsole);
+          await requestScope!.settle();
+          return value;
+        })();
+        const requestFailure = requestScope.failure.then((error) => {
+          requestFailed = true;
+          requestScope!.cleanup();
+          throw error;
+        });
+        const returnValue = await Promise.race([execution, requestFailure]);
+        throwIfAborted(runSignal);
+        capture.phase = "postprocessing";
+        output.reserve(returnValue);
+        const afterUrl = entry.page.isClosed() ? "" : entry.page.url();
+        const navigated = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl);
+        if (targetOverflow) output.fail(`Browser opened more than ${maxNewTabs} new tabs in one run.`);
+        let newTabs: Array<{ url: string }> | undefined;
+        if (createdTargets.size > 0) {
+          const added: Array<{ url: string }> = [];
+          for (const target of createdTargets) {
+            let item: { url: string };
+            try { const page = await raceAbort(target.page(), runSignal, Math.min(2_000, deadline.remaining())); item = { url: page?.url() ?? target.url() }; }
+            catch { item = { url: target.url() }; }
+            throwIfAborted(runSignal);
+            deadline.remaining();
+            if (!item.url) continue;
+            output.reserve(item);
+            added.push(item);
+          }
+          if (added.length > 0) newTabs = added;
+        }
+        // Surface navigations the entry-level guards blocked during this run.
+        if (entry.policy?.violations.length) {
+          for (const violation of entry.policy.violations.splice(0)) {
+            output.pushDisplay(displays, { type: "text", text: violation });
+          }
+        }
+        output.reserve({ url: afterUrl, navigated: navigated || undefined });
+        await Promise.race([requestScope.settle(), requestFailure]);
+        throwIfAborted(runSignal);
+        deadline.remaining();
+        return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
+      })(), signal, deadline.remaining(), timeoutMs);
     } catch (error) {
       runFailed = true;
-      if (requestFailed || isInterruptError(error)) await this.close(name);
+      failure = error;
+      diagnostics = capture.snapshot(deadline.elapsed(), timeoutMs, screenshots);
+      controller.abort();
+      const cleanupStarted = performance.now();
+      if (requestFailed || isInterruptError(error)) {
+        try { await this.close(name, diagnostics.cleanupIssues); }
+        catch { diagnostics.cleanupIssues.push("named-tab-close-failed"); }
+      }
+      diagnostics.cleanupDurationMs += Math.round(performance.now() - cleanupStarted);
       if (requestFailed && error instanceof Error) {
-        error.message += "\nBrowser run hint: a request handler failed; the named tab was closed to stop unfinished run code. " +
-          "Reopen it before retrying. Before continue/abort/respond, await page.setRequestInterception(true) in the same run, " +
+        error.message += "\nBrowser run hint: a request handler failed; the named binding was retired. " +
+          "Owned resources were closed; an existing borrowed profile/CDP page may still execute. " +
+          "Inspect application state before reopening; do not replay earlier actions. Before continue/abort/respond, await page.setRequestInterception(true) in the same run, " +
           "and return or await the request resolution promise.";
       }
       throw browserRunErrorHint(error);
     } finally {
       entry.browser.off("targetcreated", onTargetCreated);
       entry.browser.off("targetdestroyed", onTargetDestroyed);
+      dialogSession?.off("Page.javascriptDialogOpening", onDialogOpening);
+      dialogSession?.off("Page.javascriptDialogClosed", onDialogClosed);
+      const cleanupStarted = performance.now();
       let cleanupError: unknown;
       try {
         requestScope?.cleanup();
         if (entry.requestScope === requestScope) entry.requestScope = undefined;
-        await disablePageRequestInterception(entry.page);
+        if (!await completesWithin(disablePageRequestInterception(entry.page), 2_000)) {
+          throw new Error("Browser request interception cleanup did not finish within 2000ms.");
+        }
       } catch (error) {
         cleanupFailed = true;
         cleanupError = error;
       }
-      if (cleanupFailed && this.#tabs.get(name) === entry) {
-        await this.close(name).catch(() => {});
+      if (cleanupError && !runFailed) {
+        failure = cleanupError;
+        capture.phase = "cleanup";
+        diagnostics = capture.snapshot(deadline.elapsed(), timeoutMs, screenshots);
       }
+      if (cleanupFailed && this.#tabs.get(name) === entry) {
+        await this.close(name, diagnostics?.cleanupIssues).catch(() => { diagnostics?.cleanupIssues.push("named-tab-close-failed"); });
+      }
+      if (diagnostics) {
+        diagnostics.cleanupDurationMs += Math.round(performance.now() - cleanupStarted);
+        if (cleanupError) diagnostics.cleanupIssues.push("request-interception-cleanup-failed-or-pending");
+        attachBrowserRunFailureDiagnostics(failure, diagnostics);
+      }
+      controller.abort();
+      combined.dispose();
       entry.busy = false;
       if (cleanupError && !runFailed) throw cleanupError;
     }
@@ -911,7 +1009,7 @@ export class BrowserManager implements BrowserManagerLike {
       const display = (value: unknown) => output.pushDisplay(displays, { type: "text", text: formatDisplay(value) });
       const print = (...values: unknown[]) => output.pushDisplay(displays, { type: "text", text: values.map(formatDisplay).join(" ") });
       const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
-      const execute = compileRunCode(code);
+      const execute = compileRunCode(code, cwd);
       const returnValue = await raceAbort(execute(runApis.page, runApis.browser, runApis.tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
       output.reserve(returnValue);
       assertExtensionEntryActive(entry, signal);
@@ -959,6 +1057,9 @@ export class BrowserManager implements BrowserManagerLike {
         channel: entry.connection.channel,
         ownership: entry.connection.ownership,
         capabilities: { ...entry.connection.capabilities },
+        state: entry.backend === "extension" ? extensionEntryState(entry) : entry.busy ? "busy" : "ready",
+        pendingCommands: entry.backend === "extension" ? entry.terminalOperations.size : 0,
+        drainingCommands: entry.backend === "extension" ? drainingExtensionCommandCount(entry) : 0,
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
     return {
@@ -988,7 +1089,7 @@ export class BrowserManager implements BrowserManagerLike {
     return browserBridge.approvePairing(requestId, code);
   }
 
-  async close(name: string): Promise<boolean> {
+  async close(name: string, cleanupIssues?: string[]): Promise<boolean> {
     const entry = this.#tabs.get(name);
     if (entry) {
       entry.pickAbort?.abort();
@@ -996,24 +1097,25 @@ export class BrowserManager implements BrowserManagerLike {
         entry.closed = true;
         entry.acceptingCommands = false;
         cancelExtensionOperations(entry);
-        entry.disposePromise ??= disposeEntry(entry);
+        const disposal = entry.disposePromise ??= disposeEntry(entry);
         try {
-          await entry.disposePromise;
-        } finally {
-          // Retain the binding while draining so the same name cannot reopen
-          // against work whose lifecycle terminal has not arrived yet.
-          if (this.#tabs.get(name) === entry) this.#tabs.delete(name);
+          await disposal;
+        } catch (error) {
+          // Keep failed resource ownership fenced and allow an explicit cleanup retry.
+          if (entry.disposePromise === disposal) entry.disposePromise = null;
+          throw error;
         }
+        if (this.#tabs.get(name) === entry) this.#tabs.delete(name);
       } else {
         this.#tabs.delete(name);
-        await disposeEntry(entry);
+        await disposeEntry(entry, cleanupIssues);
       }
       return true;
     }
     const opening = this.#opening.get(name);
     if (!opening) return false;
     opening.abort();
-    await opening.promise.catch(() => {});
+    await opening.promise.catch((error) => { if (error instanceof AggregateError) throw error; });
     return true;
   }
 
@@ -1029,7 +1131,6 @@ export class BrowserManager implements BrowserManagerLike {
         entry.closed = true;
         entry.acceptingCommands = false;
         cancelExtensionOperations(entry);
-        entry.disposePromise ??= disposeEntry(entry);
       }
     }
     for (const owner of provisionalOwners) {
@@ -1037,17 +1138,17 @@ export class BrowserManager implements BrowserManagerLike {
       cancelExtensionOperations(owner);
     }
     for (const opening of openings) opening.abort();
-    await Promise.allSettled([
-      ...entries.map((entry) => entry.backend === "extension" ? entry.disposePromise! : disposeEntry(entry)),
-      ...openings.map((opening) => opening.promise),
-      ...provisionalOwners.flatMap((owner) => [
-        ...[...owner.terminalOperations].map((operation) => operation.handle.terminal),
-        ...owner.hostOperations,
-      ]),
+    const outcomes = await Promise.allSettled([
+      ...entries.map((entry) => this.close(entry.name)),
+      ...openings.map((opening) => opening.promise.catch((error) => { if (error instanceof AggregateError) throw error; })),
     ]);
-    for (const entry of entries) if (this.#tabs.get(entry.name) === entry) this.#tabs.delete(entry.name);
+    const ownerOutcomes = await Promise.allSettled(provisionalOwners.map(async (owner) => {
+      await releaseExtensionOwner(owner);
+      this.#provisionalExtensionOwners.delete(owner);
+    }));
     for (const [name, opening] of this.#opening) if (openings.includes(opening)) this.#opening.delete(name);
-    for (const owner of provisionalOwners) this.#provisionalExtensionOwners.delete(owner);
+    const failures = [...outcomes, ...ownerOutcomes].flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []);
+    if (failures.length) throw new AggregateError(failures, "Browser resource cleanup failed; ownership is retained for retry.");
     return entries.length;
   }
 
@@ -1065,7 +1166,7 @@ export class BrowserManager implements BrowserManagerLike {
   }
 
   #retireProvisionalExtensionOwner(owner: ExtensionOperationOwner): void {
-    if (owner.terminalOperations.size === 0 && owner.hostOperations.size === 0) {
+    if (owner.terminalOperations.size === 0 && owner.hostOperations.size === 0 && owner.leases.size === 0) {
       this.#provisionalExtensionOwners.delete(owner);
       return;
     }
@@ -1074,7 +1175,9 @@ export class BrowserManager implements BrowserManagerLike {
       ...[...owner.terminalOperations].map((operation) => operation.handle.terminal),
       ...owner.hostOperations,
     ];
-    void Promise.all(terminals).then(() => this.#provisionalExtensionOwners.delete(owner));
+    void Promise.all(terminals).then(() => {
+      if (owner.leases.size === 0) this.#provisionalExtensionOwners.delete(owner);
+    });
   }
 
   #registerEntry(entry: TabEntry): void {
@@ -1102,7 +1205,7 @@ export class BrowserManager implements BrowserManagerLike {
           entry.bridgeIdentity,
           options.signal,
           options.timeoutMs,
-          () => sendOwnedExtensionCommand(entry, "tabs", { method: "update", tabId: entry.tabId, url: options.url }, options.timeoutMs),
+          () => sendOwnedExtensionCommand(entry, "tabs", { method: "update", tabId: entry.tabId, url: options.url }, options.timeoutMs, options.signal),
           entry,
         );
         assertExtensionEntryActive(entry, options.signal);
@@ -1231,10 +1334,25 @@ function assertExtensionConnection(identity: BridgeConnectionIdentity, signal?: 
   browserBridge.assertConnection(identity);
 }
 
+function extensionConnectionMatches(identity: BridgeConnectionIdentity): boolean {
+  const connection = browserBridge.connectionIdentity();
+  return connection !== null && connection.installationId === identity.installationId
+    && connection.serverInstanceId === identity.serverInstanceId && connection.generation === identity.generation;
+}
+
+function extensionEntryState(entry: ExtensionEntry): NonNullable<BrowserNamedTabStatus["state"]> {
+  if (entry.closed) return "closed";
+  if (!extensionConnectionMatches(entry.bridgeIdentity)) return "disconnected";
+  if (!entry.acceptingCommands) {
+    return entry.terminalOperations.size || entry.hostOperations.size ? "draining" : "needs_revalidation";
+  }
+  return entry.busy ? "busy" : "ready";
+}
+
 function assertExtensionEntryAcceptingCommands(entry: ExtensionEntry): void {
   if (entry.closed) throw abortError();
   if (!entry.acceptingCommands) {
-    throw new Error(`Browser extension entry ${JSON.stringify(entry.name)} is draining after an interrupted command; close it before issuing new commands.`);
+    throw new Error(`Browser extension entry ${JSON.stringify(entry.name)} is draining after an interrupted command; once all command terminals settle, reopen it to revalidate the tab, or close it.`);
   }
 }
 
@@ -1294,12 +1412,13 @@ function ensureExtensionClaim(owner: ExtensionOperationOwner, tabId: number, tim
   return claim;
 }
 
-function sendOwnedExtensionCommand(owner: ExtensionOperationOwner, cmd: string, payload: Record<string, unknown>, timeoutMs: number): Promise<TrackedBridgeCommand> {
+function sendOwnedExtensionCommand(owner: ExtensionOperationOwner, cmd: string, payload: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<TrackedBridgeCommand> {
   return trackExtensionHostOperation(owner, (async () => {
+    assertExtensionConnection(owner.bridgeIdentity, signal);
     if (!owner.acceptingCommands) throw new Error("Browser extension command owner is draining.");
     if (typeof payload.tabId === "number") await ensureExtensionClaim(owner, payload.tabId, timeoutMs);
     if (!owner.acceptingCommands) throw new Error("Browser extension command owner is draining.");
-    assertExtensionConnection(owner.bridgeIdentity);
+    assertExtensionConnection(owner.bridgeIdentity, signal);
     const lease = typeof payload.tabId === "number" ? owner.leases.get(payload.tabId)?.lease : undefined;
     const handle = await browserBridge.sendTracked(cmd, { ...payload, owner: owner.owner, ...(lease ? { lease } : {}) }, timeoutMs, owner.bridgeIdentity);
     const created = cmd === "tabs" && payload.method === "create";
@@ -1321,7 +1440,11 @@ async function releaseExtensionOwner(owner: ExtensionOperationOwner): Promise<vo
     ]);
   }
   if (!owner.leases.size) return;
-  if (!browserBridge.isConnected() && ![...owner.leases.values()].some((binding) => binding.owned)) return;
+  if (!extensionConnectionMatches(owner.bridgeIdentity) && ![...owner.leases.values()].some((binding) => binding.owned)) {
+    // The revoked transport owns retirement; never send an old borrowed lease to its replacement.
+    owner.leases.clear();
+    return;
+  }
   assertExtensionConnection(owner.bridgeIdentity);
   const errors: unknown[] = [];
   for (const [tabId, binding] of owner.leases) {
@@ -1371,28 +1494,31 @@ function drainingExtensionCommandCount(owner: ExtensionOperationOwner): number {
   return count;
 }
 
-async function awaitExtensionBridge(
+function awaitExtensionBridge(
   identity: BridgeConnectionIdentity,
   signal: AbortSignal | undefined,
   timeoutMs: number,
   operation: () => Promise<TrackedBridgeCommand>,
   owner?: ExtensionOperationOwner,
 ): Promise<BridgeResult> {
-  assertExtensionConnection(identity, signal);
-  if (owner && !owner.acceptingCommands) throw new Error("Browser extension command owner is draining; no new commands may start.");
-  const handle = await operation();
-  const tracked = owner ? trackExtensionOperation(owner, handle) : undefined;
-  try {
-    const result = await raceAbort(handle.response, signal, timeoutMs);
+  const awaiting = (async () => {
     assertExtensionConnection(identity, signal);
-    return result;
-  } catch (error) {
-    if (isInterruptError(error)) {
-      if (owner && tracked) markExtensionOperationDraining(owner, tracked);
-      else void handle.cancel().catch(() => {});
+    if (owner && !owner.acceptingCommands) throw new Error("Browser extension command owner is draining; no new commands may start.");
+    const handle = await operation();
+    const tracked = owner ? trackExtensionOperation(owner, handle) : undefined;
+    try {
+      const result = await raceAbort(handle.response, signal, timeoutMs);
+      assertExtensionConnection(identity, signal);
+      return result;
+    } catch (error) {
+      if (isInterruptError(error)) {
+        if (owner && tracked) markExtensionOperationDraining(owner, tracked);
+        else void handle.cancel().catch(() => {});
+      }
+      throw error;
     }
-    throw error;
-  }
+  })();
+  return owner ? trackExtensionHostOperation(owner, awaiting) : awaiting;
 }
 
 async function awaitExtensionBridgeTerminal(
@@ -1428,7 +1554,7 @@ async function queryExtensionTabs(
     identity,
     signal,
     timeoutMs,
-    () => owner ? sendOwnedExtensionCommand(owner, "tabs", { method: "query" }, timeoutMs) : browserBridge.sendTracked("tabs", { method: "query" }, timeoutMs, identity),
+    () => owner ? sendOwnedExtensionCommand(owner, "tabs", { method: "query" }, timeoutMs, signal) : browserBridge.sendTracked("tabs", { method: "query" }, timeoutMs, identity),
     owner,
   );
   if (!Array.isArray(result.data)) throw new Error("browser-bridge tabs.query returned invalid tab metadata.");
@@ -1446,7 +1572,7 @@ async function getExtensionTab(
     identity,
     signal,
     timeoutMs,
-    () => owner ? sendOwnedExtensionCommand(owner, "tabs", { method: "get", tabId }, timeoutMs) : browserBridge.sendTracked("tabs", { method: "get", tabId }, timeoutMs, identity),
+    () => owner ? sendOwnedExtensionCommand(owner, "tabs", { method: "get", tabId }, timeoutMs, signal) : browserBridge.sendTracked("tabs", { method: "get", tabId }, timeoutMs, identity),
     owner,
   );
   const tab = parseExtensionTab(result.data, "tabs.get");
@@ -1579,7 +1705,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => sendOwnedExtensionCommand(entry, "tabs", { method: "update", tabId: state.id, url }, timeoutMs),
+        () => sendOwnedExtensionCommand(entry, "tabs", { method: "update", tabId: state.id, url }, timeoutMs, signal),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1600,7 +1726,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => sendOwnedExtensionCommand(entry, "exec", { tabId: state.id, code }, timeoutMs),
+        () => sendOwnedExtensionCommand(entry, "exec", { tabId: state.id, code }, timeoutMs, signal),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1622,7 +1748,7 @@ function createExtensionAdapters(
       entry.bridgeIdentity,
       signal,
       timeoutMs,
-      () => sendOwnedExtensionCommand(entry, "cdp", { tabId: entry.tabId, method, params: params ?? {} }, timeoutMs),
+      () => sendOwnedExtensionCommand(entry, "cdp", { tabId: entry.tabId, method, params: params ?? {} }, timeoutMs, signal),
       entry,
     );
     assertExtensionEntryActive(entry, signal);
@@ -1636,7 +1762,7 @@ function createExtensionAdapters(
       entry.bridgeIdentity,
       signal,
       timeoutMs,
-      () => sendOwnedExtensionCommand(entry, "batch", { commands: bridged, tabId: entry.tabId }, timeoutMs),
+      () => sendOwnedExtensionCommand(entry, "batch", { commands: bridged, tabId: entry.tabId }, timeoutMs, signal),
       entry,
     );
     assertExtensionEntryActive(entry, signal);
@@ -1675,7 +1801,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => sendOwnedExtensionCommand(entry, "cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs),
+        () => sendOwnedExtensionCommand(entry, "cookies", { method: "get", tabId: entry.tabId, filter }, timeoutMs, signal),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1687,7 +1813,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => sendOwnedExtensionCommand(entry, "cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs),
+        () => sendOwnedExtensionCommand(entry, "cookies", { method: "set", tabId: entry.tabId, cookies: list }, timeoutMs, signal),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1698,7 +1824,7 @@ function createExtensionAdapters(
         entry.bridgeIdentity,
         signal,
         timeoutMs,
-        () => sendOwnedExtensionCommand(entry, "cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs),
+        () => sendOwnedExtensionCommand(entry, "cookies", { method: "delete", tabId: entry.tabId, filter }, timeoutMs, signal),
         entry,
       );
       assertExtensionEntryActive(entry, signal);
@@ -1739,9 +1865,10 @@ function createTabApi(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   output: BrowserOutputCollector,
+  remaining?: () => number,
 ) {
   const page = entry.page;
-  const deadline = () => Math.max(1, timeoutMs);
+  const deadline = remaining ?? (() => Math.max(1, timeoutMs));
   const ensureCdpSession = async (): Promise<CDPSession> => {
     if (!entry.cdpSession || entry.cdpSession.connection() === null) entry.cdpSession = await page.target().createCDPSession();
     return entry.cdpSession;
@@ -2626,7 +2753,7 @@ async function disablePageRequestInterception(page: Page): Promise<void> {
   }
 }
 
-async function disposeEntry(entry: TabEntry): Promise<void> {
+async function disposeEntry(entry: TabEntry, cleanupIssues?: string[]): Promise<void> {
   if (entry.backend === "extension") {
     let disposeError: unknown;
     try {
@@ -2651,8 +2778,15 @@ async function disposeEntry(entry: TabEntry): Promise<void> {
     if (disposeError) throw disposeError;
     return;
   }
-  try { if (entry.cdpSession && entry.cdpSession.connection() !== null) await entry.cdpSession.detach(); } catch {}
-  try { if (entry.ownedPage && !entry.page.isClosed()) await completesWithin(entry.page.close(), 2_000); } catch {}
+  if (!entry.ownedPage && !entry.page.isClosed()) cleanupIssues?.push("borrowed-page-execution-may-continue");
+  try {
+    if (entry.cdpSession && entry.cdpSession.connection() !== null
+      && !await completesWithin(entry.cdpSession.detach(), 2_000)) cleanupIssues?.push("cdp-detach-pending");
+  } catch { cleanupIssues?.push("cdp-detach-failed"); }
+  try {
+    if (entry.ownedPage && !entry.page.isClosed()
+      && !await completesWithin(entry.page.close(), 2_000)) cleanupIssues?.push("owned-page-close-pending");
+  } catch { cleanupIssues?.push("owned-page-close-failed"); }
   await disposeBrowser(entry.browser, entry.owned, entry.profileDir);
   await Promise.allSettled([...entry.ownedTempFiles].map((file) => fs.rm(file, { force: true })));
   entry.ownedTempFiles.clear();
@@ -2663,7 +2797,7 @@ async function disposeBrowser(browser: Browser, owned: boolean, profileDir?: str
     if (owned) await closeWithin(browser, profileDir);
     else browser.disconnect();
   } catch {
-    if (profileDir) await reclaimProfileProcesses(profileDir).catch(() => {});
+    if (owned && profileDir) await reclaimProfileProcesses(profileDir).catch(() => {});
   }
 }
 
@@ -2742,12 +2876,12 @@ function normalizeSelector(selector: string): string {
   return selector;
 }
 
-async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, timeoutMs: number): Promise<T> {
+async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, timeoutMs: number, reportedTimeoutMs = timeoutMs): Promise<T> {
   if (signal?.aborted) throw abortError();
   let timeout: NodeJS.Timeout | undefined;
   let onAbort: (() => void) | undefined;
   const interrupt = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => reject(new Error(`Browser operation timed out after ${timeoutMs}ms.`)), timeoutMs);
+    timeout = setTimeout(() => reject(new Error(`Browser operation timed out after ${reportedTimeoutMs}ms.`)), timeoutMs);
     onAbort = () => reject(abortError());
     signal?.addEventListener("abort", onAbort, { once: true });
   });
@@ -2855,6 +2989,7 @@ function observeBrowserRunAsyncMethods<T extends object>(
   scope: string,
   report: BrowserRunPromiseReporter,
   beforeCall?: (scope: string, property: PropertyKey, args: unknown[]) => void,
+  observeOperation?: (operation: string) => (() => void),
 ): T {
   const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
   let proxy: T;
@@ -2866,9 +3001,15 @@ function observeBrowserRunAsyncMethods<T extends object>(
       if (cached) return cached;
       const wrapped = (...args: unknown[]): unknown => {
         beforeCall?.(scope, property, args);
-        const result = Reflect.apply(value, inner, args);
+        const operation = `${scope}.${String(property)}`;
+        const finish = observeOperation?.(operation);
+        let result: unknown;
+        try { result = Reflect.apply(value, inner, args); }
+        catch (error) { finish?.(); throw error; }
+        if (result instanceof Promise && finish) void result.then(finish, finish);
+        else finish?.();
         if (result === inner) return proxy;
-        return observeBrowserRunPromise(result, `${scope}.${String(property)}`, report);
+        return observeBrowserRunPromise(result, operation, report);
       };
       methods.set(property, wrapped);
       return wrapped;
@@ -2888,29 +3029,31 @@ export function observeBrowserRunApis<
   tab: TTab,
   report?: BrowserRunPromiseReporter,
   guardNavigation?: (url: string) => void,
+  observeOperation?: (operation: string) => (() => void),
 ): { page: TPage; browser: TBrowser; tab: TTab } {
   const notify = report ?? ((operation: string, error: unknown) => {
     const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.warn(`[pi-maestro-flow] browser run ${JSON.stringify(name)} left ${operation} promise unobserved: ${reason}`);
   });
-  // Navigation guard (policy open option): rejects before the command flies for
-  // the direct goto path; clicks/popups are covered by installNavigationGuards.
-  const beforeCall = guardNavigation
-    ? (scope: string, property: PropertyKey, args: unknown[]) => {
-        if ((scope === "page" || scope === "tab") && property === "goto" && typeof args[0] === "string") {
-          guardNavigation(args[0]);
-        }
-      }
-    : undefined;
-  const observedPage = observeBrowserRunAsyncMethods(page, "page", notify, beforeCall);
-  const observedBrowser = observeBrowserRunAsyncMethods(browser, "browser", notify);
+  // Reject helper misuse before capture/dispatch; keep navigation policy at the same boundary.
+  const beforeCall = (scope: string, property: PropertyKey, args: unknown[]) => {
+    if (scope === "tab" && property === "screenshot" && isRecord(args[0])
+      && args[0].save !== undefined && typeof args[0].save !== "string") {
+      throw new TypeError("tab.screenshot save must be a file path string, not a boolean or other value. Omit save to auto-save and display, or use {save:'shot.png'}; silent:true suppresses the inline image. No screenshot was captured.");
+    }
+    if (guardNavigation && (scope === "page" || scope === "tab") && property === "goto" && typeof args[0] === "string") {
+      guardNavigation(args[0]);
+    }
+  };
+  const observedPage = observeBrowserRunAsyncMethods(page, "page", notify, beforeCall, observeOperation);
+  const observedBrowser = observeBrowserRunAsyncMethods(browser, "browser", notify, undefined, observeOperation);
   const nested = tab as TTab & { page?: TPage; cookies?: object };
   if (nested.page) nested.page = observedPage;
-  if (nested.cookies) nested.cookies = observeBrowserRunAsyncMethods(nested.cookies, "tab.cookies", notify);
+  if (nested.cookies) nested.cookies = observeBrowserRunAsyncMethods(nested.cookies, "tab.cookies", notify, undefined, observeOperation);
   return {
     page: observedPage,
     browser: observedBrowser,
-    tab: observeBrowserRunAsyncMethods(tab, "tab", notify, beforeCall),
+    tab: observeBrowserRunAsyncMethods(tab, "tab", notify, beforeCall, observeOperation),
   };
 }
 
@@ -2930,14 +3073,33 @@ export function browserRunErrorHint(error: unknown): unknown {
       "\nBrowser run hint: timeout is the total wall-clock budget for the entire run, not a per-step allowance. " +
       "Keep the sum of worst-case waits and polling below it with headroom, split long serial cases into separate runs, " +
       "and wait on stable semantic state instead of incidental exact counts or toast text. " +
-      "Managed/profile/CDP timeouts close the named tab to stop still-running code, so reopen it before retrying.";
+      "Managed timeouts close the named tab's owned resources. Existing borrowed profile/CDP pages are only disconnected and may continue executing. " +
+      "Inspect application state before reopening the retired binding; never replay earlier actions. Reopen it before retrying.";
+    return error;
+  }
+  if (/^Waiting failed: \d+ms exceeded$/.test(error.message)
+    || (error.name === "TimeoutError" && /^Waiting for selector /.test(error.message))) {
+    error.message +=
+      "\nBrowser run hint: a page wait timed out; earlier clicks, uploads or submissions may already have completed. " +
+      "Inspect the live URL/DOM before retrying; do not replay the whole script. Wait on the required semantic state " +
+      "rather than incidental exact text or counts, and keep waits within the total run budget. " +
+      "Hidden file inputs only need to exist for tab.uploadFile; do not wait for them to be visible.";
+    return error;
+  }
+  if (error.name === "TypeError" && /\burl is not a function$/.test(error.message)) {
+    error.message +=
+      "\nBrowser run hint: check the object's shape. Puppeteer Page/HTTPRequest.url() is a method, " +
+      "but observed metadata and plain records store url as a string. Read record.url instead of calling it. " +
+      "Earlier actions may already have completed; inspect live state before retrying.";
     return error;
   }
   if (error.name === "ReferenceError") {
     const match = error.message.match(/^([A-Za-z_$][\w$]*) is not defined/);
     if (match) {
       error.message +=
-        `\nBrowser run hint: \`${match[1]}\` is referenced where it is not defined. ` +
+        `\nBrowser run hint: \`${match[1]}\` is referenced where it is not defined. Check its JavaScript scope. ` +
+        `Top-level run code executes on the Node host, not in the page: document/window/location/getComputedStyle belong inside evaluate. ` +
+        `For host Node modules use await import('node:fs/promises'), not require. ` +
         `Code inside page.evaluate()/tab.evaluate() callbacks runs in the browser page context, ` +
         `so Node-side variables declared in this run are invisible there. ` +
         `Pass values explicitly: await tab.evaluate((v) => …, v), or compute the value inside the callback. ` +
@@ -2957,11 +3119,14 @@ export function browserRunErrorHint(error: unknown): unknown {
 // an outer scope; user code runs in an async IIFE, so its top-level bindings
 // live in their own scope (shadowing a helper if reused) while top-level
 // return/await keep working.
-export function compileRunCode(code: string): (...values: unknown[]) => Promise<unknown> {
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
+export function compileRunCode(code: string, cwd = process.cwd()): (...values: unknown[]) => Promise<unknown> {
   const aliases = RUN_HELPER_NAMES.map((name, index) => `${name} = ${RUN_PARAM_NAMES[index]}`).join(", ");
   const body = `"use strict";\nvar ${aliases};\nreturn await (async () => {\n${code}\n})();`;
-  return new AsyncFunction(...RUN_PARAM_NAMES, body);
+  // Pi loads extensions through Jiti/VM; an AsyncFunction inherited there has no import callback.
+  return new Script(`(async function (${RUN_PARAM_NAMES.join(", ")}) {\n${body}\n})`, {
+    filename: path.resolve(cwd, "__pi_browser_run__.js"),
+    importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER,
+  }).runInThisContext();
 }
 
 export const browserManager = new BrowserManager();

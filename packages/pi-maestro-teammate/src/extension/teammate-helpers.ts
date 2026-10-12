@@ -2148,7 +2148,8 @@ export async function handleChildInteractionRequest(
       const details = isRecord(response.details) ? response.details : {};
       result = response.isError || details.cancelled || !Array.isArray(details.answers)
         ? { action: "cancel", error: response.isError ? "Root question broker failed" : undefined }
-        : { action: "answer", answers: details.answers, ...(Array.isArray(details.decisions) ? { decisions: details.decisions } : {}) };
+        : { action: "answer", answers: details.answers, ...(Array.isArray(details.decisions) ? { decisions: details.decisions } : {}),
+          ...(Array.isArray(details.recommendations) ? { recommendations: details.recommendations } : {}) };
     } else if (!ctx?.hasUI) {
       decisionSource = "headless";
       result = interaction === "permission" ? { action: "deny" } : { action: "cancel" };

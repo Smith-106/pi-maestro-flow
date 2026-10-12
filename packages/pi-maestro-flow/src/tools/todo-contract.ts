@@ -81,49 +81,27 @@ export type TodoUpdateField = (typeof TODO_UPDATE_FIELDS)[number];
 
 const TODO_RESOURCE_URI_PATTERN = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i;
 
-function safeResourceSegment(value: string): boolean {
-  return value.length > 0
-    && value !== "."
-    && value !== ".."
-    && !/[\\/\u0000-\u001f\u007f]/.test(value)
-    && !/%(?:2f|5c)/i.test(value);
-}
+const resourceSegment = String.raw`(?!\s*$)(?!\.{1,2}(?:/|\s*$))(?![^/]*%(?:2[fF]|5[cC]))[^/\\\u0000-\u001f\u007f\r\n\u2028\u2029]+`;
+const resourceUriBodies: Record<TodoResourceUriScheme, string> = {
+  agent: `${resourceSegment}(?:/.*)?`,
+  session: `${resourceSegment}/entry/${resourceSegment}`,
+  pr: `(?:[0-9]+|${resourceSegment}/${resourceSegment}/[0-9]+(?:/(?:diff|files))?)`,
+  issue: `(?:[0-9]+|${resourceSegment}/${resourceSegment}/[0-9]+)`,
+  skill: `${resourceSegment}(?:/${resourceSegment})*`,
+  rule: `${resourceSegment}(?:/${resourceSegment})*`,
+};
+// Explicit letter classes keep scheme matching case-insensitive in JSON Schema too.
+const resourceUriSource = TODO_RESOURCE_URI_SCHEMES.map((scheme) => {
+  const letters = [...scheme].map((letter) => `[${letter}${letter.toUpperCase()}]`).join("");
+  return `${letters}://${resourceUriBodies[scheme]}`;
+}).join("|");
+export const TODO_RESOURCE_URI_SCHEMA_PATTERN = String.raw`^\s*(?:${resourceUriSource})\s*$`;
+const supportedResourceUriPattern = new RegExp(`^(?:${resourceUriSource})$`);
+
+export const TODO_RESOURCE_URI_GUIDANCE = "resourceUris accepts only agent://<id>[/subpath], session://<sessionId>/entry/<entryId>, pr://<number> or pr://<owner>/<repo>/<number>[/diff|/files], issue://<number> or issue://<owner>/<repo>/<number>, skill://<name>, and rule://<name>. Local paths belong in handoff.files[].path; HTTP(S), file://, artifact://, and bare session://<id> are not supported. Put evidence text in summary/context, not resourceUris.";
 
 export function isTodoResourceUri(uri: string): boolean {
-  const match = uri.match(TODO_RESOURCE_URI_PATTERN);
-  if (!match) return false;
-  const scheme = match[1]?.toLowerCase();
-  const rest = match[2] ?? "";
-  if (!scheme || !(TODO_RESOURCE_URI_SCHEMES as readonly string[]).includes(scheme)) return false;
-  const segments = rest.split("/");
-  switch (scheme) {
-    case "agent":
-      return safeResourceSegment(segments[0] ?? "");
-    case "session":
-      return segments.length === 3
-        && safeResourceSegment(segments[0] ?? "")
-        && segments[1] === "entry"
-        && safeResourceSegment(segments[2] ?? "");
-    case "pr":
-      return (/^\d+$/.test(segments[0] ?? "") && segments.length === 1)
-        || (segments.length >= 3
-          && segments.length <= 4
-          && safeResourceSegment(segments[0] ?? "")
-          && safeResourceSegment(segments[1] ?? "")
-          && /^\d+$/.test(segments[2] ?? "")
-          && (segments.length === 3 || segments[3] === "diff" || segments[3] === "files"));
-    case "issue":
-      return (/^\d+$/.test(segments[0] ?? "") && segments.length === 1)
-        || (segments.length === 3
-          && safeResourceSegment(segments[0] ?? "")
-          && safeResourceSegment(segments[1] ?? "")
-          && /^\d+$/.test(segments[2] ?? ""));
-    case "skill":
-    case "rule":
-      return segments.length > 0 && segments.every(safeResourceSegment);
-    default:
-      return false;
-  }
+  return supportedResourceUriPattern.test(uri);
 }
 
 /**
@@ -150,7 +128,7 @@ export function normalizeTodoResourceUris(value: readonly string[] | undefined):
     }
     if (!isTodoResourceUri(uri)) {
       throw new Error(
-        `resourceUris[${index}] must be a structurally valid ${TODO_RESOURCE_URI_SCHEMES.join(", ")} resource URI`,
+        `resourceUris[${index}] must be a structurally valid ${TODO_RESOURCE_URI_SCHEMES.join(", ")} resource URI; received ${JSON.stringify(uri.slice(0, 160))}. ${TODO_RESOURCE_URI_GUIDANCE}`,
       );
     }
     if (seen.has(uri)) continue;

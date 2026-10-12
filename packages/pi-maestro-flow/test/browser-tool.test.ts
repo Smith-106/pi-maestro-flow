@@ -8,6 +8,7 @@ import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
 import { BrowserManager, browserRunErrorHint, canonicalizeBrowserOpenOptions, compileNavigationPolicy, compileRunCode, domainMatcher, observeBrowserRunApis, parseDevToolsActivePort, settleBrowserDialog, type BrowserManagerLike, type BrowserManagerStatus, type BrowserOpenOptions, type BrowserPickCaptureCallback, type BrowserPickResult, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
 import { PICKER_INJECT_JS, PICKER_POLL_JS, PICKER_TEARDOWN_JS } from "../src/tools/browser/picker.ts";
 import { STEALTH_INIT_JS, STEALTH_LAUNCH_ARGS } from "../src/tools/browser/stealth.ts";
+import { BROWSER_SOPS_BASELINE, BROWSER_HELPER_QUICKREF } from "../src/tools/sop/embedded/browser.ts";
 
 class FakeBrowserManager implements BrowserManagerLike {
   opened?: BrowserOpenOptions;
@@ -135,6 +136,8 @@ test("browser schema preserves legacy actions and adds explicit status/pair surf
   assert.equal(Check(BrowserParams, { action: "close" }), true);
   assert.equal(Check(BrowserParams, { action: "run" }), false);
   assert.equal(Check(BrowserParams, { action: "run", code: "return true;" }), true);
+  assert.equal(Check(BrowserParams, { action: "run", code: "return true;", dialogs: "accept" }), false);
+  assert.equal(Check(BrowserParams, { action: "open", dialogs: "accept" }), true);
   assert.equal(Check(BrowserParams, { action: "run", code: "" }), false);
   assert.equal(Check(BrowserParams, { action: "status" }), true);
   assert.equal(Check(BrowserParams, { action: "pair" }), false);
@@ -142,7 +145,10 @@ test("browser schema preserves legacy actions and adds explicit status/pair surf
   assert.equal(Check(BrowserParams, { action: "pair", request_id: "request", code: "wrong" }), false);
   assert.equal(Check(BrowserParams, { action: "pick" }), true);
   assert.equal(Check(BrowserParams, { action: "pick", name: "docs", timeout: 60 }), true);
-  assert.match((BrowserParams.properties.timeout as { description?: string }).description ?? "", /total wall-clock/i);
+  const timeoutDescription = (BrowserParams.properties.timeout as { description?: string }).description ?? "";
+  assert.match(timeoutDescription, /setup, execution and postprocessing share one deadline/i);
+  assert.match(timeoutDescription, /Extension command\/execution waits are bounded but setup\/postprocessing may add latency/i);
+  assert.match(timeoutDescription, /existing borrowed profile\/CDP pages only disconnect and may continue executing/i);
 });
 
 test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async () => {
@@ -181,9 +187,18 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.match(joined, /opaque owner/);
   assert.match(joined, /lazily claim/);
   assert.match(joined, /Cookies\/login state are not isolated/);
+  assert.match(joined, /ready\/busy\/draining\/needs_revalidation\/disconnected\/closed/);
+  assert.match(joined, /pendingCommands/);
+  assert.match(joined, /open rejects while draining/);
+  assert.match(joined, /all command terminals and host operations to drain/);
+  assert.match(joined, /revalidate its fixed tab\/generation/);
+  assert.match(joined, /preserves the owned tab and never replays interrupted operations/);
+  assert.match(joined, /ready is not login isolation/);
   assert.match(joined, /action:pair/, "guidelines must expose one-time pairing approval");
-  assert.match(joined, /total wall-clock budget/, "guidelines must explain the outer timeout budget");
-  assert.match(joined, /closes the named tab/, "guidelines must explain managed timeout cleanup");
+  assert.match(joined, /share one deadline/, "guidelines must explain the shared Puppeteer timeout budget");
+  assert.match(joined, /close the named tab's owned resources/, "guidelines must explain managed timeout cleanup");
+  assert.match(joined, /borrowed profile\/CDP pages only disconnect and may continue executing/);
+  assert.match(joined, /Extension command\/execution waits are bounded/);
   assert.match(joined, /never falls back|no managed-browser fallback/, "guidelines must state that extension fails closed without fallback");
   assert.match(joined, /--remote-debugging-port=0/, "profile launch must describe dynamic-port discovery");
   assert.match(joined, /Chrome 136\+ blocks debugging of the default profile even after all windows close/);
@@ -194,6 +209,78 @@ test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
     "action", "all", "app", "code", "dialogs", "kill", "name", "request_id", "timeout", "topic", "url", "viewport", "visible", "wait_until",
   ]);
+});
+
+test("browser calling contracts clarify helper shapes, channels and timeout units", () => {
+  const tool = createBrowserTool(new FakeBrowserManager());
+  const surface = [tool.description, ...(tool.promptGuidelines ?? [])].join("\n");
+  assert.match(surface, /observed\.elements\.find/);
+  assert.match(surface, /save:'shot\.png'/);
+  assert.match(surface, /save is never a boolean/);
+  assert.match(surface, /tab\.tabs\(\).*metadata records[\s\S]*browser\.pages\(\).*Puppeteer Pages/);
+  assert.match(surface, /optional string \.title \(use record\.title \?\? ''\)/);
+  assert.match(surface, /await handle\.contentFrame\(\)/);
+  assert.match(surface, /evaluateOnNewDocument[\s\S]*not addInitScript/);
+  assert.match(surface, /Tool execution success is NOT application or assertion success/);
+  assert.match(surface, /count:0 with failures:\[\] is not a pass/);
+  assert.match(surface, /never blindly repeat submit/);
+  const props = BrowserParams.properties;
+  assert.match(props.code.description ?? "", /host-side[\s\S]*no document\/window[\s\S]*explicit arguments/);
+  assert.match(props.timeout.description ?? "", /SECONDS[\s\S]*default 30[\s\S]*MILLISECONDS/);
+  assert.match(props.wait_until.description ?? "", /Open-only[\s\S]*domcontentloaded[\s\S]*Unsupported on extension/);
+  assert.match(props.app.description ?? "", /Open-only[\s\S]*does not support[\s\S]*dialogs/);
+  assert.match(props.topic.description ?? "", /including custom topics[\s\S]*not reading the full SOP/);
+});
+
+test("browser SOP baseline and always-visible quickref explain observed misuse", () => {
+  const core = BROWSER_SOPS_BASELINE.core.body;
+  const automation = BROWSER_SOPS_BASELINE["automation-antipatterns"].body;
+  for (const surface of [core, BROWSER_HELPER_QUICKREF]) {
+    assert.match(surface, /elements:\[\{id,role,name,text,box\}\]/);
+    assert.match(surface, /save:'shot\.png'/);
+    assert.match(surface, /use record\.title \?\? ''/);
+    assert.match(surface, /tool success|Tool success/i);
+  }
+  assert.match(core, /bridge drainingCommands=0 alone does not authorize reuse/);
+  assert.match(core, /explicitly open the same name without url/);
+  assert.match(core, /await handle\.contentFrame\(\)/);
+  assert.match(automation, /SECONDS[\s\S]*MILLISECONDS/);
+  assert.match(automation, /options object is SECOND, not last/);
+  assert.match(automation, /count:0 proves nothing/);
+  assert.match(automation, /must not be hidden by catch/);
+  assert.match(automation, /Proxy\/transport errors also do not prove no side effect/);
+});
+
+test("browser run screenshot contract rejects invalid save before capture and preserves navigation guards", async () => {
+  let captures = 0;
+  const page = { async screenshot(options: unknown) { captures++; return options; }, async goto(url: string) { return url; } };
+  const tab = { async screenshot(options?: { save?: unknown; silent?: boolean }) { captures++; return options; }, async goto(url: string) { return url; } };
+  const visited: string[] = [];
+  const observed = observeBrowserRunApis("contracts", page, {}, tab, undefined, (url) => {
+    if (url === "https://denied.example") throw new Error("Navigation denied");
+    visited.push(url);
+  });
+  for (const save of [true, false, 42, null]) {
+    assert.throws(() => observed.tab.screenshot({ save }), /save must be a file path string[\s\S]*No screenshot was captured/);
+  }
+  await assert.rejects(compileRunCode("return await tab.screenshot({save:true});")(observed.page, observed.browser, observed.tab), /Omit save to auto-save/);
+  assert.equal(captures, 0);
+  assert.equal(await observed.tab.screenshot(), undefined);
+  assert.deepEqual(await observed.tab.screenshot({ save: "shot.png", silent: true }), { save: "shot.png", silent: true });
+  assert.deepEqual(await observed.page.screenshot({ path: "page.png" }), { path: "page.png" });
+  assert.equal(captures, 3);
+  assert.equal(await observed.page.goto("https://allowed.example"), "https://allowed.example");
+  assert.equal(await observed.tab.goto("https://allowed.example/tab"), "https://allowed.example/tab");
+  assert.throws(() => observed.tab.goto("https://denied.example"), /Navigation denied/);
+  assert.deepEqual(visited, ["https://allowed.example", "https://allowed.example/tab"]);
+});
+
+test("browser run preserves diagnostic failed outcomes without claiming application success", async () => {
+  const manager = new FakeBrowserManager();
+  manager.run = async () => ({ displays: [], returnValue: { ok: false, count: 0, failures: ["No samples"] }, screenshots: [], url: "https://example.com" });
+  const result = await createBrowserTool(manager).execute("diagnostic", { action: "run", code: "return diagnostics;" }, undefined, undefined, { cwd: process.cwd() } as never);
+  assert.equal(result.isError, undefined);
+  assert.match(result.details?.result ?? "", /"ok": false[\s\S]*"count": 0[\s\S]*No samples/);
 });
 
 test("browser tool forwards named-tab open options and returns run displays, images, and screenshots", async () => {
@@ -441,8 +528,9 @@ test("browser guide returns registry index; topic loads one document", async () 
   assert.doesNotMatch(coreText, /Chrome 147\+ may refuse|the profile may be locked by another Chrome instance/);
   const antipatterns = await tool.execute("guide", { action: "guide", topic: "automation-antipatterns" }, undefined, undefined, ctx);
   const antipatternText = antipatterns.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
-  assert.match(antipatternText, /total wall-clock budget/i, "automation SOP must explain the outer timeout budget");
-  assert.match(antipatternText, /empty named-tab status.*expected cleanup/i, "automation SOP must explain managed timeout cleanup");
+  assert.match(antipatternText, /setup, execution and postprocessing share one deadline/i, "automation SOP must explain the shared Puppeteer budget");
+  assert.match(antipatternText, /owned resources and retires the named binding/i, "automation SOP must explain managed timeout cleanup");
+  assert.match(antipatternText, /borrowed profile\/CDP pages are not closed/i);
   // Unknown topic -> error listing available ids
   await assert.rejects(
     () => tool.execute("guide", { action: "guide", topic: "nope" }, undefined, undefined, ctx),
@@ -486,6 +574,11 @@ test("browser run error hints explain evaluate callback scoping", () => {
   assert.match(reference.message, /page\.evaluate\(\)\/tab\.evaluate\(\) callbacks runs in the browser page context/);
   assert.match(reference.message, /Pass values explicitly: await tab\.evaluate\(\(v\) => …, v\)/);
   assert.match(reference.message, /tab\.click\(\)\/tab\.type\(\)\/tab\.fill\(\) return undefined/);
+  assert.match(reference.message, /Top-level run code executes on the Node host, not in the page/);
+  const hostDom = browserRunErrorHint(new ReferenceError("document is not defined")) as Error;
+  assert.match(hostDom.message, /document\/window\/location\/getComputedStyle belong inside evaluate/);
+  const hostModule = browserRunErrorHint(new ReferenceError("require is not defined")) as Error;
+  assert.match(hostModule.message, /await import\('node:fs\/promises'\), not require/);
   // 其他 ReferenceError（非 "is not defined"）不加浏览器提示，保持原样。
   const other = browserRunErrorHint(new ReferenceError("Cannot read properties of null (reading 'x')")) as Error;
   assert.equal(other.message, "Cannot read properties of null (reading 'x')");
@@ -503,7 +596,38 @@ test("browser run error hints explain timeout budgeting and managed-tab cleanup"
   assert.match(timeout.message, /split long serial cases/);
   assert.match(timeout.message, /stable semantic state/);
   assert.match(timeout.message, /close the named tab/);
-  assert.match(timeout.message, /reopen it before retrying/);
+  assert.match(timeout.message, /reopen it before retrying/i);
+  assert.match(timeout.message, /borrowed profile\/CDP pages.*may continue executing/);
+  assert.match(timeout.message, /never replay earlier actions/);
+});
+
+test("browser run rejects misplaced dialogs before any manager operation", async () => {
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  await assert.rejects(
+    tool.execute("run-dialogs", { action: "run", code: "await page.click('#submit');", dialogs: "accept" } as never, new AbortController().signal, undefined, { cwd: process.cwd() } as never),
+    /Set dialogs on browser open[\s\S]*No run code was executed/,
+  );
+  assert.equal(manager.runs.length, 0);
+  assert.equal(manager.opened, undefined);
+});
+
+test("browser wait and record URL errors keep their failure and explain safe recovery", () => {
+  const waitFailure = new Error("Waiting failed: 18000ms exceeded");
+  assert.equal(browserRunErrorHint(waitFailure), waitFailure);
+  assert.match(waitFailure.message, /earlier clicks, uploads or submissions may already have completed/);
+  assert.match(waitFailure.message, /do not replay the whole script/);
+  assert.match(waitFailure.message, /Hidden file inputs only need to exist/);
+  const selectorFailure = new Error("Waiting for selector `input[type=file]` failed");
+  selectorFailure.name = "TimeoutError";
+  assert.match((browserRunErrorHint(selectorFailure) as Error).message, /do not wait for them to be visible/);
+  const urlFailure = new TypeError("n.url is not a function");
+  assert.equal(browserRunErrorHint(urlFailure), urlFailure);
+  assert.match(urlFailure.message, /plain records store url as a string/);
+  assert.match(urlFailure.message, /Read record.url instead of calling it/);
+  const originFailure = new Error("Tab origin drift; no input");
+  assert.equal(browserRunErrorHint(originFailure), originFailure);
+  assert.equal(originFailure.message, "Tab origin drift; no input");
 });
 
 test("compileRunCode surfaces ReferenceError with the undefined name", async () => {
@@ -805,7 +929,7 @@ test("browser manager scopes request interception listeners to one run", async (
         await wait(75);
         await page.goto(${JSON.stringify(`${baseUrl}late-from-failed-run`)});
       `, process.cwd(), undefined, 15_000),
-      /Request Interception is not enabled![\s\S]*named tab was closed/,
+      /Request Interception is not enabled![\s\S]*named binding was retired[\s\S]*Owned resources were closed[\s\S]*borrowed profile\/CDP page may still execute/,
     );
     assert.equal(await manager.close("interception"), false, "failed run must already have closed its tab");
     await manager.open({ name: "interception", cwd: process.cwd(), url: `${baseUrl}reopened`, timeoutMs: 15_000 });

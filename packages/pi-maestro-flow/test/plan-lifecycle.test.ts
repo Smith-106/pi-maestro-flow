@@ -60,6 +60,8 @@ class PlanStore extends RuntimePlanStore {
 
 interface ToolLike {
   description?: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
   parameters?: unknown;
   executionMode?: "parallel" | "sequential";
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
@@ -348,6 +350,43 @@ test("Plan tool descriptions match the prompt-only mode lifecycle", async () => 
     const updateParams = harness.tools.get("plan-update")?.parameters as { properties?: Record<string, { description?: string }> };
     assert.match(updateParams?.properties?.expectedRevision?.description ?? "", /optimistic concurrency/);
     assert.match(updateParams?.properties?.expectedRevision?.description ?? "", /currently loaded revision/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Plan entry guidance separates implementation steps from unresolved approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-entry-guidance-"));
+  const harness = createHarness(root);
+  try {
+    const enter = harness.tools.get("plan-enter");
+    assert.ok(enter);
+    assert.match(enter.description ?? "", /user explicitly requests Plan mode/);
+    assert.match(enter.description ?? "", /requires user approval not already given/);
+    assert.match(enter.description ?? "", /Internal task planning does not require this tool/);
+    assert.match(enter.promptSnippet ?? "", /explicit user request for Plan mode/);
+    assert.match(enter.promptSnippet ?? "", /not merely to organize implementation steps/);
+    assert.match(enter.promptSnippet ?? "", /stay in Act and implement the authorized scope/);
+
+    const guidelines = enter.promptGuidelines?.join("\n") ?? "";
+    assert.match(guidelines, /For agent-initiated entry, before calling plan-enter, state the specific decision/);
+    assert.match(guidelines, /why the current user request does not settle it/);
+    assert.match(guidelines, /Task size, multiple files, investigation, tests, and implementation checklists alone are not approval points/);
+    assert.match(guidelines, /read-only investigation in Act/);
+    assert.match(guidelines, /one user-owned choice, ask one focused question/);
+    assert.match(guidelines, /not automatically for every question/);
+    assert.match(guidelines, /implement a diagnosed fix or proposed display change normally authorizes in-scope edits/);
+    assert.match(guidelines, /preserve existing permission gates, failure stop conditions, and explicit locked constraints/);
+    assert.match(guidelines, /Do not invent data semantics or silently narrow the requested result/);
+    assert.doesNotMatch(`${enter.description}\n${enter.promptSnippet}\n${guidelines}`, /Use plan-enter before producing or editing an implementation Plan/);
+
+    const systemPrompt = await readFile(new URL("../../../.pi/SYSTEM.md", import.meta.url), "utf8");
+    assert.match(systemPrompt, /Internal planning is not Plan mode/);
+    assert.match(systemPrompt, /For agent-initiated entry, state that approval point/);
+    assert.match(systemPrompt, /organize complex tasks before implementing \(brief steps or Todo, not automatic Plan mode\)/);
+    assert.match(systemPrompt, /Do not ask the user to approve the same work again/);
+    assert.match(systemPrompt, /Existing permission gates, failure stop conditions, and explicit locked constraints still apply/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -1368,6 +1407,11 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.match(planPrompt, /exact `agent:\/\/` publication ID as an immutable briefing reference/);
     assert.match(planPrompt, /correlation ID only when latest-turn semantics are intentional/);
     assert.match(planPrompt, /Never use plan-exit to bypass Plan-mode boundaries/);
+    assert.match(planPrompt, /If the user challenges an unnecessary Plan, acknowledge the mismatch/);
+    assert.match(planPrompt, /If their intent is unclear, ask one focused question with ask-user-question/);
+    assert.match(planPrompt, /on an explicit request to abandon it, use plan-exit/);
+    assert.match(planPrompt, /Do not force a full draft and confirmation solely because Plan mode was entered/);
+    assert.match(planPrompt, /Exit is not approval and does not waive any other gate/);
     assert.match(planPrompt, /moves to background or a bounded\s+wait times out/);
     assert.match(planPrompt, /do not begin final synthesis or call plan-update \/ plan-confirm/);
     assert.match(planPrompt, /until every required result is result-ready/);
@@ -1386,8 +1430,10 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     assert.doesNotMatch(planPrompt, /Required Plan document contract/);
     assert.doesNotMatch(planPrompt, /## Objective/);
     assert.doesNotMatch(planPrompt, /Files \/ symbols/);
-    assert.match(planPrompt, /Use ask-user-question for every user question/);
-    assert.match(planPrompt, /Ask 2-4 related questions per call/);
+    assert.match(planPrompt, /Use ask-user-question only for genuine unresolved user-owned choices/);
+    assert.match(planPrompt, /Ask one focused question\s+when one choice remains/);
+    assert.match(planPrompt, /Do not pad a batch or re-ask\s+settled requirements/);
+    assert.doesNotMatch(planPrompt, /Ask 2-4 related questions per call/);
     assert.match(planPrompt, /Root performs one contract spot-check/);
     assert.match(planPrompt, /without starting\s+another review chain/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);

@@ -59,11 +59,11 @@
 
 ### 安装
 
-> **v0.32.1：** Flow 0.32.1、Backends 0.1.7、Teammate 2.8.1、Cockpit 0.24.3 与 `maestro-flow >=0.5.91`。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
+> **v0.33.0：** Flow 0.33.0、Backends 0.1.7、Teammate 2.9.0、Cockpit 0.24.3 与 `maestro-flow >=0.5.91`。fork 来源与验证范围见 [RELEASE.md](../RELEASE.md)；原生验证限 Windows x64 / Node 22.22，最低 Node 与 macOS/Linux 未验证。
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
@@ -521,6 +521,20 @@ browser({ action: "open", name: "daily", app: { channel: "extension", target: "e
 
 extension 仅支持 URL/title/goto/evaluate、`browser.pages`、raw CDP/batch、cookies、tabs 和 CDP screenshot，不承诺 Puppeteer/ElementHandle/DOM helper/OCR parity；未实现 API 或断连失败关闭、不回退。borrowed close 释放映射/租约，owned close 关闭真实 tab；物理 tab 租约跨 listener 独占，busy/draining 不代表页面工作停止，cookies/登录态仍共享而非隔离。
 
+**会话与 deadline（v0.33.0）**：命名 tab 按可信 host session 隔离，在同一会话的多个 turn 间稳定；`status.namedTabs` 与 `close all` 只操作本 scope。Bridge discovery 仍为进程共享，tab 归属不等于 cookies/登录隔离。
+
+managed/profile/CDP 的 `run.timeout`（秒，默认 30，最大 300）是 setup、执行与 postprocessing 共用的单一 deadline，不是每个 step 重置；Puppeteer/tab 的 wait 通常用毫秒，需留出预算余量，cleanup 可能增加返回延迟。Extension 的 command/execution 等待有界，但 setup/postprocessing 可另加延迟。失败附有界 passive 诊断，不重放脚本或自动交互；异常前动作可能已经发生。Managed 超时关闭 owned 资源；borrowed profile/CDP 仅断开，页面代码可能继续。
+
+Extension run 中断后，新的 `run` 被阻断，直到该 entry 所有 command terminal 与 host operation 都 drain；仅 bridge 总计 `drainingCommands: 0` 不足以证明可复用。之后显式 `open` 同名、不传 url，重验证现有 fixed tab/generation；draining 时 open 也拒绝，重开保留 tab，绝不重放中断动作。
+
+```javascript
+browser({ action: "status" }) // 先观察 named entry 与 bridge 的 drain 状态
+// 全部 drain 后才重验证；不是取消/重试此前动作
+browser({ action: "open", name: "daily", app: { channel: "extension" } })
+```
+
+SOP loader 支持 published knowledge hint，包括已晋升条目；仍先读 guide 索引与相关完整 topic，hint 不是完整 SOP。
+
 profile 自动启动使用 `--remote-debugging-port=0` 并读取 `DevToolsActivePort`，或复用已有 endpoint。Chrome 136+ 即使关闭窗口仍禁止调试默认 user-data-dir；明确选择非默认 profile，或用 extension 访问日常 Chrome。不会自动复制/切换 profile，真实登录环境也不保证 CAPTCHA 成功。安全风险及排障见[安装指南](../packages/pi-maestro-flow/optional/BROWSER-BRIDGE-SETUP.md)。
 
 ---
@@ -817,6 +831,8 @@ ask-user-question({
 - 每个问题 2-4 个选项
 - 支持单选、多选、开放式
 
+**Ask-auto（v0.33.0）**：真人可用 `/auto ask on [seconds]` 开启 grant（默认 60 秒）。超时后，剩余安全选项题可以采用 `recommended: true` 标记：单选必须恰好一个，多选采用所有标记项。机器结果进入 `recommendations`（`source: timeout`），不进入人工 `answers`，也不是批准；混合批次保留原 `questionIndex`。Policy classification 优先，外部/不确定/降级决策、human-only 问题、缺失或歧义推荐及敏感审批不自动确认；开放题仍须人工。建议不是 Plan/权限/支付/发布/知识晋升授权。
+
 ---
 
 ### 7.2 plan-enter — 计划模式
@@ -836,6 +852,12 @@ plan-enter()
 - `plan-exit` 放弃计划返回 Act 模式
 
 **切换方式：** `Alt+Shift+P` 或 `/plan` 切换 Plan/Act 模式。
+
+**会话级 Plan-auto（v0.33.0）**：默认关闭，只有父 TUI 的真人 `/plan-auto on` 或 `Alt+Shift+A` 可开启（Act/Plan 均可）；`off` 撤销，`status` 查看。模型注入、RPC、子代理和历史记录不能授权。每个 cycle 的 `plan-confirm` 仍经正常 archive/manifest 事务批准精确草稿，并执行 standalone/current；开启不立即批准，`plan-update` 只保存，`plan-review` 仍人工。
+
+开关跨 Plan cycle、exit/clear、修订、压缩与同会话 `new_context` 保留；每个新 cycle 绑定新任务授权，手动 exit/clear 使旧授权失效。Footer 分别为 `PLAN-AUTO on`、`confirm+ask` 或 `ask`。off、session/cwd 切换、fork、历史导航与 reload/restart/shutdown 撤销，绝不从磁盘恢复。关闭不终止已开始执行；已批准但尚未开始的自动 handoff 会停止。
+
+分类后的内部 Ask 建议仅在当前有界授权任务内有效，项目 policy 仍是额外限制；机器 `decisions` 与人工 `answers` 分开，不授予 Plan、权限或治理批准。Classifier 设置与诊断支持共享 `zh-CN` / `en` locale，语言切换不改变 domain/mode 协议键或授权边界。
 
 ---
 
@@ -1120,6 +1142,18 @@ maestro spec history SPEC-042                     # 查看历史
 maestro search "旧模式" --include-deprecated       # 搜索全部
 ```
 
+### 有界历史证据（v0.33.0）
+
+历史发现先完成 Maestro 知识搜索，无相关命中再查 `workspace_sessions`。`session_history` 默认为大小写不敏感的 literal 短语；`mode: "terms"` 做 NFKC、小写、空白归一化，同一可见 projected entry 必须含所有去重词，顺序不限；不做中文分词、正则、模糊、同义词或语义搜索。`sort: "source"` 为默认；`relevance` 优先精确文本/连续短语，再按更紧词跨度，同分保留来源顺序。
+
+```javascript
+session_history({ action: "search", scope: "workspace_sessions",
+  query: "browser timeout", mode: "terms", sort: "relevance", limit: 10 })
+// 用返回的 nextOffset 作为 offset，保留相同 query/scope/mode/sort
+```
+
+`offset` 为 0-based，`limit <= 20`；`matchCount`、`hasMore`、`nextOffset` 描述本次扫描。末页仅在扫描本身不完整时才标为截断。每页重新扫描 live transcripts，不是冻结快照，历史变化可移动结果；复读证据使用返回的精确 `session://<id>/entry/<id>`。隐藏行、thinking、工具调用参数不返回，tool results 显式 opt-in。历史是证据而非治理知识，必须与当前源码和 live 状态核对。
+
 ### 三轴正交
 
 | 轴 | 说明 |
@@ -1320,7 +1354,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.32.1
+pi install npm:pi-maestro-flow@0.33.0
 
 # ─── 知识 ───
 maestro search "查询" --code

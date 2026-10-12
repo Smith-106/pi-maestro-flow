@@ -51,6 +51,78 @@ test("SopLoader loadAll returns SOP docs with frontmatter fields parsed", async 
   }
 });
 
+function publishedDoc(content: string, lifecycle = "active", title = "Published browser SOP"): string {
+  return `---\ntitle: ${title}\ntype: recipe\nlifecycleStatus: ${lifecycle}\n---\n\n${content}`;
+}
+
+test("SopLoader discovers a leading SOP hint in canonical published content", async () => {
+  const root = await withKnowhowDir({ "RCP-published.md": publishedDoc(SOP_DOC.replace("sop_order: 0", "sop_order: 1")) });
+  try {
+    const docs = await new SopLoader({ cwd: root }).loadAll();
+    assert.equal(docs.length, 1);
+    assert.equal(docs[0].title, "Published browser SOP", "canonical title owns the guide label");
+    assert.equal(docs[0].tool, "browser");
+    assert.equal(docs[0].topic, "core");
+    assert.equal(docs[0].order, 1);
+    assert.equal(docs[0].body, "# Mode choice\n\nBody line 1.");
+    assert.doesNotMatch(docs[0].body, /tools:|sop_topic:/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SopLoader keeps complete legacy outer bindings authoritative", async () => {
+  const inner = SOP_DOC.replace("sop_topic: core", "sop_topic: ignored-inner").replace("sop_order: 0", "sop_order: 100");
+  const root = await withKnowhowDir({ "RCP-legacy.md": SOP_DOC.replace("# Mode choice\n\nBody line 1.", inner) });
+  try {
+    const docs = await new SopLoader({ cwd: root }).loadAll();
+    assert.equal(docs.length, 1);
+    assert.equal(docs[0].topic, "core");
+    assert.equal(docs[0].order, 0);
+    assert.equal(docs[0].title, "Browser SOP — Mode choice, attach, Turnstile recipe");
+    assert.match(docs[0].body, /sop_topic: ignored-inner/, "legacy body is not recursively unwrapped");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SopLoader excludes inactive outer lifecycles and never lets a content hint reactivate them", async () => {
+  const root = await withKnowhowDir({
+    "RCP-deprecated.md": publishedDoc(SOP_DOC, "deprecated"),
+    "RCP-superseded.md": publishedDoc(SOP_DOC, "superseded"),
+    "RCP-legacy-deprecated.md": SOP_DOC.replace("type: recipe", "type: recipe\nstatus: deprecated"),
+    "RCP-legacy-superseded.md": SOP_DOC.replace("type: recipe", "type: recipe\nstatus: superseded"),
+    "RCP-active.md": publishedDoc(SOP_DOC.replace("type: recipe", "type: recipe\nlifecycleStatus: deprecated"), "active", "Active canonical"),
+    "RCP-canonical-alias.md": publishedDoc(SOP_DOC, "active", "Canonical wins").replace("lifecycleStatus: active", "lifecycleStatus: active\nstatus: deprecated"),
+  });
+  try {
+    const docs = await new SopLoader({ cwd: root }).loadAll();
+    assert.deepEqual(docs.map(doc => doc.title).sort(), ["Active canonical", "Canonical wins"]);
+    assert.ok(docs.every(doc => doc.topic === "core"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SopLoader does not scan later snippets, fenced examples or recursively nested hints", async () => {
+  const missingTools = SOP_DOC.replace("tools: [browser]\n", "");
+  const missingTopic = SOP_DOC.replace("sop_topic: core\n", "");
+  const wrongTools = SOP_DOC.replace("tools: [browser]", "tools: 42");
+  const root = await withKnowhowDir({
+    "TIP-later.md": publishedDoc(`Introductory text\n\n${SOP_DOC}`),
+    "TIP-fenced.md": publishedDoc(`\x60\x60\x60yaml\n${SOP_DOC}\x60\x60\x60`),
+    "TIP-recursive.md": publishedDoc(publishedDoc(SOP_DOC)),
+    "TIP-no-tools.md": publishedDoc(missingTools),
+    "TIP-no-topic.md": publishedDoc(missingTopic),
+    "TIP-wrong-tools.md": publishedDoc(wrongTools),
+  });
+  try {
+    assert.deepEqual(await new SopLoader({ cwd: root }).loadAll(), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SopLoader skips knowhow files without sop_topic or tools", async () => {
   const root = await withKnowhowDir({
     "TIP-with-sop.md": `---

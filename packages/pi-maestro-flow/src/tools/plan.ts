@@ -10,9 +10,9 @@
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
-  beginPlanAutoCycle, getPlanAutoSnapshot, markPlanAutoConfirmed,
+  beginPlanAutoCycle, clearPlanAutoTaskContext, endPlanAutoCycle, getPlanAutoSnapshot, markPlanAutoConfirmed,
   isCurrentPlanAutoGrant, PLAN_AUTO_AUDIT_ENTRY,
-  planAutoStatusLabel, resetPlanAuto, revokePlanAuto, updatePlanAutoTaskContext,
+  planAutoStatusLabel, resetPlanAuto, updatePlanAutoTaskContext,
   type PlanAutoGrantSnapshot,
 } from "./plan-auto.ts";
 import type {
@@ -388,7 +388,7 @@ export async function loadCurrentPlanArtifacts(ctx: PlanContext): Promise<Loaded
 }
 
 export function clearPlan(): void {
-  revokePlanAuto("plan-clear");
+  clearPlanAutoTaskContext();
   latestPlan = undefined;
   latestRevision = 0;
   latestStatus = "empty";
@@ -473,7 +473,7 @@ async function enterPlanMode(ctx: PlanContext, operation: PlanOperationIdentity)
 }
 
 function exitPlanMode(ctx: PlanContext, approved = false): void {
-  if (!approved) revokePlanAuto("manual-plan-exit");
+  if (!approved) endPlanAutoCycle();
   mode = "act";
   pendingPlanEnterNote = undefined;
   restoreActToolSurface();
@@ -921,7 +921,7 @@ async function savePlan(
   const saved = await store.saveDraft(markdown, expectedRevision);
   if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   applyLoadedPlan(saved);
-  if (!saved.markdown.trim()) revokePlanAuto("plan-clear");
+  if (!saved.markdown.trim()) clearPlanAutoTaskContext();
   updatePlanAutoTaskContext(ctx, { markdown: saved.markdown, revision: latestRevision });
   latestArtifactAvailable = Boolean(saved.markdown.trim()) || latestArtifactAvailable;
   syncModeStatus(ctx);
@@ -2066,8 +2066,13 @@ export function registerPlanTools(
   const enterTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: PLAN_ENTER_TOOL,
     label: "Plan Enter",
-    description: "Enter durable Plan mode and load this chat session's current.md draft.",
-    promptSnippet: "Use plan-enter before producing or editing an implementation Plan.",
+    description: "Enter durable Plan mode and load this chat session's current.md draft. Use only when the user explicitly requests Plan mode or a concrete unresolved decision or gated change requires user approval not already given. Internal task planning does not require this tool.",
+    promptSnippet: "Enter Plan mode for an explicit user request for Plan mode or an unresolved approval point, not merely to organize implementation steps. Otherwise stay in Act and implement the authorized scope.",
+    promptGuidelines: [
+      "For agent-initiated entry, before calling plan-enter, state the specific decision or authorization needed and why the current user request does not settle it. Task size, multiple files, investigation, tests, and implementation checklists alone are not approval points.",
+      "Use read-only investigation in Act to resolve technical uncertainty. For one user-owned choice, ask one focused question with ask-user-question; use Plan mode when that choice changes the broader approach, not automatically for every question.",
+      "A clear request to implement a diagnosed fix or proposed display change normally authorizes in-scope edits. Do not seek duplicate approval; preserve existing permission gates, failure stop conditions, and explicit locked constraints. Do not invent data semantics or silently narrow the requested result to avoid asking.",
+    ],
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
@@ -2408,6 +2413,7 @@ function buildPlanEnterNote(): string {
     "plan-confirm defaults to a human choice (execute, modify, discuss, or exit). Only a valid human /plan-auto grant preauthorizes the next confirm and immediate standalone/current execution; plan-update and plan-review never automatically approve.",
     "If the user wants changes: plan-update again, then plan-confirm again.",
     "plan-exit leaves Plan mode without approving; the draft is preserved.",
+    "If the user challenges an unnecessary Plan, acknowledge the mismatch. If their intent is unclear, ask one focused question with ask-user-question about abandoning planning; on an explicit request to abandon it, use plan-exit. Do not force a full draft and confirmation solely because Plan mode was entered. Exit is not approval and does not waive any other gate.",
     "",
     // Restored in full rather than condensed: 896d036f thinned this guidance on the
     // premise that the tool panel was "the authoritative signal" for Plan mode, and
@@ -2458,8 +2464,9 @@ function buildPlanEnterNote(): string {
     "  Markdown only after checking it against the planner role contract, and return incomplete drafts",
     "  to the same planner for targeted revision (except in the lightweight flow, where you may author",
     "  the small draft yourself).",
-    "- Use ask-user-question for every user question. Ask 2-4 related questions per call, grouped by",
-    "  one review branch; do not ask questions as plain assistant text.",
+    "- Use ask-user-question only for genuine unresolved user-owned choices. Ask one focused question",
+    "  when one choice remains; group related questions only when needed. Do not pad a batch or re-ask",
+    "  settled requirements, and do not ask questions as plain assistant text.",
     "- Root performs one contract spot-check covering scope, boundaries, non-goals, requirements, and",
     "  acceptance checks. Send concrete gaps to the same planner as targeted revisions without starting",
     "  another review chain; unresolved risks must stay visible.",
