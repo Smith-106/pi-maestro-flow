@@ -1,5 +1,10 @@
 # v0.33.0 — Session-Scoped Browser & Human Auto Controls
 
+> **Limited verification, explicitly accepted by the user:** 643 targeted tests
+> passed, but fresh Pi install-wrapper/startup checks timed out. Runtime startup
+> acceptance is incomplete. The user authorized tagging and GitHub publication
+> without a passing startup smoke for this release; the timeouts are not passes.
+
 ## Overview
 
 Flow **0.33.0** and Teammate **2.9.0** add session-scoped browser ownership,
@@ -69,7 +74,8 @@ local upstream both reported **0.5.91** at preflight. Pi validation baseline is
 
 ## Source scope
 
-Relative to **v0.32.1**, this release is prepared as **one release commit**,
+Relative to **v0.32.1**, this release has **two release commits** (the feature
+snapshot and this limited-verification publication record),
 covering **82 files**, approximately **5.8k inserted / 0.9k removed lines**.
 The scope includes the user-approved working-tree changes and release metadata.
 
@@ -101,8 +107,10 @@ The scope includes the user-approved working-tree changes and release metadata.
   passed again after the RPC changes. No selected tests were skipped.
 - Immutable package tarballs passed `npm publish --dry-run`; neither bundles
   private Pi host SDK/typebox copies. The Teammate preload is present in its
-  tarball. Registry SHA equality and a fresh-home Pi startup smoke are required
-  before tagging.
+  tarball. Both npm versions are published and their registry SHA-1s match the
+  locked artifacts below. Flow initially returned HTTP 202 (asynchronous
+  processing); registry metadata later exposed the matching version without
+  republishing.
 
 ### Locked artifacts
 
@@ -110,6 +118,23 @@ The scope includes the user-approved working-tree changes and release metadata.
 |---|---:|---:|---|
 | pi-maestro-teammate@2.9.0 | 488 | 1,244,176 / 5,571,343 | `11f316509f2f9495dfeb3ed6aed35a23677b82bf` |
 | pi-maestro-flow@0.33.0 | 1,167 | 3,835,500 / 14,766,288 | `5cbb2c59fe0beadeb75d955cd2e6dc4d4468fef7` |
+
+### Incomplete runtime acceptance
+
+- The fresh-home `pi install npm:pi-maestro-flow@0.33.0` wrapper timed out at
+  **600 seconds**. Its original npm child subsequently recorded **exit 0**;
+  Flow **0.33.0**, Teammate **2.9.0**, and Cockpit **0.24.3** manifests exist in
+  the isolated `HOME` / `USERPROFILE` installation directory. Companion
+  registration exists, but the wrapper did not finish registering Flow itself.
+- The previously unexecuted offline RPC startup check then timed out at
+  **60 seconds**, without a successful state/messages response or tool-registration
+  probe. There is no evidence that this installed suite completed startup.
+  The cause has not been localized; cold loading, harness behavior and a runtime
+  defect have not been distinguished. No timeout was extended and no failing
+  command was relabelled as a passing startup test.
+- After the failure history was reviewed, the user explicitly accepted this
+  limited validation scope and waived the passing-startup prerequisite for this
+  version's tag/GitHub Release. No further smoke retries were performed.
 
 ## Install / upgrade
 
